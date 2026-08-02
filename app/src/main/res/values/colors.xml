@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="timer_text">#FF0E1220</color>
+    <color name="control_tint">#FF27304A</color>
+    <!-- Same roles, darkened so they stay legible on a light background. -->
+    <color name="syn_address">#FF8492A6</color>
+    <color name="syn_flow">#FFC1531B</color>
+    <color name="syn_mnemonic">#FF1E5FBF</color>
+    <color name="syn_register">#FF2E7D32</color>
+    <color name="syn_number">#FFB4531A</color>
+    <color name="syn_comment">#FF8492A6</color>
+    <color name="syn_keyword">#FF7B1FA2</color>
+    <color name="syn_type">#FF9A6B00</color>
+    <color name="syn_call">#FF00707F</color>
+</resources>

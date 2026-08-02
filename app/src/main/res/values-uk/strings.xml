@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="beta_title">Відкрите бета-тестування</string>
+    <string name="beta_message">Цей додаток знаходиться у фазі відкритого бета-тестування.
+        Деякі функції можуть не працювати або працювати некоректно.\n\nБудемо вдячні за
+        будь-який фідбек.\n\n%1$s</string>
+    <string name="beta_ok">Зрозуміло</string>
+    <string name="beta_feedback">Написати</string>
+    <string name="beta_subject">Mint %1$s — фідбек</string>
+    <string name="beta_no_mail">Поштовий застосунок не знайдено. Пишіть на %1$s</string>
+</resources>

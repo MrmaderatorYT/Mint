@@ -1,0 +1,6 @@
+// Mint — on-device APK / native-binary reverse engineering suite.
+// Java only, by project rule: no Kotlin plugin is applied anywhere.
+plugins {
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.android.library) apply false
+}

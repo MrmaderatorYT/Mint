@@ -1,0 +1,33 @@
+<resources>
+    <string name="app_name">Mint</string>
+    <string name="focus">Focus</string>
+    <string name="relax">Relax</string>
+    <string name="atmosphere">Atmosphere</string>
+    <string name="start">Start</string>
+    <string name="pause">Pause</string>
+    <string name="scene_deep">Deep</string>
+    <string name="scene_flow">Flow</string>
+    <string name="scene_calm">Calm</string>
+    <string name="switch_scene">Switch sound scene</string>
+    <string name="open_binary">Open a binary</string>
+    <string name="open_binary_short">Open</string>
+    <string name="empty_hint">Pick an ELF file, a shared library or an APK to analyse. Everything runs on this device.</string>
+    <string name="filter_hint">Filter by name or address</string>
+    <string name="pane_functions">Functions</string>
+    <string name="pane_disasm">Disasm</string>
+    <string name="pane_ir">IR</string>
+    <string name="pane_c">Pseudo-C</string>
+    <string name="pane_graph">CFG</string>
+    <string name="pane_log">Log</string>
+    <string name="cancel_analysis">Stop</string>
+    <string name="licences">Open-source licences</string>
+    <string name="try_example">Open the bundled example</string>
+    <string name="beta_title">Open beta</string>
+    <string name="beta_message">Mint is in open beta. Some features may be missing or
+        behave incorrectly.\n\nAny feedback is welcome — bug reports, files that fail
+        to analyse, or things that are simply confusing.\n\n%1$s</string>
+    <string name="beta_ok">Got it</string>
+    <string name="beta_feedback">Send feedback</string>
+    <string name="beta_subject">Mint %1$s — feedback</string>
+    <string name="beta_no_mail">No email app found. Write to %1$s</string>
+</resources>

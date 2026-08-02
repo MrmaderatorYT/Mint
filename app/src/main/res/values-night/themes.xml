@@ -1,0 +1,12 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Material 3, not AppCompat. The workspace uses M3 components — the bottom
+         navigation bar, the text appearance attributes — and under an AppCompat
+         parent those attributes do not resolve, which fails at inflation time
+         rather than at build time. -->
+    <style name="Base.Theme.Mint" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

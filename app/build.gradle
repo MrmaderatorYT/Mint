@@ -1,0 +1,120 @@
+plugins {
+    alias(libs.plugins.android.application)
+}
+
+def signingProperties = new Properties()
+def signingPropertiesFile = rootProject.file('signing.properties')
+if (signingPropertiesFile.exists()) {
+    signingPropertiesFile.withInputStream { signingProperties.load(it) }
+}
+def signingValue = { String key, String env ->
+    signingProperties.getProperty(key) ?: System.getenv(env)
+}
+def releaseStoreFile = signingValue('storeFile', 'MINT_KEYSTORE_PATH')
+def releaseStorePassword = signingValue('storePassword', 'MINT_KEYSTORE_PASSWORD')
+def releaseKeyAlias = signingValue('keyAlias', 'MINT_KEY_ALIAS')
+def releaseKeyPassword = signingValue('keyPassword', 'MINT_KEY_PASSWORD')
+def hasReleaseSigning = [releaseStoreFile, releaseStorePassword, releaseKeyAlias,
+                         releaseKeyPassword].every { it != null && !it.trim().isEmpty() }
+
+android {
+    namespace 'com.ccs.mint'
+    compileSdk 36
+    ndkVersion libs.versions.ndk.get()
+
+    defaultConfig {
+        applicationId "com.ccs.mint"
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName "0.1 preview"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+
+        // 64-bit only. Play requires a 64-bit build, and a reverse engineering
+        // engine has no reason to carry 32-bit code paths: pointer-width
+        // assumptions in the loaders and the IR are all for 64-bit hosts.
+        // x86_64 is here purely so the app runs on the emulator.
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_static'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'CMakeLists.txt'
+            version libs.versions.cmake.get()
+        }
+    }
+
+    signingConfigs {
+        release {
+            // Credentials are deliberately read from a developer-local file or
+            // CI secrets. A keystore/password must never be committed beside the
+            // APK source.
+            if (hasReleaseSigning) {
+                storeFile rootProject.file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig hasReleaseSigning ? signingConfigs.release : null
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
+                    'proguard-rules.pro'
+        }
+        unsignedRelease {
+            initWith release
+            signingConfig null
+            matchingFallbacks = ['release']
+        }
+    }
+
+    // One APK per ABI would halve the download, but Play delivers per-ABI
+    // splits from a single AAB anyway, so the bundle is the shipping artefact.
+    bundle {
+        abi { enableSplit = true }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildFeatures {
+        viewBinding true
+    }
+}
+
+// Signing is configured via signing.properties or environment variables.
+// The build will fail at the Gradle signing step if credentials are missing.
+
+dependencies {
+    implementation libs.appcompat
+    implementation libs.material
+    implementation libs.activity
+    implementation libs.fragment
+    implementation libs.constraintlayout
+    implementation libs.recyclerview
+    implementation libs.documentfile
+    implementation libs.annotation
+    implementation libs.preference
+    implementation libs.lifecycle.viewmodel
+    implementation libs.lifecycle.livedata
+
+    testImplementation libs.junit
+    androidTestImplementation libs.androidx.junit
+    androidTestImplementation libs.espresso.core
+}

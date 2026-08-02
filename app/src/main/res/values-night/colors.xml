@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="timer_text">#E7ECFF</color>
+    <color name="control_tint">#C9D2FF</color>
+    <!-- Syntax colours. Kept as named roles rather than raw values at the use
+         site so the light and dark sets stay in step: a highlighter that hard-codes
+         one palette is unreadable under the other theme. -->
+    <color name="syn_address">#FF6B7C93</color>
+    <color name="syn_flow">#FFFF8A65</color>
+    <color name="syn_mnemonic">#FF82AAFF</color>
+    <color name="syn_register">#FFC3E88D</color>
+    <color name="syn_number">#FFF78C6C</color>
+    <color name="syn_comment">#FF5F7E97</color>
+    <color name="syn_keyword">#FFC792EA</color>
+    <color name="syn_type">#FFFFCB6B</color>
+    <color name="syn_call">#FF89DDFF</color>
+</resources>

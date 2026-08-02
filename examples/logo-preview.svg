@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="108" height="108">
+<defs><linearGradient id="leaf" x1="24" y1="34" x2="76" y2="88" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#9BF5BE"/><stop offset="1" stop-color="#1FA268"/></linearGradient></defs>
+<rect width="108" height="108" fill="#0A0F14"/>
+<g transform="translate(4.249 -16.998) scale(1.1060)">
+<path d="M 26.97,87.98 L 33.20,79.80" fill="none" stroke="#1FA268" stroke-width="3.0" stroke-linecap="round"/>
+<path d="M 31.08,84.55 L 40.39,85.02 L 44.12,83.52 L 50.85,81.47 L 52.19,78.69 L 57.91,75.65 L 57.79,71.99 L 62.47,68.15 L 61.38,63.74 L 64.84,59.21 L 63.19,54.14 L 64.95,48.85 L 62.32,42.51 L 62.00,42.00 L 53.51,42.43 L 49.98,44.08 L 43.03,45.96 L 41.20,48.37 L 34.82,50.91 L 34.21,54.01 L 28.80,57.29 L 29.23,61.20 L 25.28,65.36 L 26.71,70.26 L 25.15,75.70 L 29.18,83.11 L 30.00,84.00 Z" fill="url(#leaf)"/>
+<path d="M 36.81,75.06 L 40.79,69.84" fill="none" stroke="#0A4930" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M 42.23,65.77 L 42.54,56.05" fill="none" stroke="#0A4930" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M 44.33,67.37 L 53.62,64.49" fill="none" stroke="#0A4930" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M 44.78,53.11 L 54.07,50.23" fill="none" stroke="#0A4930" stroke-width="1.5" stroke-linecap="round"/>
+<path d="M 55.86,61.55 L 56.17,51.83" fill="none" stroke="#0A4930" stroke-width="1.5" stroke-linecap="round"/>
+<rect x="-4.20" y="-2.70" width="8.40" height="5.40" rx="1.51" fill="#0A4930" transform="translate(35.44 76.86) rotate(-52.70)"/>
+<rect x="-4.20" y="-2.70" width="8.40" height="5.40" rx="1.51" fill="#0A4930" transform="translate(42.16 68.04) rotate(-52.70)"/>
+<rect x="-4.20" y="-2.70" width="8.40" height="5.40" rx="1.51" fill="#0A4930" transform="translate(42.61 53.78) rotate(-52.70)"/>
+<rect x="-4.20" y="-2.70" width="8.40" height="5.40" rx="1.51" fill="#0A4930" transform="translate(55.79 63.82) rotate(-52.70)"/>
+<rect x="-4.20" y="-2.70" width="8.40" height="5.40" rx="1.51" fill="#0A4930" transform="translate(56.24 49.56) rotate(-52.70)"/>
+</g></svg>

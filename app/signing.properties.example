@@ -1,0 +1,6 @@
+# Copy this file to ../signing.properties and fill it locally, or use the
+# equivalent MINT_* environment variables in CI. Never commit the real file.
+storeFile=app/keystores/mint-release.jks
+storePassword=
+keyAlias=mint-release
+keyPassword=
