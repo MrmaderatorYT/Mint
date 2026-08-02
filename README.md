@@ -65,27 +65,6 @@ Mapped input -> ELF / ZIP / DEX loader -> function and CFG analysis
 
 The native engine is C++17. Capstone is vendored under `app/third_party/capstone`; Android zlib and SQLite facilities are used where applicable.
 
-## Validation snapshot
-
-The following numbers are a reproducible development snapshot from the Android NDK r28 `libc++_shared.so` binaries. They are coverage indicators, not promises that every input is modeled correctly.
-
-| Metric | AArch64 | x86-64 |
-| --- | ---: | ---: |
-| Discovered functions | 2,884 | 2,858 |
-| Machine instructions | 130,843 | 134,116 |
-| Unmodeled instructions | 134 (0.10%) | 1,292 (0.96%) |
-| IR verifier failures | 0 | 0 |
-
-Additional checks from the same corpus:
-
-- The full x86-64 SSA sweep completed with zero failures in raw IR, normalization, SSA construction, verification, simplification, def-use, liveness, and type passes.
-- All 2,884 AArch64 functions produced pseudo-C, and the combined generated translation unit passed `clang -std=c11 -fsyntax-only`.
-- AArch64 jump-table recovery found six bounded PIC switch tables and represented 170 table-derived CFG edges. Compared with the earlier descent baseline, it exposed 3,202 additional instructions, 644 blocks, and 1,133 CFG edges.
-- A real Mint debug APK crossed the APK -> DEX -> Dalvik IR -> verifier -> pseudo-C pipeline through JNI (6,392 classes and 64,849 methods in that build).
-- A 200-mutation parser/analysis fuzz run completed with zero crashes and zero timeouts.
-
-These results do not imply complete structuring: non-canonical and irreducible regions still fall back to labels and `goto` statements.
-
 ## Requirements
 
 - Android Studio with Android SDK 36.
@@ -199,8 +178,6 @@ app/src/main/cpp/
 └── mint/db/                   SQLite persistence and queries
 
 app/hosttest/                  Native, JNI, feature, performance, and fuzz probes
-playstore/                     Store listing and privacy-policy drafts
-ROADMAP.md                     Detailed implementation roadmap and target scope
 ```
 
 ## Known limitations
@@ -215,7 +192,6 @@ ROADMAP.md                     Detailed implementation roadmap and target scope
 - OLLVM recovery, string recovery, binary detectors, and SQLite project persistence are experimental and need broader real-world corpora.
 - Cancellation is cooperative: a currently executing native stage may finish its bounded operation before stopping.
 
-See [ROADMAP.md](ROADMAP.md) and [ROADMAP_DETAILED.md](ROADMAP_DETAILED.md) for implementation details and remaining work. Roadmap task descriptions define intended scope and may lag behind the exact implementation status; code and tests are authoritative.
 
 ## Privacy and responsible use
 
