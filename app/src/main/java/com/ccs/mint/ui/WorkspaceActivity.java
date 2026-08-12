@@ -32,11 +32,12 @@ import androidx.lifecycle.ViewModelProvider;
 import com.ccs.mint.R;
 import com.ccs.mint.core.MintSession;
 import com.ccs.mint.ui.components.GraphView;
-import com.google.android.material.bottomnavigation.BottomNavigationView;
+import com.google.android.material.chip.Chip;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
+import com.google.android.material.tabs.TabLayout;
 
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
@@ -63,6 +64,24 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private static final int MAX_LISTING_PAGES = 16384;
     private static final int OPEN_REQUEST = 1;
 
+    /**
+     * How much of the image the program-wide listing will render before stopping.
+     * A large library holds hundreds of thousands of instructions, and formatting
+     * every one costs seconds and hundreds of megabytes to show a view nobody
+     * scrolls to the end of. The Functions pane is how you reach a specific place.
+     */
+    private static final int PROGRAM_LISTING_LIMIT = 20_000;
+
+    /**
+     * Largest call graph that gets drawn. Beyond this the highest-degree functions
+     * are kept and the rest dropped — with a line in the log saying so, because a
+     * silently truncated graph reads as a complete one.
+     */
+    private static final int CALL_GRAPH_LIMIT = 6_000;
+
+    /** How many of the biggest functions the program overview lists. */
+    private static final int OVERVIEW_FUNCTIONS = 12;
+
     private ExecutorService worker;
     private WorkspaceViewModel model;
 
@@ -83,13 +102,14 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private View textScroll;
     private GraphView graph;
     private View cancel;
-    private BottomNavigationView nav;
+    private TabLayout nav;
+    private Chip selection;
 
     private final LineAdapter adapter = new LineAdapter();
     private Highlighter highlighter;
     private androidx.appcompat.app.AlertDialog betaNotice;
     private int dimColour;
-    private int pane = R.id.pane_functions;
+    private int pane = Pane.FUNCTIONS;
     private long listingAddress;
     private long pendingAddress;
     private NavigationHistory history;
@@ -150,6 +170,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
         graph = findViewById(R.id.graph);
         cancel = findViewById(R.id.cancel_analysis);
         nav = findViewById(R.id.nav);
+        selection = findViewById(R.id.selection);
+        if (!Pane.valid(pane)) pane = Pane.FUNCTIONS;
 
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.root), (view, insets) -> {
             Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars()
@@ -174,11 +196,27 @@ public final class WorkspaceActivity extends AppCompatActivity {
             @Override public void afterTextChanged(Editable s) { applyFilter(); }
         });
 
-        nav.setOnItemSelectedListener(item -> {
-            pane = item.getItemId();
-            model.rememberPane(pane);
-            showPane();
-            return true;
+        for (int title : Pane.TITLES) nav.addTab(nav.newTab().setText(title));
+        nav.addOnTabSelectedListener(new TabLayout.OnTabSelectedListener() {
+            @Override public void onTabSelected(@NonNull TabLayout.Tab tab) {
+                pane = tab.getPosition();
+                model.rememberPane(pane);
+                showPane();
+            }
+
+            @Override public void onTabUnselected(@NonNull TabLayout.Tab tab) {}
+
+            // Tapping the current tab reloads it. The panes are views over analysis
+            // that the rest of the app can change underneath them — clearing the
+            // selection, for one — so a re-tap has to mean something.
+            @Override public void onTabReselected(@NonNull TabLayout.Tab tab) { showPane(); }
+        });
+
+        selection.setCloseIconContentDescription(getString(R.string.clear_function));
+        selection.setOnCloseIconClickListener(v -> clearSelection());
+        selection.setOnClickListener(v -> selectPane(Pane.DISASM));
+        graph.setOnNodeClickListener(node -> {
+            if (node.address >= 0) jumpTo(node.address);
         });
 
         model.state().observe(this, current -> {
@@ -194,10 +232,10 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 onOpened(current.name);
             } else if (current.phase == WorkspaceViewModel.Phase.FAILED) {
                 appendLog("failed: " + current.message);
-                nav.setSelectedItemId(R.id.pane_log);
+                selectPane(Pane.LOG);
             } else if (current.phase == WorkspaceViewModel.Phase.CANCELED) {
                 appendLog(current.message == null ? "analysis cancelled" : current.message);
-                if (session == null) nav.setSelectedItemId(R.id.pane_log);
+                if (session == null) selectPane(Pane.LOG);
             }
         });
 
@@ -263,7 +301,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 busy(false);
                 if (error != null) {
                     appendLog("could not unpack the example: " + error);
-                    nav.setSelectedItemId(R.id.pane_log);
+                    selectPane(Pane.LOG);
                     return;
                 }
                 open(Uri.fromFile(target));
@@ -318,7 +356,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
             // A device with no mail client still needs the address, so it goes to the
             // log pane where it can be read and copied.
             appendLog(getString(R.string.beta_no_mail, FEEDBACK_EMAIL));
-            nav.setSelectedItemId(R.id.pane_log);
+            selectPane(Pane.LOG);
         }
     }
 
@@ -396,7 +434,9 @@ public final class WorkspaceActivity extends AppCompatActivity {
         functions.clear();
         visible.clear();
         adapter.submit(new ArrayList<>());
+        graph.setNodes(new ArrayList<>());
         history.clear();
+        updateSelectionChip();
         model.rememberWorkspace(0, 0, pane);
         model.open(getContentResolver(), uri);
     }
@@ -460,40 +500,103 @@ public final class WorkspaceActivity extends AppCompatActivity {
                         if (listingAddress == 0) listingAddress = restored.entry;
                     }
                 }
-                nav.setSelectedItemId(pane);
+                updateSelectionChip();
+                selectPane(pane);
             });
         });
     }
 
     // -------------------------------------------------------------------- panes
 
-    private void showPane() {
-        boolean isList = pane == R.id.pane_functions || pane == R.id.pane_disasm;
-        list.setVisibility(isList ? View.VISIBLE : View.GONE);
-        textScroll.setVisibility(isList || pane == R.id.pane_graph ? View.GONE : View.VISIBLE);
-        graph.setVisibility(pane == R.id.pane_graph ? View.VISIBLE : View.GONE);
-        filter.setVisibility(pane == R.id.pane_functions ? View.VISIBLE : View.GONE);
+    /**
+     * Moves to a pane. Selecting the tab is what normally drives this, so the
+     * already-selected case has to be handled by hand: {@code Tab.select()} is a
+     * no-op when the tab is current, and callers use this to mean "show me that
+     * pane's content now", not "change tabs if it happens to be a different one".
+     */
+    private void selectPane(int target) {
+        if (!Pane.valid(target)) return;
+        final TabLayout.Tab tab = nav.getTabAt(target);
+        if (tab == null) return;
+        if (nav.getSelectedTabPosition() == target) {
+            pane = target;
+            model.rememberPane(pane);
+            showPane();
+        } else {
+            tab.select();
+        }
+    }
 
-        if (pane == R.id.pane_log) {
+    /**
+     * Leaves the function and goes back to the program.
+     *
+     * <p>Without this the only way out of a function is to pick a different one, so
+     * the whole-program views become unreachable the moment anything is opened.
+     */
+    private void clearSelection() {
+        selected = null;
+        pendingAddress = 0;
+        listingAddress = 0;
+        model.rememberWorkspace(0, 0, pane);
+        history.clear();
+        updateSelectionChip();
+        showPane();
+    }
+
+    private void updateSelectionChip() {
+        if (selected == null) {
+            selection.setVisibility(View.GONE);
+            subtitle.setText(functions.isEmpty() ? "" : String.format(Locale.US,
+                    "%,d functions", functions.size()));
+        } else {
+            selection.setVisibility(View.VISIBLE);
+            selection.setText(getString(R.string.viewing_function, selected.label()));
+        }
+    }
+
+    /**
+     * Renders the pane.
+     *
+     * <p>Every pane has a whole-program form and a per-function form, and which one
+     * runs is decided by whether anything is selected. It used to say "Pick a
+     * function first" instead, which is a dead end: the program has plenty to show
+     * before a function is chosen, and refusing to show it makes the app look
+     * broken rather than unselected.
+     */
+    private void showPane() {
+        final boolean isList = pane == Pane.FUNCTIONS || pane == Pane.DISASM;
+        list.setVisibility(isList ? View.VISIBLE : View.GONE);
+        textScroll.setVisibility(isList || pane == Pane.GRAPH ? View.GONE : View.VISIBLE);
+        graph.setVisibility(pane == Pane.GRAPH ? View.VISIBLE : View.GONE);
+        filter.setVisibility(pane == Pane.FUNCTIONS ? View.VISIBLE : View.GONE);
+
+        if (pane == Pane.LOG) {
             text.setText(log.isEmpty() ? "Nothing logged yet." : log);
             return;
         }
         if (session == null) {
             adapter.submit(new ArrayList<>());
+            graph.setNodes(new ArrayList<>());
             text.setText("");
             return;
         }
-        if (pane == R.id.pane_functions) {
-            applyFilter();
-        } else if (pane == R.id.pane_graph) {
-            loadGraph(selected);
-        } else if (selected == null) {
-            adapter.submit(new ArrayList<>());
-            text.setText("Pick a function first.");
-        } else if (pane == R.id.pane_disasm) {
-            loadListing(selected);
-        } else {
-            loadText(selected, pane == R.id.pane_ir);
+        switch (pane) {
+            case Pane.FUNCTIONS:
+                applyFilter();
+                break;
+            case Pane.DISASM:
+                loadListing(selected);
+                break;
+            case Pane.GRAPH:
+                if (selected == null) loadCallGraph(); else loadGraph(selected);
+                break;
+            case Pane.IR:
+            case Pane.C:
+                if (selected == null) loadProgramOverview();
+                else loadText(selected, pane == Pane.IR);
+                break;
+            default:
+                break;
         }
     }
 
@@ -517,9 +620,35 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 : String.format(Locale.US, "%,d of %,d", visible.size(), functions.size()));
     }
 
-    private void loadListing(@NonNull FunctionRow function) {
+    /**
+     * Disassembles into the list pane: one function, or the whole image when
+     * {@code function} is null.
+     *
+     * <p>The two differ only in where they stop. A function stops at its own end; the
+     * program stops at {@link #PROGRAM_LISTING_LIMIT} instructions, because a large
+     * library holds far more than anyone scrolls through and formatting all of them
+     * costs seconds before the first line appears.
+     */
+    private void loadListing(@Nullable FunctionRow function) {
         busy(true);
-        MintSession active = session;
+        final MintSession active = session;
+        final long start;
+        final long stop;
+        final int cap;
+        if (function == null) {
+            // listingAddress survives a jump out of a function, so a program listing
+            // resumes where the user was rather than at the top of the image.
+            start = Math.max(0, listingAddress);
+            stop = Long.MAX_VALUE;
+            cap = PROGRAM_LISTING_LIMIT;
+        } else {
+            final long end = function.entry + Math.max(1, function.size);
+            start = listingAddress >= function.entry && listingAddress < end
+                    ? listingAddress : function.entry;
+            stop = end;
+            cap = Integer.MAX_VALUE;
+        }
+
         worker.execute(() -> {
             final List<Line> lines = new ArrayList<>();
             try {
@@ -530,9 +659,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 long[] target = new long[LISTING_LIMIT];
                 String[] body = new String[LISTING_LIMIT];
                 String[] comment = new String[LISTING_LIMIT];
-                long cursor = listingAddress >= function.entry
-                        && listingAddress < function.entry + Math.max(1, function.size)
-                        ? listingAddress : function.entry;
+                long cursor = start;
                 boolean done = false;
                 boolean complete = false;
                 for (int page = 0; page < MAX_LISTING_PAGES && !done; ++page) {
@@ -544,7 +671,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     }
                     long last = cursor;
                     for (int i = 0; i < got; i++) {
-                        if (address[i] >= function.entry + Math.max(1, function.size)) {
+                        if (address[i] >= stop || lines.size() >= cap) {
                             done = true;
                             break;
                         }
@@ -557,12 +684,16 @@ public final class WorkspaceActivity extends AppCompatActivity {
                         last = address[i] + Math.max(1, size[i]);
                     }
                     if (done || got < LISTING_LIMIT || last <= cursor) {
-                        complete = true;
+                        complete = complete || lines.size() < cap;
                         break;
                     }
                     cursor = last;
                 }
-                if (!complete) {
+                if (lines.size() >= cap) {
+                    lines.add(new Line(String.format(Locale.US,
+                            "listing stops after %,d instructions — open a function to see"
+                                    + " all of it", cap), null, -1, null));
+                } else if (!complete) {
                     lines.add(new Line("listing truncated: page safety limit reached", null,
                             -1, null));
                 }
@@ -575,6 +706,162 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 adapter.submit(lines);
             });
         });
+    }
+
+    /**
+     * What the IR and pseudo-C panes show when nothing is selected: the image, the
+     * analysis counters, the biggest functions, and whatever the loader complained
+     * about.
+     *
+     * <p>Not a placeholder. These are the numbers that say whether the analysis is
+     * worth trusting — a thousand undecodable sites or a section table that
+     * disagrees with the program headers means the output below is a partial view of
+     * something that has been through a protector.
+     */
+    private void loadProgramOverview() {
+        adapter.submit(new ArrayList<>());
+        busy(true);
+        final MintSession active = session;
+        final List<FunctionRow> snapshot = new ArrayList<>(functions);
+        worker.execute(() -> {
+            final StringBuilder out = new StringBuilder();
+            try {
+                if (active == null) return;
+                out.append(active.imageSummary().trim()).append("\n\n");
+
+                final long[] stats = new long[MintSession.STAT_COUNT];
+                active.stats(stats);
+                counter(out, "instructions", stats[MintSession.STAT_INSTRUCTIONS]);
+                counter(out, "functions", stats[MintSession.STAT_FUNCTIONS]);
+                counter(out, "basic blocks", stats[MintSession.STAT_BLOCKS]);
+                counter(out, "CFG edges", stats[MintSession.STAT_EDGES]);
+                counter(out, "indirect jumps", stats[MintSession.STAT_INDIRECT_JUMPS]);
+                counter(out, "undecodable", stats[MintSession.STAT_UNDECODABLE]);
+                counter(out, "incomplete functions",
+                        stats[MintSession.STAT_INCOMPLETE_FUNCTIONS]);
+                counter(out, "found by sweep", stats[MintSession.STAT_SWEEP_FUNCTIONS]);
+
+                if (!snapshot.isEmpty()) {
+                    Collections.sort(snapshot,
+                            (a, b) -> Integer.compare(b.instructions, a.instructions));
+                    out.append("\n/* largest functions */\n");
+                    final int shown = Math.min(OVERVIEW_FUNCTIONS, snapshot.size());
+                    for (int i = 0; i < shown; i++) {
+                        final FunctionRow row = snapshot.get(i);
+                        out.append(String.format(Locale.US, "  %08x  %-38s %,7d insn%n",
+                                row.entry, row.label(), row.instructions));
+                    }
+                }
+
+                final String warnings = active.warnings();
+                if (warnings != null && !warnings.trim().isEmpty()) {
+                    out.append("\n/* loader warnings */\n");
+                    for (String line : warnings.trim().split("\\R")) {
+                        out.append("  ").append(line).append('\n');
+                    }
+                }
+                out.append('\n').append(getString(R.string.overview_hint));
+            } catch (RuntimeException e) {
+                out.append("overview failed: ").append(e.getMessage());
+            }
+            final CharSequence result = highlighter.code(out.toString());
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || active != session) return;
+                busy(false);
+                text.setText(result);
+            });
+        });
+    }
+
+    private static void counter(StringBuilder out, String label, long value) {
+        out.append(String.format(Locale.US, "%-22s %,12d%n", label, value));
+    }
+
+    /**
+     * The program's call graph: one node per function, one edge per direct call.
+     *
+     * <p>Capped, and loudly. Past a few thousand nodes the layout is slower than the
+     * view is useful, so the highest-degree functions are kept — those are the ones
+     * a call graph is read for — and the log says how many were dropped. A graph
+     * that quietly shows two thirds of a program is worse than one that admits it.
+     */
+    private void loadCallGraph() {
+        busy(true);
+        final MintSession active = session;
+        final List<FunctionRow> snapshot = new ArrayList<>(functions);
+        worker.execute(() -> {
+            final List<GraphView.Node> nodes = new ArrayList<>();
+            String failure = null;
+            int dropped = 0;
+            try {
+                if (active == null) return;
+                for (String row : active.callGraph().split("\\R")) {
+                    final String[] fields = row.trim().split("\\s+");
+                    if (fields.length < 2) continue;
+                    final int index = Integer.parseInt(fields[0]);
+                    final long entry = Long.parseLong(fields[1]);
+                    final GraphView.Node node = new GraphView.Node(index,
+                            index < snapshot.size() ? snapshot.get(index).label()
+                                    : String.format(Locale.US, "sub_%x", entry));
+                    node.address = entry;
+                    for (int i = 2; i < fields.length; i++) {
+                        node.successors.add(Integer.parseInt(fields[i]));
+                    }
+                    nodes.add(node);
+                }
+                dropped = capCallGraph(nodes);
+            } catch (RuntimeException e) {
+                failure = "call graph failed: " + e.getMessage();
+            }
+            final String error = failure;
+            final int removed = dropped;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed() || active != session) return;
+                busy(false);
+                appendLog(error);
+                if (removed > 0) {
+                    appendLog(String.format(Locale.US,
+                            "call graph capped at %,d functions; %,d with the fewest calls"
+                                    + " were left out", CALL_GRAPH_LIMIT, removed));
+                }
+                if (nodes.isEmpty() && error == null) {
+                    appendLog(getString(R.string.call_graph_empty));
+                }
+                graph.setNodes(nodes);
+            });
+        });
+    }
+
+    /**
+     * Trims the graph to {@link #CALL_GRAPH_LIMIT} nodes, keeping the best connected
+     * ones, and returns how many were removed. Edges into removed nodes go with
+     * them, so what is left is a real subgraph rather than one with dangling arrows.
+     */
+    private static int capCallGraph(List<GraphView.Node> nodes) {
+        if (nodes.size() <= CALL_GRAPH_LIMIT) return 0;
+
+        final java.util.Map<Integer, Integer> degree = new java.util.HashMap<>();
+        for (GraphView.Node node : nodes) {
+            degree.merge(node.id, node.successors.size(), Integer::sum);
+            for (Integer target : node.successors) degree.merge(target, 1, Integer::sum);
+        }
+        final List<GraphView.Node> ranked = new ArrayList<>(nodes);
+        Collections.sort(ranked, (a, b) -> Integer.compare(
+                degree.getOrDefault(b.id, 0), degree.getOrDefault(a.id, 0)));
+
+        final java.util.Set<Integer> keep = new java.util.HashSet<>();
+        for (int i = 0; i < CALL_GRAPH_LIMIT; i++) keep.add(ranked.get(i).id);
+
+        final int removed = nodes.size() - keep.size();
+        for (java.util.Iterator<GraphView.Node> it = nodes.iterator(); it.hasNext(); ) {
+            final GraphView.Node node = it.next();
+            if (!keep.contains(node.id)) {
+                it.remove();
+                continue;
+            }
+            node.successors.removeIf(target -> !keep.contains(target));
+        }
+        return removed;
     }
 
     private void loadGraph(@Nullable FunctionRow function) {
@@ -598,8 +885,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     long end = Long.parseLong(fields[2]);
                     GraphView.Node node = new GraphView.Node(id,
                             String.format(Locale.US, "B%d  %x-%x", id, start, end));
-                    node.x = (id % 2) * 205f + 12f;
-                    node.y = (id / 2) * 92f + 12f;
+                    node.address = start;
                     for (int i = 3; i < fields.length; ++i) {
                         node.successors.add(Integer.parseInt(fields[i]));
                     }
@@ -647,8 +933,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
         pendingAddress = row.entry;
         model.rememberSelection(row.entry, listingAddress);
         history.push(row.entry);
-        subtitle.setText(row.label());
-        nav.setSelectedItemId(R.id.pane_disasm);
+        updateSelectionChip();
+        selectPane(Pane.DISASM);
     }
 
     private FunctionRow findFunction(long address) {
@@ -670,14 +956,21 @@ public final class WorkspaceActivity extends AppCompatActivity {
         pendingAddress = row.entry;
         model.rememberSelection(row.entry, listingAddress);
         history.push(address);
-        subtitle.setText(row.label());
-        nav.setSelectedItemId(R.id.pane_disasm);
+        updateSelectionChip();
+        selectPane(Pane.DISASM);
     }
 
     @Override
     public void onBackPressed() {
         if (history.canGoBack()) {
             jumpTo(history.back());
+            return;
+        }
+        // Out of history but still inside a function: back should surface the whole
+        // program before it leaves the app. Otherwise following a call chain to its
+        // end and pressing back closes Mint, which is never what was meant.
+        if (selected != null) {
+            clearSelection();
             return;
         }
         super.onBackPressed();
@@ -700,7 +993,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private void appendLog(@Nullable String message) {
         if (message == null || message.isEmpty()) return;
         log = log.isEmpty() ? message : log + "\n" + message;
-        if (pane == R.id.pane_log) text.setText(log);
+        if (pane == Pane.LOG) text.setText(log);
     }
 
     // ------------------------------------------------------------------ adapter

@@ -282,6 +282,15 @@ std::string SsaFunction::toText() const {
                 out += slot == 0 ? " " : ", ";
                 out += valueText(insn.use[slot]);
             }
+            // Without this a vector op prints as "vadd v1, v2" and the reader has
+            // no way to tell a byte add from a word add.
+            if (insn.laneWidth != 0) {
+                out += "  ." + std::to_string(16 / insn.laneWidth) +
+                       (insn.laneWidth == 1 ? "b"
+                                            : insn.laneWidth == 2
+                                                  ? "h"
+                                                  : insn.laneWidth == 4 ? "s" : "d");
+            }
             if (insn.op == MintOp::kIntrinsic) {
                 out += " #" + std::to_string(insn.intrinsicId);
             }

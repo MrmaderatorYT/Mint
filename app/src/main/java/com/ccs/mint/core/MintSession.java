@@ -180,6 +180,21 @@ public final class MintSession implements Closeable {
     }
 
     /**
+     * The program's call graph as {@code index entry calleeIndex...} rows, one per
+     * function, where every index is a position in the list {@link #functions} pages
+     * out. Direct calls only — an indirect call is left out rather than guessed.
+     *
+     * <p>Whole-program, so it is a single crossing rather than a paged one: the text
+     * is a few hundred kilobytes for a large library, which is cheaper to move once
+     * than to assemble from thousands of per-function queries.
+     */
+    @NonNull
+    public String callGraph() {
+        checkOpen();
+        return nativeCallGraph(handle);
+    }
+
+    /**
      * Structural problems found while loading and analysing, newline-separated.
      * Worth showing: a library whose section table disagrees with its program
      * headers has usually been through a protector.
@@ -241,6 +256,8 @@ public final class MintSession implements Closeable {
     private static native String nativeDecompiledC(long handle, long address);
 
     private static native String nativeFunctionCfg(long handle, long address);
+
+    private static native String nativeCallGraph(long handle);
 
     private static native String nativeWarnings(long handle);
 }

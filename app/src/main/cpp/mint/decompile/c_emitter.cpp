@@ -271,6 +271,25 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
     }
     out << ") {\n";
 
+    // The recovered layouts, as a comment ahead of the body.
+    //
+    // A comment and not a struct type with p->field accesses in the code: the field
+    // expression would have to be re-materialised at each use, and a load is not
+    // pure — an intervening store to the same object makes the second rendering a
+    // different value than the first. Getting that wrong changes what the C says
+    // the program does, silently. Stated as a layout, it is a hypothesis the reader
+    // applies; woven into the expressions, it would be an assertion.
+    for (const RecoveredStruct& layout : types.structs) {
+        if (layout.fields.size() < 2) continue;
+        out << "    /* layout via " << expr.value(layout.base) << ":";
+        for (const RecoveredField& field : layout.fields) {
+            out << "\n     *   +0x" << std::hex << field.offset << std::dec << "  "
+                << typeName(field.type.kind, field.width == 0 ? u8(8) : field.width)
+                << "  field_" << std::hex << field.offset << std::dec;
+        }
+        out << "\n     */\n";
+    }
+
     // Locals: everything that gets a statement, every phi result, and every incoming
     // value that is not a parameter — the last of those are reads of caller state the
     // convention does not define, so they are declared and left uninitialised on

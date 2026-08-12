@@ -459,4 +459,11 @@ Java_com_ccs_mint_core_MintSession_nativeFunctionCfg(JNIEnv* env, jclass, jlong 
     return mint::jni::toJava(env, session->cfgTextFor(static_cast<Address>(address)));
 }
 
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeCallGraph(JNIEnv* env, jclass, jlong handle) {
+    Session* session = asSession(handle);
+    if (session == nullptr) return mint::jni::toJava(env, "");
+    return mint::jni::toJava(env, session->callGraphText());
+}
+
 }  // extern "C"

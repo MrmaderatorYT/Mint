@@ -129,6 +129,55 @@ Status executeIr(const IrFunction& function, InterpState* state,
                 case MintOp::kEqual: case MintOp::kNotEqual: case MintOp::kLessU: case MintOp::kLessS:
                 case MintOp::kLessEqU: case MintOp::kLessEqS:
                     value = binary(insn.op, a, b, insn.dest.size); break;
+                case MintOp::kDivWideU: case MintOp::kDivWideS:
+                case MintOp::kRemWideU: case MintOp::kRemWideS: {
+                    // Dividend is (b:a), one machine width per half, so the working
+                    // type is twice the operand width and only __int128 covers the
+                    // 64-bit case.
+                    if (!a.concreteLike() || !b.concreteLike() || !c.concreteLike()) {
+                        value = unknownLike(insn.dest);
+                        break;
+                    }
+                    const u8 width = insn.dest.size;
+                    const u64 m = maskFor(width);
+                    const u64 divisor = c.bits & m;
+                    if (divisor == 0) { value = unknownLike(insn.dest); break; }
+                    const unsigned __int128 raw =
+                        (static_cast<unsigned __int128>(b.bits & m) << (width * 8)) |
+                        static_cast<unsigned __int128>(a.bits & m);
+                    const bool wantRemainder = insn.op == MintOp::kRemWideU ||
+                                               insn.op == MintOp::kRemWideS;
+                    if (insn.op == MintOp::kDivWideS || insn.op == MintOp::kRemWideS) {
+                        const unsigned bits = static_cast<unsigned>(width) * 16;
+                        __int128 dividend = static_cast<__int128>(raw);
+                        if (bits < 128) {
+                            const unsigned __int128 one = 1;
+                            const unsigned __int128 span = (one << bits) - 1;
+                            dividend = (raw & (one << (bits - 1)))
+                                           ? static_cast<__int128>(raw | ~span)
+                                           : static_cast<__int128>(raw & span);
+                        }
+                        const u64 sign = u64(1) << (width * 8 - 1);
+                        const i64 signedDivisor = (divisor & sign)
+                                                      ? static_cast<i64>(divisor | ~m)
+                                                      : static_cast<i64>(divisor);
+                        // INT_MIN / -1 has no representable quotient and is undefined
+                        // in C++, which is exactly the #DE case on hardware.
+                        if (signedDivisor == -1 &&
+                            dividend == (static_cast<__int128>(1) << 127)) {
+                            value = unknownLike(insn.dest);
+                            break;
+                        }
+                        const __int128 result = wantRemainder ? dividend % signedDivisor
+                                                             : dividend / signedDivisor;
+                        value = InterpValue::concrete(static_cast<u64>(result) & m, width);
+                    } else {
+                        const unsigned __int128 result =
+                            wantRemainder ? raw % divisor : raw / divisor;
+                        value = InterpValue::concrete(static_cast<u64>(result) & m, width);
+                    }
+                    break;
+                }
                 case MintOp::kSelect: {
                     bool known = false; const bool take = interpBool(a, &known);
                     value = known ? (take ? b : c) : unknownLike(insn.dest); break;

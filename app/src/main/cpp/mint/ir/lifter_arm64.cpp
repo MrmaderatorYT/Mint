@@ -21,6 +21,17 @@
 namespace mint {
 namespace {
 
+/// Bytes per lane from a Capstone arrangement specifier.
+///
+/// The low byte holds the element width in bits — B is 8, H 16, S 32, D 64 — and
+/// the high byte the lane count. Zero means the operand carried no arrangement,
+/// which is not the same as a byte arrangement and must not be defaulted to one.
+u8 laneBytesFrom(unsigned arrangement) {
+    const unsigned bits = arrangement & 0xff;
+    return bits == 0 ? 0 : static_cast<u8>(bits / 8);
+}
+
+
 class Arm64Lifter {
 public:
     Arm64Lifter(const cs_insn& insn, IrBuilder& builder)
@@ -215,6 +226,8 @@ private:
             const Varnode node = operand.type == AARCH64_OP_REG
                                      ? registerFromCapstone(Arch::kAArch64, operand.reg)
                                      : Varnode::invalid();
+            // See laneBytesFrom: the low byte of an arrangement is the element
+            // width in bits.
             // Capstone uses a 16-byte Q register for both `vN.4s` and `qN`.
             // Arrangement values with a lane count have bits above the scalar
             // element width, so they are vector operands even when the register
@@ -438,7 +451,13 @@ private:
                                          : (mnemonic == "sub" || mnemonic == "fsub"
                                                 ? MintOp::kVectorSub
                                                                : MintOp::kVectorMul);
-            writeVectorReg(op(0).reg, b_.binary(operation, a, c));
+            // `add v0.4s` and `add v0.16b` are different arithmetic and used to lift
+            // identically. Without an arrangement there is nothing to record, so the
+            // instruction stays an intrinsic rather than becoming a vector op that
+            // does not say what it operates on.
+            const u8 lane = laneBytesFrom(op(0).vas);
+            if (lane == 0) return b_.emitIntrinsic(u16(insn_.id));
+            writeVectorReg(op(0).reg, b_.vector(operation, lane, a, c));
             return;
         }
         if (mnemonic == "dup" || mnemonic == "movi") {

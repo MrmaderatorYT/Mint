@@ -27,6 +27,17 @@ struct IrInsn {
     /// was not modelled instead of just admitting defeat.
     u16 intrinsicId = 0;
 
+    /// Bytes per lane for the vector ops; 0 everywhere else.
+    ///
+    /// Without it a vector operation is only half-specified: `add v0.4s, ...` and
+    /// `add v0.16b, ...` are different arithmetic — the second does not carry
+    /// between bytes — and both used to lift to the same kVectorAdd. The IR could
+    /// not say which, so neither could anything reading it.
+    ///
+    /// A field rather than an opcode per width, because the alternative is four
+    /// opcodes for every vector operation and a table that has to grow in lockstep.
+    u8 laneWidth = 0;
+
     const Varnode& source(unsigned index) const {
         switch (index) {
             case 0: return a;
@@ -124,7 +135,22 @@ public:
     /// Convenience wrappers that read at the call site the way the operation reads
     /// in the machine listing.
     Varnode binary(MintOp op, const Varnode& a, const Varnode& b);
+    /// For the three-source ops — currently the wide divisions, whose dividend
+    /// arrives as a pair of halves.
+    Varnode ternary(MintOp op, const Varnode& a, const Varnode& b, const Varnode& c);
     Varnode unary(MintOp op, const Varnode& a, u8 destSize);
+
+    /// A vector op, tagged with its lane width in bytes.
+    ///
+    /// Separate from binary()/ternary() so the lane width cannot be forgotten: a
+    /// vector op emitted without one is the bug this field exists to prevent, and
+    /// a distinct entry point makes that a compile error rather than a default.
+    Varnode vector(MintOp op, u8 laneWidth, const Varnode& a,
+                   const Varnode& b = Varnode::invalid(),
+                   const Varnode& c = Varnode::invalid(), u8 destSize = 16);
+    /// kVectorStore and friends, which have no destination.
+    void vectorVoid(MintOp op, u8 laneWidth, const Varnode& a, const Varnode& b);
+
     void assign(const Varnode& dest, const Varnode& value);
     /// Widens or narrows `value` to `size`, emitting nothing when it already fits.
     Varnode resize(const Varnode& value, u8 size, bool signExtend);

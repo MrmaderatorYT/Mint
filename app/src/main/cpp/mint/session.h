@@ -80,6 +80,18 @@ public:
     /// graph view. One line is `id start end successor...`.
     std::string cfgTextFor(Address address);
 
+    /// The whole program's call graph, in the same line-oriented shape:
+    /// `index entry callee...`, where `index` and each `callee` are positions in
+    /// the function list the caller already holds.
+    ///
+    /// Indices rather than names or addresses because the UI has paged the function
+    /// table across already; sending names again would put a megabyte of duplicated
+    /// strings through JNI to say something the caller can look up locally.
+    ///
+    /// Built from `Function::callees`, so it covers direct calls only. An indirect
+    /// call is absent from the graph rather than guessed at.
+    std::string callGraphText() const;
+
     /// Requests cooperative cancellation. The mapped file and native object
     /// remain alive until the worker has returned, so cancellation cannot race
     /// a JNI call with Session destruction.

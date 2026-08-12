@@ -139,11 +139,30 @@ Status recoverTypes(const SsaFunction& function, TypeRecovery* out) {
             case MintOp::kVectorAdd:
             case MintOp::kVectorSub:
             case MintOp::kVectorMul:
+            case MintOp::kVectorMulWideU:
+            case MintOp::kVectorMulWideS:
+            case MintOp::kVectorCmpEq:
+            case MintOp::kVectorCmpGtS:
+            case MintOp::kVectorMinU:
+            case MintOp::kVectorMinS:
+            case MintOp::kVectorMaxU:
+            case MintOp::kVectorMaxS:
+            case MintOp::kVectorShl:
+            case MintOp::kVectorShrU:
+            case MintOp::kVectorShrS:
+            case MintOp::kVectorPackS:
+            case MintOp::kVectorPackU:
+            case MintOp::kVectorExtendS:
+            case MintOp::kVectorExtendU:
+            case MintOp::kVectorInsert:
+            case MintOp::kVectorSelect:
             case MintOp::kVectorShuffle:
+            case MintOp::kVectorPermute:
             case MintOp::kVectorSplat:
             case MintOp::kVectorLoad:
-                // The lane scalar type is carried by the arrangement operand in
-                // the machine instruction; MintIR keeps the aggregate width here.
+                // The aggregate is 16 bytes; how it divides into lanes now lives on
+                // the instruction as laneWidth rather than only in the machine
+                // instruction's arrangement operand.
                 dest.width = 16;
                 break;
             case MintOp::kStore:
@@ -177,23 +196,60 @@ Status recoverTypes(const SsaFunction& function, TypeRecovery* out) {
             }
         }
 
-        if (insn.op == MintOp::kLoad && valid(function, insn.use[0])) {
-            const SsaId address = insn.use[0];
-            const SsaValue& addressValue = function.values[address];
-            if (addressValue.def == SsaDef::kInsn && addressValue.defIndex < function.insns.size()) {
-                const SsaInsn& addressInsn = function.insns[addressValue.defIndex];
-                if ((addressInsn.op == MintOp::kAdd || addressInsn.op == MintOp::kSub) &&
-                    valid(function, addressInsn.use[0]) && valid(function, addressInsn.use[1])) {
-                    SsaId base = addressInsn.use[0];
-                    SsaId constant = addressInsn.use[1];
-                    if (function.values[base].storage.space == Space::kConstant) {
-                        std::swap(base, constant);
+        // Every access through a pointer is a field observation, whichever way the
+        // data moves. Collecting only loads, as this used to, means a structure
+        // written but never read looks like it has no fields at all — and an output
+        // parameter is exactly that shape.
+        if (insn.op == MintOp::kLoad || insn.op == MintOp::kStore) {
+            // For a load the field's width is the loaded value's; for a store it is
+            // the stored value's, since the destination is memory.
+            const SsaId accessed = insn.op == MintOp::kLoad ? insn.dest : insn.use[1];
+            if (valid(function, insn.use[0]) && valid(function, accessed)) {
+                const SsaId address = insn.use[0];
+                const SsaValue& addressValue = function.values[address];
+                SsaId base = address;
+                u64 offset = 0;
+                bool usable = true;
+                if (addressValue.def == SsaDef::kInsn &&
+                    addressValue.defIndex < function.insns.size()) {
+                    const SsaInsn& addressInsn = function.insns[addressValue.defIndex];
+                    // kAdd only. A subtraction from a base is a frame slot below a
+                    // pointer, not a field above one, and folding the two together
+                    // produced offsets with the wrong sign.
+                    if (addressInsn.op == MintOp::kAdd &&
+                        valid(function, addressInsn.use[0]) &&
+                        valid(function, addressInsn.use[1])) {
+                        SsaId candidate = addressInsn.use[0];
+                        SsaId constant = addressInsn.use[1];
+                        if (function.values[candidate].storage.space == Space::kConstant) {
+                            std::swap(candidate, constant);
+                        }
+                        if (function.values[constant].storage.space == Space::kConstant) {
+                            base = candidate;
+                            offset = function.values[constant].storage.offset;
+                        } else {
+                            // An index computed at run time: still a pointer, but
+                            // not a fixed field.
+                            usable = false;
+                            markKind(&out->values[address], RecoveredTypeKind::kPointer);
+                        }
+                    } else if (addressInsn.op == MintOp::kSub) {
+                        usable = false;
                     }
-                    if (function.values[constant].storage.space == Space::kConstant) {
-                        const u64 offset = function.values[constant].storage.offset;
-                        structAccesses[base].push_back({offset, insn.dest});
-                        markKind(&out->values[base], RecoveredTypeKind::kPointer);
-                    }
+                }
+                // A constant base is an absolute address — a global, or a literal
+                // pool entry. Those are not one object with members, and grouping
+                // them would invent a structure spanning unrelated globals whose
+                // "fields" are whatever the linker happened to place nearby.
+                if (usable && function.values[base].storage.space == Space::kConstant) {
+                    usable = false;
+                }
+                if (usable) {
+                    // A bare dereference is the field at offset zero. Leaving it out
+                    // lost the first member of every structure whose head is read
+                    // without arithmetic, which is the common case.
+                    structAccesses[base].push_back({offset, accessed});
+                    markKind(&out->values[base], RecoveredTypeKind::kPointer);
                 }
             }
         }
@@ -222,15 +278,32 @@ Status recoverTypes(const SsaFunction& function, TypeRecovery* out) {
         if (access.second.size() < 2) continue;
         std::sort(access.second.begin(), access.second.end(),
                   [](const auto& a, const auto& b) { return a.first < b.first; });
-        access.second.erase(std::unique(access.second.begin(), access.second.end()),
-                            access.second.end());
-        if (access.second.size() < 2) continue;
+
+        // One field per offset. The same member is normally touched many times, and
+        // each access used to become its own field, so a structure read in a loop
+        // came out with the same offset repeated a dozen times. Where accesses at
+        // one offset disagree about width the widest wins: a four-byte read of a
+        // member is consistent with an eight-byte member, not the other way round.
+        std::vector<std::pair<u64, SsaId>> merged;
+        for (const auto& entry : access.second) {
+            if (!valid(function, entry.second)) continue;
+            if (!merged.empty() && merged.back().first == entry.first) {
+                if (out->values[entry.second].width >
+                    out->values[merged.back().second].width) {
+                    merged.back().second = entry.second;
+                }
+                continue;
+            }
+            merged.push_back(entry);
+        }
+        // A single field is just a dereference; it takes two to be a layout.
+        if (merged.size() < 2) continue;
+        access.second = merged;
 
         RecoveredStruct structure;
         structure.base = access.first;
         const u32 structId = static_cast<u32>(out->structs.size());
         for (const auto& field : access.second) {
-            if (!valid(function, field.second)) continue;
             RecoveredField recovered;
             recovered.offset = field.first;
             recovered.width = out->values[field.second].width;

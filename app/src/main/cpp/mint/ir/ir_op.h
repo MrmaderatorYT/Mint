@@ -47,6 +47,22 @@ enum class MintOp : u8 {
     kDivS,
     kRemU,
     kRemS,
+    /// Division of a double-width dividend: `dest = (b:a) / c`, with `a` the low
+    /// half and `b` the high half. The remainder form is `dest = (b:a) % c`.
+    ///
+    /// These exist because x86's one-operand DIV and IDIV divide RDX:RAX — 128 bits
+    /// over 64 — and no combination of the fixed-width opcodes says that. The
+    /// alternative was a 128-bit Varnode, which would have reached into register
+    /// windows, SSA, the interpreter's value type and the emitter to express
+    /// something only this one instruction family needs. Passing the halves as two
+    /// sources keeps every width in the IR a real machine width.
+    ///
+    /// The quotient can overflow `dest` — that is the #DE fault on real hardware —
+    /// and is left wrapping here rather than modelled as a trap.
+    kDivWideU,
+    kDivWideS,
+    kRemWideU,
+    kRemWideS,
     kNeg,  ///< dest = -a
 
     // -- bitwise -----------------------------------------------------------
@@ -111,7 +127,44 @@ enum class MintOp : u8 {
     kVectorAdd,
     kVectorSub,
     kVectorMul,
+    /// Widening multiply of alternating lanes: x86's PMULUDQ takes the even 32-bit
+    /// lanes and produces 64-bit products. Distinct from kVectorMul because the
+    /// result lanes are not the operand lanes.
+    kVectorMulWideU,
+    kVectorMulWideS,
+    /// Lane-wise compare producing an all-ones or all-zeros mask per lane, which is
+    /// how every SIMD compare reports and what the following blend consumes.
+    kVectorCmpEq,
+    kVectorCmpGtS,
+    kVectorMinU,
+    kVectorMinS,
+    kVectorMaxU,
+    kVectorMaxS,
+    /// Lane-wise shifts by a scalar count in `b`.
+    kVectorShl,
+    kVectorShrU,
+    kVectorShrS,
+    /// Narrow two vectors into one of half-width lanes, clamping rather than
+    /// truncating. Saturation is the whole point of the instruction, so it cannot
+    /// be modelled as a truncating narrow.
+    kVectorPackS,
+    kVectorPackU,
+    /// Widen the low lanes of `a` into fewer, wider lanes. laneWidth is the source
+    /// lane; the destination lane is implied by the count.
+    kVectorExtendS,
+    kVectorExtendU,
+    /// `dest = a` with lane `c` replaced by scalar `b`.
+    kVectorInsert,
+    /// `dest` = lane `b` of `a`, as a scalar.
+    kVectorExtract,
+    /// Per-lane select: `dest[i] = mask[i] ? b[i] : a[i]`, mask in `c`.
+    kVectorSelect,
+    /// Table-driven shuffle across three vectors, as AArch64's TBL does.
     kVectorShuffle,
+    /// Lane permutation by an immediate control word, as x86's PSHUFD does. Kept
+    /// apart from kVectorShuffle because it takes two sources rather than three,
+    /// and the verifier holds every opcode to a fixed arity.
+    kVectorPermute,
     kVectorSplat,
     kVectorLoad,
     kVectorStore,

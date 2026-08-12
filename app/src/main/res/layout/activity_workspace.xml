@@ -119,6 +119,21 @@
             android:text="@string/try_example" />
     </LinearLayout>
 
+    <!--
+      Shown only while a function is selected. Outside the content frame on purpose:
+      the graph fills that frame, so a chip placed inside it would be hidden behind
+      the canvas in exactly the pane where "which function am I in" is least obvious.
+    -->
+    <com.google.android.material.chip.Chip
+        android:id="@+id/selection"
+        style="@style/Widget.Material3.Chip.Input"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="12dp"
+        android:layout_marginBottom="4dp"
+        android:visibility="gone"
+        app:closeIconVisible="true" />
+
     <FrameLayout
         android:id="@+id/content"
         android:layout_width="match_parent"
@@ -183,10 +198,20 @@
             android:visibility="gone" />
     </FrameLayout>
 
-    <com.google.android.material.bottomnavigation.BottomNavigationView
+    <!--
+      A scrolling tab strip rather than a BottomNavigationView. That component caps
+      out at five destinations and distributes them across the width, so the sixth
+      pane does not fit and the five that do are squeezed until their labels elide.
+      Scrollable tabs keep every label readable and leave room for panes added later.
+    -->
+    <com.google.android.material.tabs.TabLayout
         android:id="@+id/nav"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        app:labelVisibilityMode="labeled"
-        app:menu="@menu/workspace_nav" />
+        android:background="?attr/colorSurfaceContainer"
+        app:tabGravity="start"
+        app:tabIndicatorGravity="top"
+        app:tabMode="scrollable"
+        app:tabPaddingEnd="14dp"
+        app:tabPaddingStart="14dp" />
 </LinearLayout>

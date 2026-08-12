@@ -436,6 +436,7 @@ void Builder::renameBlock(u32 block, std::vector<u8>* visited) {
         insn.op = inputInsn.op;
         insn.address = inputInsn.address;
         insn.intrinsicId = inputInsn.intrinsicId;
+        insn.laneWidth = inputInsn.laneWidth;
         insn.block = block;
         for (unsigned slot = 0; slot < 3; ++slot) {
             const SsaId use = read(inputInsn.source(slot));

@@ -279,6 +279,150 @@ bool isMoveInstruction(u16 id) {
 
 }  // namespace
 
+/// The packed integer instructions that are a lane-wise operation on two vectors.
+///
+/// A table rather than a switch because every entry is the same shape — operation
+/// plus lane width — and the lane width is the only thing that distinguishes
+/// members of a family. PADDB and PADDQ differ in nothing else, and writing them as
+/// separate code paths invites one of them to drift.
+struct PackedOp {
+    unsigned id;
+    MintOp op;
+    u8 lane;
+};
+
+const PackedOp kPackedOps[] = {
+    {X86_INS_PADDB, MintOp::kVectorAdd, 1},
+    {X86_INS_PADDW, MintOp::kVectorAdd, 2},
+    {X86_INS_PADDD, MintOp::kVectorAdd, 4},
+    {X86_INS_PADDQ, MintOp::kVectorAdd, 8},
+    {X86_INS_PSUBB, MintOp::kVectorSub, 1},
+    {X86_INS_PSUBW, MintOp::kVectorSub, 2},
+    {X86_INS_PSUBD, MintOp::kVectorSub, 4},
+    {X86_INS_PSUBQ, MintOp::kVectorSub, 8},
+    {X86_INS_PMULLW, MintOp::kVectorMul, 2},
+    {X86_INS_PMULLD, MintOp::kVectorMul, 4},
+    {X86_INS_PMULUDQ, MintOp::kVectorMulWideU, 4},
+    {X86_INS_PMULDQ, MintOp::kVectorMulWideS, 4},
+    {X86_INS_PCMPEQB, MintOp::kVectorCmpEq, 1},
+    {X86_INS_PCMPEQW, MintOp::kVectorCmpEq, 2},
+    {X86_INS_PCMPEQD, MintOp::kVectorCmpEq, 4},
+    {X86_INS_PCMPGTB, MintOp::kVectorCmpGtS, 1},
+    {X86_INS_PCMPGTW, MintOp::kVectorCmpGtS, 2},
+    {X86_INS_PCMPGTD, MintOp::kVectorCmpGtS, 4},
+    {X86_INS_PMINUB, MintOp::kVectorMinU, 1},
+    {X86_INS_PMINUW, MintOp::kVectorMinU, 2},
+    {X86_INS_PMINUD, MintOp::kVectorMinU, 4},
+    {X86_INS_PMINSB, MintOp::kVectorMinS, 1},
+    {X86_INS_PMINSW, MintOp::kVectorMinS, 2},
+    {X86_INS_PMINSD, MintOp::kVectorMinS, 4},
+    {X86_INS_PMAXUB, MintOp::kVectorMaxU, 1},
+    {X86_INS_PMAXUD, MintOp::kVectorMaxU, 4},
+    {X86_INS_PMAXSW, MintOp::kVectorMaxS, 2},
+    {X86_INS_PSLLW, MintOp::kVectorShl, 2},
+    {X86_INS_PSLLD, MintOp::kVectorShl, 4},
+    {X86_INS_PSLLQ, MintOp::kVectorShl, 8},
+    {X86_INS_PSRLW, MintOp::kVectorShrU, 2},
+    {X86_INS_PSRLD, MintOp::kVectorShrU, 4},
+    {X86_INS_PSRLQ, MintOp::kVectorShrU, 8},
+    {X86_INS_PSRAW, MintOp::kVectorShrS, 2},
+    {X86_INS_PSRAD, MintOp::kVectorShrS, 4},
+    // Pack narrows two vectors into one; the lane width recorded is the source's,
+    // since that is what the saturation range is taken from.
+    {X86_INS_PACKSSWB, MintOp::kVectorPackS, 2},
+    {X86_INS_PACKSSDW, MintOp::kVectorPackS, 4},
+    {X86_INS_PACKUSWB, MintOp::kVectorPackU, 2},
+    {X86_INS_PACKUSDW, MintOp::kVectorPackU, 4},
+};
+
+/// Widening lane extends. Lane width here is the source lane — the destination's
+/// follows from how many lanes survive, which the mnemonic already fixes.
+const PackedOp kExtendOps[] = {
+    {X86_INS_PMOVSXBW, MintOp::kVectorExtendS, 1},
+    {X86_INS_PMOVSXBD, MintOp::kVectorExtendS, 1},
+    {X86_INS_PMOVSXWD, MintOp::kVectorExtendS, 2},
+    {X86_INS_PMOVZXBW, MintOp::kVectorExtendU, 1},
+    {X86_INS_PMOVZXBD, MintOp::kVectorExtendU, 1},
+    {X86_INS_PMOVZXWD, MintOp::kVectorExtendU, 2},
+};
+
+const PackedOp* findIn(const PackedOp* table, size_t count, unsigned id) {
+    for (size_t i = 0; i < count; ++i) {
+        if (table[i].id == id) return &table[i];
+    }
+    return nullptr;
+}
+
+/// True when the instruction was a packed-integer form this lifter models.
+///
+/// Kept in one place so the two-operand and three-operand SIMD shapes cannot
+/// disagree about which register view an XMM operand has.
+bool liftPacked(const cs_insn& insn, const cs_x86_op* ops, u8 count,
+                IrBuilder& builder) {
+    if (count < 2 || ops[0].type != X86_OP_REG) return false;
+    const Varnode target = registerView(ops[0].reg, ops[0].size);
+    if (!target.valid() || target.size != 16) return false;
+
+    if (const PackedOp* packed =
+            findIn(kPackedOps, sizeof(kPackedOps) / sizeof(kPackedOps[0]), insn.id)) {
+        Operand left = readOperand(insn, ops[0], builder);
+        Operand right = readOperand(insn, ops[1], builder);
+        if (!left.value.valid() || !right.value.valid()) return false;
+        builder.assign(target, builder.vector(packed->op, packed->lane, left.value,
+                                              right.value, Varnode::invalid(), 16));
+        return true;
+    }
+
+    if (const PackedOp* extend =
+            findIn(kExtendOps, sizeof(kExtendOps) / sizeof(kExtendOps[0]), insn.id)) {
+        Operand source = readOperand(insn, ops[1], builder);
+        if (!source.value.valid()) return false;
+        builder.assign(target, builder.vector(extend->op, extend->lane, source.value,
+                                              Varnode::invalid(), Varnode::invalid(), 16));
+        return true;
+    }
+
+    if (insn.id == X86_INS_PSHUFD && count >= 3) {
+        Operand source = readOperand(insn, ops[1], builder);
+        Operand control = readOperand(insn, ops[2], builder);
+        if (!source.value.valid() || !control.value.valid()) return false;
+        builder.assign(target, builder.vector(MintOp::kVectorPermute, 4, source.value,
+                                              control.value, Varnode::invalid(), 16));
+        return true;
+    }
+
+    if (insn.id == X86_INS_PBLENDVB) {
+        // The mask is architecturally XMM0 and the non-VEX encoding leaves it
+        // implicit. Whether Capstone materialises it as a third operand is a
+        // decoder detail, so take it when it is there and name XMM0 directly when
+        // it is not, rather than depending on which way it goes.
+        Operand base = readOperand(insn, ops[0], builder);
+        Operand other = readOperand(insn, ops[1], builder);
+        const Varnode mask = count >= 3 ? readOperand(insn, ops[2], builder).value
+                                        : Varnode::reg(x86::kXmm0, 16);
+        if (!base.value.valid() || !other.value.valid() || !mask.valid()) {
+            return false;
+        }
+        builder.assign(target, builder.vector(MintOp::kVectorSelect, 1, base.value,
+                                              other.value, mask, 16));
+        return true;
+    }
+
+    if ((insn.id == X86_INS_PINSRB || insn.id == X86_INS_PINSRD) && count >= 3) {
+        Operand base = readOperand(insn, ops[0], builder);
+        Operand value = readOperand(insn, ops[1], builder);
+        Operand index = readOperand(insn, ops[2], builder);
+        if (!base.value.valid() || !value.value.valid() || !index.value.valid()) {
+            return false;
+        }
+        const u8 lane = insn.id == X86_INS_PINSRB ? 1 : 4;
+        builder.assign(target, builder.vector(MintOp::kVectorInsert, lane, base.value,
+                                              value.value, index.value, 16));
+        return true;
+    }
+    return false;
+}
+
 void liftX86(const cs_insn& insn, IrBuilder& builder) {
     builder.setAddress(insn.address);
     if (insn.detail == nullptr) {
@@ -405,6 +549,8 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
             return;
         }
     }
+
+    if (liftPacked(insn, ops, count, builder)) return;
 
     if (count >= 2) {
         if (isMoveInstruction(insn.id)) {
@@ -615,6 +761,52 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
             // arithmetic value even when that predicate is not yet represented.
             builder.emit(MintOp::kUndefined, flag(x86::kFlagCf));
             builder.emit(MintOp::kUndefined, flag(x86::kFlagOf));
+            return;
+        }
+        if ((insn.id == X86_INS_DIV || insn.id == X86_INS_IDIV) &&
+            count == 1 && dst.value.valid()) {
+            // The mirror of the one-operand multiply above: that one writes RDX:RAX,
+            // this one reads it. The dividend is twice the operand width, which is
+            // why these need the wide opcodes rather than kDivU — a 64-bit DIV
+            // divides 128 bits, and expressing it as a 64-bit divide would quietly
+            // drop RDX and compute a different number.
+            const bool signedDivide = insn.id == X86_INS_IDIV;
+            const u8 width = dst.value.size;
+            if (width == 1) {
+                // Byte form is the odd one out: the dividend is AX, a single
+                // register rather than a pair, and the results land in AL and AH.
+                const Varnode dividend = Varnode::reg(x86::kRax, 2);
+                const Varnode divisor = builder.resize(dst.value, 2, signedDivide);
+                const Varnode quotient = builder.binary(
+                    signedDivide ? MintOp::kDivS : MintOp::kDivU, dividend, divisor);
+                const Varnode remainder = builder.binary(
+                    signedDivide ? MintOp::kRemS : MintOp::kRemU, dividend, divisor);
+                builder.assign(Varnode::reg(x86::kRax, 1),
+                               builder.resize(quotient, 1, false));
+                builder.assign(Varnode::reg(x86::kRax + 1, 1),
+                               builder.resize(remainder, 1, false));
+            } else {
+                const Varnode low = Varnode::reg(x86::kRax, width);
+                const Varnode high = Varnode::reg(x86::kRdx, width);
+                const Varnode quotient = builder.ternary(
+                    signedDivide ? MintOp::kDivWideS : MintOp::kDivWideU,
+                    low, high, dst.value);
+                const Varnode remainder = builder.ternary(
+                    signedDivide ? MintOp::kRemWideS : MintOp::kRemWideU,
+                    low, high, dst.value);
+                // Both reads happen before either write, so the temporaries above
+                // must be produced first — assigning RAX before building the
+                // remainder would feed it the quotient.
+                builder.assign(Varnode::reg(x86::kRax, width), quotient);
+                builder.assign(Varnode::reg(x86::kRdx, width), remainder);
+            }
+            // Every arithmetic flag is architecturally undefined after a divide.
+            builder.emit(MintOp::kUndefined, flag(x86::kFlagCf));
+            builder.emit(MintOp::kUndefined, flag(x86::kFlagOf));
+            builder.emit(MintOp::kUndefined, flag(x86::kFlagSf));
+            builder.emit(MintOp::kUndefined, flag(x86::kFlagZf));
+            builder.emit(MintOp::kUndefined, flag(x86::kFlagAf));
+            builder.emit(MintOp::kUndefined, flag(x86::kFlagPf));
             return;
         }
         if (insn.id == X86_INS_NOT && dst.value.valid()) {

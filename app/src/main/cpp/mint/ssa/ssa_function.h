@@ -61,6 +61,9 @@ struct SsaInsn {
     std::vector<SsaId> clobbers;
     Address address = 0;
     u16 intrinsicId = 0;
+    /// Bytes per lane, carried through from the IR so the SSA listing can show
+    /// which arithmetic a vector op actually performs.
+    u8 laneWidth = 0;
     u32 block = 0;
     bool dead = false;
 };

@@ -30,4 +30,10 @@
     <string name="beta_feedback">Send feedback</string>
     <string name="beta_subject">Mint %1$s — feedback</string>
     <string name="beta_no_mail">No email app found. Write to %1$s</string>
+    <string name="viewing_function">Viewing %1$s</string>
+    <string name="clear_function">Show the whole program</string>
+    <string name="overview_hint">Pick a function from the Functions pane to lift or decompile
+        it. Until then every pane shows the program as a whole.</string>
+    <string name="call_graph_empty">No direct calls were recovered, so there is no call graph
+        to draw. Indirect calls are left out rather than guessed at.</string>
 </resources>

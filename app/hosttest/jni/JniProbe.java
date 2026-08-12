@@ -157,6 +157,65 @@ public final class JniProbe {
             String pseudoC = session.decompiledC(start);
             check(!pseudoC.isEmpty(), "SSA pseudo-C crossed JNI (" + pseudoC.length() + " chars)");
 
+            // Struct recovery is only worth having if it fires on ordinary code, so
+            // measure it across a sample rather than asserting it works on one
+            // hand-picked function.
+            long[] sampleEntries = new long[page];
+            int sampled = session.functions(0, page, sampleEntries, size, blocks, insns,
+                    flags, null);
+            int withLayout = 0;
+            int fieldsFound = 0;
+            for (int i = 0; i < sampled; i++) {
+                String c = session.decompiledC(sampleEntries[i]);
+                if (!c.contains("/* layout via ")) continue;
+                withLayout++;
+                for (int at = c.indexOf("+0x"); at >= 0; at = c.indexOf("+0x", at + 1)) {
+                    fieldsFound++;
+                }
+            }
+            check(withLayout > 0, "struct layouts recovered in " + withLayout + " of "
+                    + sampled + " functions (" + fieldsFound + " fields)");
+
+            // The call graph is whole-program and indexed rather than addressed, so
+            // the things that can break it are all structural: a row per function,
+            // indices inside the function table, and the entry column agreeing with
+            // what the function pages already reported.
+            String callGraph = session.callGraph();
+            check(!callGraph.isEmpty(), "call graph crossed JNI ("
+                    + callGraph.length() + " chars)");
+            String[] graphRows = callGraph.split("\n");
+            check(graphRows.length == total,
+                    "call graph has one row per function (" + graphRows.length
+                            + " rows for " + total + " functions)");
+
+            boolean indicesInRange = true;
+            boolean rowsInOrder = true;
+            boolean entriesMatch = true;
+            int edges = 0;
+            int withCallees = 0;
+            long[] firstPage = new long[page];
+            session.functions(0, page, firstPage, size, blocks, insns, flags, null);
+            for (int i = 0; i < graphRows.length; i++) {
+                String[] fields = graphRows[i].trim().split("\\s+");
+                if (fields.length < 2) {
+                    rowsInOrder = false;
+                    break;
+                }
+                if (Integer.parseInt(fields[0]) != i) rowsInOrder = false;
+                if (i < page && Long.parseLong(fields[1]) != firstPage[i]) entriesMatch = false;
+                if (fields.length > 2) withCallees++;
+                for (int f = 2; f < fields.length; f++) {
+                    int callee = Integer.parseInt(fields[f]);
+                    if (callee < 0 || callee >= total) indicesInRange = false;
+                    edges++;
+                }
+            }
+            check(rowsInOrder, "call graph rows are indexed 0..n in order");
+            check(entriesMatch, "call graph entry column matches the function table");
+            check(indicesInRange, "every callee index is inside the function table");
+            check(edges > 0, "call graph recovered " + edges + " direct call edges from "
+                    + withCallees + " functions");
+
             String warnings = session.warnings();
             System.out.println("\n-- warnings (" + (warnings.isEmpty() ? 0
                     : warnings.split("\n").length) + ") --");

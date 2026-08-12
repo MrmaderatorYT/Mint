@@ -9,7 +9,6 @@ import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
 import androidx.lifecycle.ViewModel;
 
-import com.ccs.mint.R;
 import com.ccs.mint.core.MintSession;
 
 import java.util.concurrent.ExecutorService;
@@ -55,7 +54,7 @@ public final class WorkspaceViewModel extends ViewModel {
     private final Object workspaceLock = new Object();
     private long selectedAddress;
     private long listingAddress;
-    private int pane = R.id.pane_functions;
+    private int pane = Pane.FUNCTIONS;
     private String claimedViewIntent;
     private final NavigationHistory navigationHistory = new NavigationHistory();
 

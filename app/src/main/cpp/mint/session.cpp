@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <cstdio>
+#include <unordered_map>
 
 #include "mint/analysis/jump_table_recovery.h"
 #include "mint/base/log.h"
@@ -233,6 +234,40 @@ std::string Session::cfgTextFor(Address address) {
                std::to_string(block.end);
         for (u32 successor : block.successors) out += " " + std::to_string(successor);
         out += "\n";
+    }
+    return out;
+}
+
+std::string Session::callGraphText() const {
+    if (!analyzed_) return {};
+    const std::vector<Function>& functions = analyzer_.functions();
+    if (functions.empty()) return {};
+
+    // Entry address to position, so a callee address can be turned into the index
+    // the caller understands. Linear search per callee would be quadratic in the
+    // function count, which a stripped library makes felt immediately.
+    std::unordered_map<Address, u32> position;
+    position.reserve(functions.size() * 2);
+    for (u32 i = 0; i < functions.size(); ++i) {
+        position.emplace(functions[i].entry, i);
+    }
+
+    std::string out;
+    out.reserve(functions.size() * 24);
+    for (u32 i = 0; i < functions.size(); ++i) {
+        out += std::to_string(i);
+        out += ' ';
+        out += std::to_string(functions[i].entry);
+        for (const Address callee : functions[i].callees) {
+            const auto found = position.find(callee);
+            // A call that lands outside the function list — a PLT thunk, or an
+            // address the descent never promoted to a function — is dropped rather
+            // than turned into a dangling edge.
+            if (found == position.end()) continue;
+            out += ' ';
+            out += std::to_string(found->second);
+        }
+        out += '\n';
     }
     return out;
 }

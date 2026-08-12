@@ -61,6 +61,26 @@ Varnode IrBuilder::binary(MintOp op, const Varnode& a, const Varnode& b) {
     return dest;
 }
 
+Varnode IrBuilder::ternary(MintOp op, const Varnode& a, const Varnode& b,
+                           const Varnode& c) {
+    Varnode dest = newTemp(producesBoolean(op) ? 1 : a.size);
+    emit(op, dest, a, b, c);
+    return dest;
+}
+
+Varnode IrBuilder::vector(MintOp op, u8 laneWidth, const Varnode& a, const Varnode& b,
+                          const Varnode& c, u8 destSize) {
+    Varnode dest = newTemp(destSize);
+    emit(op, dest, a, b, c);
+    function_->insns.back().laneWidth = laneWidth;
+    return dest;
+}
+
+void IrBuilder::vectorVoid(MintOp op, u8 laneWidth, const Varnode& a, const Varnode& b) {
+    emit(op, Varnode::invalid(), a, b);
+    function_->insns.back().laneWidth = laneWidth;
+}
+
 Varnode IrBuilder::unary(MintOp op, const Varnode& a, u8 destSize) {
     Varnode dest = newTemp(destSize);
     emit(op, dest, a);
@@ -110,6 +130,16 @@ std::vector<std::string> IrFunction::verify() const {
         const Address at = index < insns.size() ? insns[index].address : 0;
         problems.push_back("insn[" + std::to_string(index) + "] @" +
                            formatAddress(at) + " " + name + ": " + what);
+    };
+
+    // A vector op carrying no lane width is only half-lifted: it says something
+    // happened to sixteen bytes without saying how those bytes divide, and adding
+    // bytes is not adding words. The mistake is invisible downstream — the IR still
+    // reads plausibly — so it has to be caught where the IR is checked.
+    auto checkLaneWidth = [&](const IrInsn& insn, size_t index) {
+        if (insn.laneWidth == 0 || 16 % insn.laneWidth != 0) {
+            report(index, "vector op has no usable lane width");
+        }
     };
 
     for (size_t i = 0; i < insns.size(); ++i) {
@@ -188,6 +218,50 @@ std::vector<std::string> IrFunction::verify() const {
                     report(i, "operand widths disagree");
                 }
                 break;
+            // Lane-wise over two full vectors. Both sources are 128 bits and the
+            // lane width says how those bits divide.
+            case MintOp::kVectorAdd:
+            case MintOp::kVectorSub:
+            case MintOp::kVectorMul:
+            case MintOp::kVectorMulWideU:
+            case MintOp::kVectorMulWideS:
+            case MintOp::kVectorCmpEq:
+            case MintOp::kVectorCmpGtS:
+            case MintOp::kVectorMinU:
+            case MintOp::kVectorMinS:
+            case MintOp::kVectorMaxU:
+            case MintOp::kVectorMaxS:
+            case MintOp::kVectorPackS:
+            case MintOp::kVectorPackU:
+            case MintOp::kVectorSelect:
+                if (d.size != 16 || a.size != 16 || b.size != 16) {
+                    report(i, "vector arithmetic is not 128 bits");
+                }
+                checkLaneWidth(insn, i);
+                break;
+            // Same family, but the second source is a scalar: a shift count, an
+            // inserted element, a lane index. Only the destination and the first
+            // source are guaranteed to be vectors — and not even the first, for a
+            // widening extend reading four bytes of memory.
+            case MintOp::kVectorShl:
+            case MintOp::kVectorShrU:
+            case MintOp::kVectorShrS:
+            case MintOp::kVectorExtendS:
+            case MintOp::kVectorExtendU:
+            case MintOp::kVectorInsert:
+                if (d.size != 16) report(i, "vector result is not 128 bits");
+                checkLaneWidth(insn, i);
+                break;
+            case MintOp::kDivWideU:
+            case MintOp::kDivWideS:
+            case MintOp::kRemWideU:
+            case MintOp::kRemWideS:
+                // All four are one machine width: the dividend is double-width only
+                // as a pair of same-width halves, never as a wider varnode.
+                if (d.size != a.size || a.size != b.size || b.size != insn.c.size) {
+                    report(i, "wide division operand widths disagree");
+                }
+                break;
             case MintOp::kNeg:
             case MintOp::kNot:
             case MintOp::kPopCount:
@@ -242,17 +316,16 @@ std::vector<std::string> IrFunction::verify() const {
             case MintOp::kFloatToInt:
                 if (d.size == 0 || a.size == 0) report(i, "invalid conversion width");
                 break;
-            case MintOp::kVectorAdd:
-            case MintOp::kVectorSub:
-            case MintOp::kVectorMul:
-                if (d.size != 16 || a.size != 16 || b.size != 16) {
-                    report(i, "vector arithmetic is not 128 bits");
-                }
-                break;
             case MintOp::kVectorShuffle:
                 if (d.size != 16 || a.size != 16 || b.size != 16 || c.size != 16) {
                     report(i, "vector shuffle operands are not 128 bits");
                 }
+                break;
+            case MintOp::kVectorPermute:
+                if (d.size != 16 || a.size != 16) {
+                    report(i, "vector permute operands are not 128 bits");
+                }
+                checkLaneWidth(insn, i);
                 break;
             case MintOp::kVectorSplat:
                 if (d.size != 16) report(i, "vector splat destination is not 128 bits");
