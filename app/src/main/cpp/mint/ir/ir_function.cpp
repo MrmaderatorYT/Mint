@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include "mint/ir/registers.h"
+#include "mint/plugin/architecture_bridge.h"
 
 namespace mint {
 namespace {
@@ -192,15 +193,28 @@ std::vector<std::string> IrFunction::verify() const {
         const Varnode& b = insn.b;
         const Varnode& c = insn.c;
 
+        MintArchitectureSemanticsV2 custom{};
+        const u8 pointerWidth=architecturePluginAbi(arch,&custom) ? custom.pointer_size : (arch==Arch::kArm32 || arch==Arch::kThumb || arch==Arch::kX86_32 || arch==Arch::kRiscV32?4:8);
         switch (insn.op) {
             case MintOp::kCopy:
                 if (d.size != a.size) report(i, "copy changes width");
                 break;
             case MintOp::kLoad:
-                if (a.size != 8) report(i, "load address is not 8 bytes");
+                if (a.size != pointerWidth) report(i, "load address width differs from target pointer width");
                 break;
             case MintOp::kStore:
-                if (a.size != 8) report(i, "store address is not 8 bytes");
+                if (a.size != pointerWidth) report(i, "store address width differs from target pointer width");
+                break;
+            case MintOp::kAtomicLoad:
+            case MintOp::kAtomicExchange:
+            case MintOp::kAtomicAdd:
+            case MintOp::kAtomicCompareExchange:
+                if(a.size!=pointerWidth || (d.size!=1&&d.size!=2&&d.size!=4&&d.size!=8)) report(i,"invalid scalar atomic widths");
+                if(insn.op!=MintOp::kAtomicLoad && b.size!=d.size) report(i,"atomic value width differs from destination");
+                if(insn.op==MintOp::kAtomicCompareExchange && c.size!=d.size) report(i,"atomic replacement width differs from destination");
+                break;
+            case MintOp::kAtomicStore:
+                if(a.size!=pointerWidth || (b.size!=1&&b.size!=2&&b.size!=4&&b.size!=8)) report(i,"invalid scalar atomic store widths");
                 break;
             case MintOp::kAdd:
             case MintOp::kSub:
@@ -313,7 +327,10 @@ std::vector<std::string> IrFunction::verify() const {
                 if (a.size != b.size) report(i, "floating-point compare widths disagree");
                 break;
             case MintOp::kIntToFloat:
+            case MintOp::kIntToFloatU:
             case MintOp::kFloatToInt:
+            case MintOp::kFloatToIntU:
+            case MintOp::kFloatConvert:
                 if (d.size == 0 || a.size == 0) report(i, "invalid conversion width");
                 break;
             case MintOp::kVectorShuffle:
@@ -331,10 +348,10 @@ std::vector<std::string> IrFunction::verify() const {
                 if (d.size != 16) report(i, "vector splat destination is not 128 bits");
                 break;
             case MintOp::kVectorLoad:
-                if (d.size != 16 || a.size != 8) report(i, "invalid vector load widths");
+                if (d.size != 16 || a.size != pointerWidth) report(i, "invalid vector load widths");
                 break;
             case MintOp::kVectorStore:
-                if (a.size != 8 || b.size != 16) report(i, "invalid vector store widths");
+                if (a.size != pointerWidth || b.size != 16) report(i, "invalid vector store widths");
                 break;
             case MintOp::kVectorBit:
             case MintOp::kVectorBif:

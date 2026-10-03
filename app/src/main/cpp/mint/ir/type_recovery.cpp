@@ -1,6 +1,7 @@
 #include "mint/ir/type_recovery.h"
 
 #include "mint/ir/registers.h"
+#include "mint/plugin/architecture_bridge.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -18,6 +19,16 @@ constexpr u32 kNotAnArgument = ~0u;
 /// ordering is a guess at the source-level order and is only used for display; what
 /// matters for correctness is which registers count at all.
 u32 argumentPosition(Arch arch, const Varnode& storage) {
+    if(static_cast<u8>(arch)>=128) {
+        MintArchitectureSemanticsV2 custom{};
+        if(architecturePluginAbi(arch,&custom))for(u32 n=0;n<custom.argument_count;++n)if(storage.offset==custom.argument_offsets[n] && storage.size==custom.pointer_size)return n;
+        return kNotAnArgument;
+    }
+    if(arch==Arch::kArm32 || arch==Arch::kThumb)return storage.size==4&&storage.offset<=arm32::kRn(3)&&storage.offset%4==0 ? static_cast<u32>(storage.offset/4) : kNotAnArgument;
+    if(arch==Arch::kRiscV32 || arch==Arch::kRiscV64) {
+        const u8 width=arch==Arch::kRiscV32?4:8;
+        return storage.size==width&&storage.offset>=riscv::kXn(10)&&storage.offset<=riscv::kXn(17)&&storage.offset%8==0 ? static_cast<u32>(storage.offset/8-10) : kNotAnArgument;
+    }
     if (arch == Arch::kAArch64) {
         if (storage.size == 8 && storage.offset <= arm64::kXn(7) &&
             storage.offset % 8 == 0) {
@@ -131,9 +142,14 @@ Status recoverTypes(const SsaFunction& function, TypeRecovery* out) {
                 dest.kind = RecoveredTypeKind::kFloat;
                 break;
             case MintOp::kIntToFloat:
+            case MintOp::kIntToFloatU:
+            case MintOp::kFloatConvert:
                 dest.kind = RecoveredTypeKind::kFloat;
                 break;
             case MintOp::kFloatToInt:
+                dest.kind=RecoveredTypeKind::kSignedInteger;
+                break;
+            case MintOp::kFloatToIntU:
                 dest.kind = RecoveredTypeKind::kUnsignedInteger;
                 break;
             case MintOp::kVectorAdd:

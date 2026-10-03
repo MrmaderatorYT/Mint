@@ -5,6 +5,8 @@
 #include <utility>
 #include <vector>
 
+#include "mint/ir/registers.h"
+
 namespace mint {
 namespace {
 
@@ -25,7 +27,9 @@ bool fold(const IrInsn& input, Varnode* result) {
     const Varnode& a = input.a;
     const Varnode& b = input.b;
     const Varnode& c = input.c;
-    if (input.dest.size == 0) return false;
+    // Varnode constants carry only a 64-bit payload. A folded 128-bit NOT,
+    // signed extend or arithmetic result cannot retain its upper half.
+    if (input.dest.size == 0 || input.dest.size>8) return false;
     if (input.op == MintOp::kCopy && a.isConstant()) {
         *result = Varnode::constant(a.offset & maskFor(input.dest.size), input.dest.size);
         return true;
@@ -45,7 +49,9 @@ bool fold(const IrInsn& input, Varnode* result) {
     }
     if (!a.isConstant() || (opInfo(input.op).sources >= 2 && !b.isConstant())) return false;
 
-    const u64 widthMask = maskFor(input.dest.size);
+    const bool comparison=input.op==MintOp::kEqual||input.op==MintOp::kNotEqual||input.op==MintOp::kLessU||input.op==MintOp::kLessS||input.op==MintOp::kLessEqU||input.op==MintOp::kLessEqS;
+    if(comparison && (a.size>8 || b.size>8))return false;
+    const u64 widthMask = maskFor(comparison?a.size:input.dest.size);
     const u64 av = a.offset & widthMask;
     const u64 bv = b.offset & widthMask;
     u64 value = 0;
@@ -72,9 +78,9 @@ bool fold(const IrInsn& input, Varnode* result) {
         case MintOp::kEqual: value = av == bv; break;
         case MintOp::kNotEqual: value = av != bv; break;
         case MintOp::kLessU: value = av < bv; break;
-        case MintOp::kLessS: value = signExtend(av, a.size) < signExtend(bv, b.size); break;
+        case MintOp::kLessS: value = static_cast<i64>(signExtend(av, a.size)) < static_cast<i64>(signExtend(bv, b.size)); break;
         case MintOp::kLessEqU: value = av <= bv; break;
-        case MintOp::kLessEqS: value = signExtend(av, a.size) <= signExtend(bv, b.size); break;
+        case MintOp::kLessEqS: value = static_cast<i64>(signExtend(av, a.size)) <= static_cast<i64>(signExtend(bv, b.size)); break;
         case MintOp::kSelect:
             if (!a.isConstant()) return false;
             *result = (a.offset != 0 ? b : c);
@@ -109,11 +115,24 @@ Status simplifyIr(IrFunction* function, IrSimplifyStats* stats) {
     // reaching-definition approximation. It removes values no later operation can
     // observe while retaining overwritten writes whose alias may be used on another
     // CFG path.
+    // Machine RET operands describe the return address, not the ABI result.
+    // SSA records the reaching x0/rax result later; removing its definition here
+    // would erase the only evidence that a native leaf returns a value at all.
+    Varnode nativeResult = Varnode::invalid();
+    if (function->arch == Arch::kAArch64) nativeResult = Varnode::reg(arm64::kXn(0), 8);
+    else if (function->arch == Arch::kX86_64) nativeResult = Varnode::reg(x86::kRax, 8);
+    else if(function->arch==Arch::kX86_32)nativeResult=Varnode::reg(x86::kRax,4);
+    else if(function->arch==Arch::kArm32 || function->arch==Arch::kThumb)nativeResult=Varnode::reg(arm32::kRn(0),4);
+    else if(function->arch==Arch::kRiscV32 || function->arch==Arch::kRiscV64)nativeResult=Varnode::reg(riscv::kXn(10),function->arch==Arch::kRiscV32?4:8);
+    const auto nativeResults=abiResultRegisters(function->arch);
+    const bool hasNativeReturn = !nativeResults.empty() &&
+        std::any_of(function->insns.begin(), function->insns.end(),
+                    [](const IrInsn& insn) { return insn.op == MintOp::kReturn; });
     std::vector<u8> removed(function->insns.size(), 0);
     for (size_t i = 0; i < function->insns.size(); ++i) {
         IrInsn& insn = function->insns[i];
         if (!insn.dest.valid() || hasSideEffect(insn.op)) continue;
-        bool used = false;
+        bool used=hasNativeReturn && std::any_of(nativeResults.begin(),nativeResults.end(),[&](const auto& result){return insn.dest.overlaps(result);});
         for (size_t j = 0; j < function->insns.size() && !used; ++j) {
             if (i == j) continue;
             for (unsigned slot = 0; slot < 3; ++slot) {
@@ -223,11 +242,13 @@ Status simplifySsa(SsaFunction* function, SsaSimplifyStats* stats) {
     // it — the caller reads it — or elimination would delete the one definition the
     // function exists to produce.
     for (auto& entry : function->returnValues) entry.second = find(entry.second);
+    for(auto& entry:function->abiReturnValues)entry.value=find(entry.value);
 
     std::vector<u32> uses(function->values.size(), 0);
     for (const auto& entry : function->returnValues) {
         if (entry.second != kNoValue && entry.second < uses.size()) ++uses[entry.second];
     }
+    for(const auto& entry:function->abiReturnValues)if(entry.value<uses.size())++uses[entry.value];
     for (const SsaInsn& insn : function->insns) {
         for (SsaId use : insn.use) {
             if (use != kNoValue) ++uses[use];

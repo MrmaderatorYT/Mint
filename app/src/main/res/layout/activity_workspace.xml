@@ -54,6 +54,14 @@
             android:layout_height="wrap_content"
             android:text="@string/open_binary_short" />
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/project_actions"
+            style="@style/Widget.Material3.Button.IconButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:contentDescription="@string/project_actions"
+            app:icon="@android:drawable/ic_menu_more" />
+
         <!-- The bundled disassembler is BSD-licensed, and that licence requires its
              notice to reach whoever receives the binary. A screen inside the app is
              the only place a user actually can receive it. -->
@@ -124,15 +132,30 @@
       the graph fills that frame, so a chip placed inside it would be hidden behind
       the canvas in exactly the pane where "which function am I in" is least obvious.
     -->
-    <com.google.android.material.chip.Chip
-        android:id="@+id/selection"
-        style="@style/Widget.Material3.Chip.Input"
-        android:layout_width="wrap_content"
+    <!--
+      One chip per open function, not one for the selection. A reverse-engineering
+      session is several functions at once — a caller, its callee, the helper both
+      use — and holding only the latest means every comparison is a round trip
+      through the function list. The row scrolls because names are long and a phone
+      is narrow.
+    -->
+    <HorizontalScrollView
+        android:id="@+id/open_scroll"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginStart="12dp"
         android:layout_marginBottom="4dp"
-        android:visibility="gone"
-        app:closeIconVisible="true" />
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:scrollbars="none"
+        android:visibility="gone">
+
+        <com.google.android.material.chip.ChipGroup
+            android:id="@+id/open_functions"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            app:singleLine="true"
+            app:singleSelection="true" />
+    </HorizontalScrollView>
 
     <FrameLayout
         android:id="@+id/content"

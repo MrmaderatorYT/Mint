@@ -1,6 +1,9 @@
 #include <cstdlib>
 #include <iostream>
 #include <vector>
+#include <unistd.h>
+#include <cstdio>
+#include "mint/session.h"
 
 #include "mint/db/database.h"
 #include "mint/analysis/code_analyzer.h"
@@ -155,6 +158,53 @@ std::vector<u8> storedZip(const std::string& name, const std::string& content) {
 }  // namespace
 
 int main(int argc, char** argv) {
+    char projectPath[] = "/tmp/mint-project-test-XXXXXX";
+    int projectFd = mkstemp(projectPath);
+    if (!check(projectFd >= 0,"project test temporary")) return 1;
+    close(projectFd); std::remove(projectPath);
+    Program program;
+    if (!check(program.open(projectPath).ok(),"create persistent program")) return 1;
+    if (!check(program.edit(0x1000,"name","renamed_fn").ok() && program.edit(0x1000,"comment","comment\nwith 'quotes'").ok(),"program edits persist")) return 1;
+    if (!check(!program.edit(0x2000,"name","renamed_fn").ok() && !program.edit(0x1000,"data","bad_type").ok(),"reject duplicate names and unknown data types")) return 1;
+    if (!check(program.undo().ok() && program.get(0x1000,"comment").empty() && program.redo().ok(),"undo/redo restores overlay")) return 1;
+    Program reopened;
+    if (!check(reopened.open(projectPath).ok() && reopened.get(0x1000,"name")=="renamed_fn" && reopened.get(0x1000,"comment")=="comment\nwith 'quotes'","program survives reopen")) return 1;
+    if (!check(program.edit(0x1000,"name","").ok() && program.get(0x1000,"name").empty(),"empty edit removes override")) return 1;
+    if (!check(program.undo().ok() && program.edit(0x1000,"bookmark","review").ok() && !program.redo().ok(),"new edit clears redo history")) return 1;
+    Program failure;
+    if (!check(!failure.edit(0x1000,"comment","unsaved").ok() && failure.get(0x1000,"comment").empty(),"failed save leaves live state unchanged")) return 1;
+    if (argc >= 2) {
+        // Generic Program tests used arbitrary addresses; a Session correctly
+        // rejects restoring those into images where they are not mapped.
+        std::remove(projectPath);
+        Session session;
+        if (!check(session.openPath(argv[1]).ok() && session.analyze().ok() && session.attachProject(projectPath).ok(),"native session project integrates")) return 1;
+        const auto function = session.analyzer().functions().front();
+        if (!check(session.editAnnotation(function.entry,"name","project_function").ok(),"rename native function")) return 1;
+        if (!check(session.decompiledCFor(function.entry).find("project_function")!=std::string::npos,"rename reaches pseudo-C")) return 1;
+        if (!check(session.editAnnotation(function.entry,"prototype","int32_t(uint64_t context)").ok(),"user function prototype")) return 1;
+        if (!check(session.decompiledCFor(function.entry).find("int32_t project_function(uint64_t context)")!=std::string::npos,"user types and parameter names reach pseudo-C")) return 1;
+        if (!check(!session.editAnnotation(function.entry,"prototype","@cdecl32 int32_t(int32_t arg)").ok(),"incompatible ABI prototype rejected")) return 1;
+        if (!check(session.searchText("project_function").find("project_function")!=std::string::npos,"global symbol search")) return 1;
+        auto rows=session.programListing(function.entry,8);
+        if (!check(!rows.empty() && rows[0].address==function.entry && rows[0].text.find("project_function")!=std::string::npos,"listing includes user label")) return 1;
+        if (!check(session.editAnnotation(function.entry,"function","code").ok() && !session.editAnnotation(function.entry,"data","u64").ok(),"data cannot hide an explicit function seed")) return 1;
+        const auto segments=session.image().memory().segments(); // Edits replace the derived image.
+        for (const auto& segment : segments) if (!segment.executable() && segment.size>=8) {
+            if (!check(session.editAnnotation(segment.start,"data","u64").ok(),"define mapped data")) return 1;
+            auto data=session.programListing(segment.start,1);
+            if (!check(data.size()==1 && data[0].size==8 && data[0].text.find("u64")!=std::string::npos,"typed data in unified listing")) return 1;
+            break;
+        }
+        if (!check(!session.searchText("bytes: 7f 45 4c 46").empty(),"mapped bytes search")) return 1;
+        (void)session.referencesText(function.entry);
+    }
+    FILE* corrupt = std::fopen(projectPath,"ab");
+    if (!check(corrupt != nullptr,"project corruption fixture")) return 1;
+    std::fputc('!',corrupt); std::fclose(corrupt);
+    Program invalid;
+    if (!check(!invalid.open(projectPath).ok(),"corrupt project rejected without overwriting it")) return 1;
+    std::remove(projectPath);
     const IrFunction narrowImmediate = liftX86Bytes({0x83, 0xc0, 0xff});  // add eax, -1
     if (!check(narrowImmediate.machineInsnCount == 1 &&
                    narrowImmediate.verify().empty(),
@@ -217,6 +267,9 @@ int main(int argc, char** argv) {
 
     Database database;
     if (!check(database.open(":memory:").ok(), "SQLite opens through runtime API")) return 1;
+    std::vector<ProgramAnnotation> databaseAnnotations={{0x1000,"comment","quotes ' and newline\n"}};
+    if (!check(database.writeAnnotations(databaseAnnotations).ok() && database.readAnnotations(&databaseAnnotations).ok() && databaseAnnotations.size()==1 && databaseAnnotations[0].value=="quotes ' and newline\n","SQLite annotation transaction uses bound values")) return 1;
+    if (!check(database.execute("PRAGMA user_version=1").ok() && database.ensureSchema().ok() && database.readAnnotations(&databaseAnnotations).ok() && databaseAnnotations.size()==1,"cache schema rebuild preserves user annotations")) return 1;
     const Status persisted = database.persist(function, "feature-hash");
     if (!persisted.ok()) { std::cerr << persisted.toString() << "\n"; return 1; }
     if (!check(database.hasBinary("feature-hash"), "SQLite stores binary hash")) return 1;

@@ -25,7 +25,7 @@ public:
     Lifter& operator=(const Lifter&) = delete;
 
     Status open(Arch arch);
-    bool ready() const { return handle_ != 0; }
+    bool ready() const { return handle_ != 0 || customReady_; }
     Arch arch() const { return arch_; }
 
     /// Lifts a whole function, producing IR blocks that mirror the machine CFG
@@ -48,6 +48,10 @@ private:
     /// headers out of this interface, which every pass above the IR includes.
     size_t handle_ = 0;
     Arch arch_ = Arch::kUnknown;
+    bool customReady_ = false;
+    u8 thumbItRemaining_ = 0;
+    u8 thumbItState_ = 0;
+    Address thumbItNextAddress_ = kNoAddress;
 };
 
 }  // namespace mint

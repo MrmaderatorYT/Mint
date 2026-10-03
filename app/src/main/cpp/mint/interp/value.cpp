@@ -8,7 +8,8 @@ std::string InterpValue::toString() const {
     char buffer[64];
     switch (kind) {
         case InterpKind::kConcrete:
-            std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(bits));
+            if(width>8)std::snprintf(buffer,sizeof(buffer),"0x%llx%016llx",static_cast<unsigned long long>(highBits),static_cast<unsigned long long>(bits));
+            else std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(bits));
             return buffer;
         case InterpKind::kPointer:
             std::snprintf(buffer, sizeof(buffer), "ptr(0x%llx)", static_cast<unsigned long long>(bits));
@@ -27,7 +28,7 @@ bool interpBool(const InterpValue& value, bool* known) {
         return false;
     }
     *known = true;
-    return value.bits != 0;
+    return value.bits != 0 || value.highBits != 0;
 }
 
 }  // namespace mint

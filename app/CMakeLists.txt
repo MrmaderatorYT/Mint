@@ -7,6 +7,13 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include(third_party/capstone.cmake)
+include(third_party/lua.cmake)
+option(MINT_COMPACT_DEBUG "Keep line-table debug data without full type graphs for disk-limited builds" OFF)
+if(MINT_COMPACT_DEBUG)
+    add_compile_options($<$<CONFIG:Debug>:-g1>)
+    target_compile_options(capstone PRIVATE $<$<CONFIG:Debug>:-g1>)
+    target_compile_options(mint_lua PRIVATE $<$<CONFIG:Debug>:-g1>)
+endif()
 
 # ZIP/DEX front-end and the native program database use the platform copies of
 # zlib and SQLite. Both are system components on Android; host builds resolve
@@ -20,14 +27,17 @@ file(GLOB_RECURSE MINT_SOURCES CONFIGURE_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp/*.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp/*.c
 )
+set(MINT_ENGINE_ID_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
+include(cmake/analysis_engine_id.cmake)
 
 add_library(mintcore SHARED ${MINT_SOURCES})
 
 target_include_directories(mintcore PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/main/cpp
+        ${MINT_ENGINE_GENERATED_DIR}
 )
 
-target_link_libraries(mintcore PRIVATE capstone log android ${MINT_ZLIB_LIBRARY} ${CMAKE_DL_LIBS})
+target_link_libraries(mintcore PRIVATE capstone mint_lua log android ${MINT_ZLIB_LIBRARY} ${CMAKE_DL_LIBS})
 
 target_compile_options(mintcore PRIVATE
         -Wall

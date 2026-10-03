@@ -17,6 +17,8 @@
 #include "jni/jni_util.h"
 #include "mint/base/log.h"
 #include "mint/session.h"
+#include "mint/analysis/cxx_metadata.h"
+#include "mint/plugin/architecture_bridge.h"
 
 using mint::Address;
 using mint::DexMethod;
@@ -109,6 +111,48 @@ Java_com_ccs_mint_core_MintSession_nativeOpenPath(JNIEnv* env, jclass, jstring p
 }
 
 JNIEXPORT jlong JNICALL
+Java_com_ccs_mint_core_MintSession_nativeOpenRaw(JNIEnv* env,jclass,jstring path,jstring architecture,jlong base,jlong entry) {
+    const auto name=mint::jni::fromJava(env,architecture);
+    auto arch=mint::Arch::kUnknown;
+    for(const auto& description:mint::architectureDescriptions())
+        if(description.id==name || mint::archName(description.architecture)==name || (name=="x86_64" && description.architecture==mint::Arch::kX86_64))arch=description.architecture;
+    auto* session=new Session();auto status=session->openRawPath(mint::jni::fromJava(env,path),arch,static_cast<Address>(base),static_cast<Address>(entry));
+    if(!status.ok()){delete session;mint::jni::throwIoException(env,status.toString());return 0;}
+    return reinterpret_cast<jlong>(session);
+}
+JNIEXPORT jobjectArray JNICALL
+Java_com_ccs_mint_core_MintSession_nativeRawArchitectures(JNIEnv* env, jclass) {
+    try {
+        const auto descriptions = mint::architectureDescriptions();
+        if (descriptions.size() > mint::kMaxArchitectureDescriptions) { mint::jni::throwIllegalState(env, "architecture registry limit exceeded"); return nullptr; }
+        jclass stringClass = env->FindClass("java/lang/String"); if (!stringClass) return nullptr;
+        jobjectArray output = env->NewObjectArray(static_cast<jsize>(descriptions.size() * 9), stringClass, nullptr);
+        env->DeleteLocalRef(stringClass); if (!output) return nullptr;
+        jsize index = 0;
+        for (const auto& description : descriptions) {
+            // Names are display-only; never pass arbitrary native bytes through
+            // JNI's modified-UTF8 constructor. Stable IDs remain exact ASCII.
+            auto name = description.name; for (char& c : name) if (static_cast<unsigned char>(c) < 32 || static_cast<unsigned char>(c) > 126) c = '?';
+            const std::string fields[] = {description.id, name, std::to_string(static_cast<unsigned>(description.architecture)),
+                std::to_string(description.pointerSize), std::to_string(description.minInstructionSize), std::to_string(description.maxInstructionSize),
+                std::to_string(description.instructionAlignment), description.decode ? (mint::architecturePluginHasLifter(description.architecture)?"2":"1") : "0", description.thumbAddressTag ? "1" : "0"};
+            for (const auto& field : fields) {
+                jstring value = mint::jni::toJava(env, field); if (!value) return nullptr;
+                env->SetObjectArrayElement(output, index++, value); env->DeleteLocalRef(value); if (env->ExceptionCheck()) return nullptr;
+            }
+        }
+        return output;
+    } catch (...) { mint::jni::throwIllegalState(env, "cannot snapshot architecture registry"); return nullptr; }
+}
+JNIEXPORT jlong JNICALL
+Java_com_ccs_mint_core_MintSession_nativeOpenMachO(JNIEnv* env,jclass,jstring path,jstring architecture) {
+    const auto name=mint::jni::fromJava(env,architecture);auto arch=mint::Arch::kUnknown;
+    for(const auto& description:mint::architectureDescriptions())if(description.id==name)arch=description.architecture;
+    if(arch!=mint::Arch::kAArch64 && arch!=mint::Arch::kX86_64 && arch!=mint::Arch::kX86_32 && arch!=mint::Arch::kArm32){mint::jni::throwIoException(env,"unsupported Mach-O slice architecture");return 0;}
+    auto* session=new Session();const auto status=session->openMachOPath(mint::jni::fromJava(env,path),arch);
+    if(!status.ok()){delete session;mint::jni::throwIoException(env,status.toString());return 0;}return reinterpret_cast<jlong>(session);
+}
+JNIEXPORT jlong JNICALL
 Java_com_ccs_mint_core_MintSession_nativeOpenFd(JNIEnv* env, jclass, jint fd) {
     // The storage picker hands out a file descriptor with no path we are allowed
     // to open, so this is the path every user-chosen file actually takes.
@@ -170,8 +214,8 @@ Java_com_ccs_mint_core_MintSession_nativeImageSummary(JNIEnv* env, jclass, jlong
         out += "\nmethods=" + std::to_string(session->dex().methods().size());
     } else {
         const mint::ElfImage& image = session->image();
-        out += "format=ELF\narch=";
-        out += mint::archName(image.arch());
+        out += "format="+std::string(session->image().formatName())+"\narch=";
+        out += mint::architectureName(image.arch());
         out += "\nsoname=" + (image.soname().empty() ? std::string("-") : image.soname());
         out += "\nentry=" + std::to_string(image.entryPoint());
         out += "\npie=" + std::string(image.isPositionIndependent() ? "yes" : "no");
@@ -316,7 +360,7 @@ Java_com_ccs_mint_core_MintSession_nativeFunctions(JNIEnv* env, jclass, jlong ha
         flags.data()[i] = bits;
 
         if (outNames != nullptr) {
-            jstring name = mint::jni::toJava(env, function.name);
+            jstring name = mint::jni::toJava(env, session->displayNameAt(function.entry));
             env->SetObjectArrayElement(outNames, i, name);
             // Local refs are bounded by default (16 on old devices); a page of
             // several hundred names would exhaust the table without this.
@@ -387,32 +431,23 @@ Java_com_ccs_mint_core_MintSession_nativeListing(JNIEnv* env, jclass, jlong hand
     }
     if (capacity <= 0) return 0;
 
-    const std::vector<mint::InsnRecord>& all = code.instructions();
-    size_t index = code.lowerBound(static_cast<Address>(startAddress));
+    const auto rows = session->programListing(static_cast<Address>(startAddress),static_cast<size_t>(capacity));
 
     jint written = 0;
-    for (; written < capacity && index < all.size(); ++index, ++written) {
-        const mint::InsnRecord& record = all[index];
-        addresses.data()[written] = static_cast<jlong>(record.address);
-        sizes.data()[written] = record.size;
-        flows.data()[written] = static_cast<jint>(record.flow);
-        targets.data()[written] =
-            record.hasKnownTarget() ? static_cast<jlong>(record.target) : -1;
+    for (; written < static_cast<jint>(rows.size()); ++written) {
+        const auto& row = rows[written];
+        addresses.data()[written] = static_cast<jlong>(row.address);
+        sizes.data()[written] = row.size;
+        flows.data()[written] = static_cast<jint>(row.flow);
+        targets.data()[written] = static_cast<jlong>(row.target);
 
         if (outText != nullptr) {
-            mint::DecodedInsn decoded;
-            std::string text;
-            if (session->renderInstruction(record.address, &decoded)) {
-                text = decoded.text();
-            } else {
-                text = "(bad)";
-            }
-            jstring value = mint::jni::toJava(env, text);
+            jstring value = mint::jni::toJava(env, row.text);
             env->SetObjectArrayElement(outText, written, value);
             env->DeleteLocalRef(value);
         }
         if (outComment != nullptr) {
-            jstring value = mint::jni::toJava(env, session->commentFor(record));
+            jstring value = mint::jni::toJava(env, row.comment);
             env->SetObjectArrayElement(outComment, written, value);
             env->DeleteLocalRef(value);
         }
@@ -460,10 +495,171 @@ Java_com_ccs_mint_core_MintSession_nativeFunctionCfg(JNIEnv* env, jclass, jlong 
 }
 
 JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeExportJson(JNIEnv* env, jclass, jlong handle) {
+    Session* session = asSession(handle);
+    if (session == nullptr) return mint::jni::toJava(env, "");
+    return mint::jni::toJava(env, session->exportJsonText());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeXrefs(JNIEnv* env, jclass, jlong handle,
+                                              jlong address) {
+    Session* session = asSession(handle);
+    if (session == nullptr) return mint::jni::toJava(env, "");
+    return mint::jni::toJava(env, session->xrefsText(static_cast<Address>(address)));
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeStrings(JNIEnv* env, jclass, jlong handle,
+                                                jlong functionAddress) {
+    Session* session = asSession(handle);
+    if (session == nullptr) return mint::jni::toJava(env, "");
+    return mint::jni::toJava(
+        env, session->stringsText(static_cast<Address>(functionAddress)));
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeProgramPrototypes(JNIEnv* env, jclass, jlong handle) {
+    Session* session = asSession(handle);
+    if (session == nullptr) return mint::jni::toJava(env, "");
+    return mint::jni::toJava(env, session->programPrototypesText());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeProgramCoverage(JNIEnv* env, jclass, jlong handle) {
+    Session* session = asSession(handle);
+    if (session == nullptr) return mint::jni::toJava(env, "");
+    return mint::jni::toJava(env, session->programCoverageText());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeProgramWrites(JNIEnv* env, jclass, jlong handle) {
+    Session* session = asSession(handle);
+    if (session == nullptr) return mint::jni::toJava(env, "");
+    return mint::jni::toJava(env, session->programWriteSummaryText());
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeWriteMap(JNIEnv* env, jclass, jlong handle,
+                                                 jlong address) {
+    Session* session = asSession(handle);
+    if (session == nullptr) return mint::jni::toJava(env, "");
+    return mint::jni::toJava(env, session->writeMapText(static_cast<Address>(address)));
+}
+
+JNIEXPORT jstring JNICALL
 Java_com_ccs_mint_core_MintSession_nativeCallGraph(JNIEnv* env, jclass, jlong handle) {
     Session* session = asSession(handle);
     if (session == nullptr) return mint::jni::toJava(env, "");
     return mint::jni::toJava(env, session->callGraphText());
 }
 
+JNIEXPORT void JNICALL
+Java_com_ccs_mint_core_MintSession_nativeProject(JNIEnv* env,jclass,jlong handle,jstring path) {
+    auto* session=asSession(handle);
+    if (!session) {mint::jni::throwIllegalState(env,"session is closed");return;}
+    const auto status=session->attachProject(mint::jni::fromJava(env,path));
+    if (!status.ok()) mint::jni::throwIoException(env,status.toString());
+}
+JNIEXPORT void JNICALL
+Java_com_ccs_mint_core_MintSession_nativeEdit(JNIEnv* env,jclass,jlong handle,jlong address,jstring kind,jstring value) {
+    auto* session=asSession(handle);
+    if (!session) {mint::jni::throwIllegalState(env,"session is closed");return;}
+    auto status=session->editAnnotation(static_cast<Address>(address),mint::jni::fromJava(env,kind),mint::jni::fromJava(env,value));
+    if (!status.ok()) mint::jni::throwIllegalArgument(env,status.toString());
+}
+JNIEXPORT void JNICALL
+Java_com_ccs_mint_core_MintSession_nativeUndo(JNIEnv* env,jclass,jlong handle,jboolean redo) {
+    auto* session=asSession(handle);
+    if (!session) {mint::jni::throwIllegalState(env,"session is closed");return;}
+    auto status=session->undoEdit(redo);
+    if (!status.ok()) mint::jni::throwIllegalState(env,status.toString());
+}
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeAnnotation(JNIEnv* env,jclass,jlong handle,jlong address,jstring kind) {
+    auto* session=asSession(handle);
+    return mint::jni::toJava(env,session ? session->annotation(static_cast<Address>(address),mint::jni::fromJava(env,kind)) : "");
+}
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeSearch(JNIEnv* env,jclass,jlong handle,jstring query) {
+    auto* session=asSession(handle);
+    return mint::jni::toJava(env,session ? session->searchText(mint::jni::fromJava(env,query)) : "");
+}
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeReferences(JNIEnv* env,jclass,jlong handle,jlong address) {
+    auto* session=asSession(handle);
+    return mint::jni::toJava(env,session ? session->referencesText(static_cast<Address>(address)) : "");
+}
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeProgramInfo(JNIEnv* env,jclass,jlong handle,jint kind,jlong address) {
+    auto* session=asSession(handle);if(!session)return mint::jni::toJava(env,"");
+    return mint::jni::toJava(env,kind==0?session->typesText():kind==1?session->memoryBlocksText():kind==2?session->provenanceText(static_cast<Address>(address)):kind==4?session->debugInfoText():kind==5?session->sourceLocationText(static_cast<Address>(address)):kind==6?session->typesCHeaderText():kind==7?session->interproceduralText():mint::cxxMetadataText(session->image()));
+}
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeScript(JNIEnv* env,jclass,jlong handle,jstring source,jboolean allowEdits) {
+    auto* session=asSession(handle);if(!session){mint::jni::throwIllegalState(env,"session is closed");return nullptr;}
+    std::string output;const auto status=session->runScript(mint::jni::fromJava(env,source),allowEdits,&output);
+    if(!status.ok())output+="\n[Script stopped: "+status.toString()+"]\n";
+    return mint::jni::toJava(env,output);
+}
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativeAssemble(JNIEnv* env,jclass,jlong handle,jlong address,jstring source,jboolean apply) {
+    auto* session=asSession(handle);if(!session){mint::jni::throwIllegalState(env,"session is closed");return nullptr;}
+    std::string bytes;const auto status=session->assembleAt(static_cast<Address>(address),mint::jni::fromJava(env,source),apply,&bytes);
+    if(!status.ok()){mint::jni::throwIllegalArgument(env,status.toString());return nullptr;}
+    return mint::jni::toJava(env,bytes);
+}
+JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativePower(JNIEnv* env,jclass,jlong handle,jstring operation,jstring text,jstring arguments,jlong address,jlong value,jboolean flag) {
+    auto* session=asSession(handle);if(!session){mint::jni::throwIllegalState(env,"session is closed");return nullptr;}
+    const auto op=mint::jni::fromJava(env,operation),first=mint::jni::fromJava(env,text),second=mint::jni::fromJava(env,arguments);
+    std::string output;mint::Status status=mint::Status::success();
+    if(op=="plugin-load") {status=session->loadPlugin(first,flag);if(status.ok())output=session->pluginCommandsText();}
+    else if(op=="local-list")output=session->localVariablesText(static_cast<Address>(address));
+    else if(op=="abi")output=session->abiText(static_cast<Address>(address));
+    else if(op=="debug-import"){status=session->importExternalDebug(first,flag);if(status.ok())output=session->debugInfoText();}
+    else if(op=="local-edit") {
+        const auto split=second.find('\n');
+        if(split==std::string::npos || second.find('\n',split+1)!=std::string::npos)
+            status=mint::Status::error(mint::ErrorCode::kBadFormat,"invalid local edit payload");
+        else status=session->editLocalVariable(static_cast<Address>(address),first,second.substr(0,split),second.substr(split+1));
+    }
+    else if(op=="plugin-list")output=session->pluginCommandsText();
+    else if(op=="library-import") {status=session->importLibrary(first,flag);if(status.ok())output=flag?session->signatureLibraryText():session->typesText();}
+    else if(op=="library-signatures")output=session->signatureLibraryText();
+    else if(op=="plugin-run")status=session->runPlugin(first,second,flag,&output);
+    else if(op=="debug-connect") {
+        if(value<1 || value>65535)status=mint::Status::error(mint::ErrorCode::kBadFormat,"port must be 1..65535");
+        else {status=session->connectDebugger(first,static_cast<mint::u32>(value),second=="dap",flag);if(status.ok())status=session->debuggerCommand("status",0,0,&output);}
+    } else if(op=="debug")status=session->debuggerCommand(first,static_cast<Address>(address),static_cast<mint::u64>(value),&output);
+    else if(op=="compare-open") {
+        status=session->openComparison(first,second);
+        if(status.ok())status=session->comparisonCommand("diff",0,0,"",&output);
+    } else if(op=="compare-open-raw") {
+        status=session->openComparison(first,second,session->image().arch(),session->image().imageBase(),session->image().entryPoint());
+        if(status.ok())status=session->comparisonCommand("diff",0,0,"",&output);
+    } else if(op=="compare-open-macho") {
+        status=session->openComparison(first,second,session->image().arch(),0,0,true);
+        if(status.ok())status=session->comparisonCommand("diff",0,0,"",&output);
+    } else if(op=="compare")status=session->comparisonCommand(first,static_cast<Address>(address),static_cast<Address>(value),second,&output);
+    else status=mint::Status::error(mint::ErrorCode::kBadFormat,"unknown power-user operation");
+    if(!status.ok()){mint::jni::throwIllegalState(env,status.toString());return nullptr;}
+    return mint::jni::toJava(env,output);
+}
+JNIEXPORT void JNICALL
+Java_com_ccs_mint_core_MintSession_nativeType(JNIEnv* env,jclass,jlong handle,jstring declaration,jboolean erase) {
+    auto* session=asSession(handle);if(!session){mint::jni::throwIllegalState(env,"session is closed");return;}
+    auto status=erase?session->eraseType(mint::jni::fromJava(env,declaration)):session->defineType(mint::jni::fromJava(env,declaration));
+    if(!status.ok())mint::jni::throwIllegalArgument(env,status.toString());
+}
+JNIEXPORT void JNICALL
+Java_com_ccs_mint_core_MintSession_nativeReanalyze(JNIEnv* env,jclass,jlong handle) {
+    auto* session=asSession(handle);if(!session){mint::jni::throwIllegalState(env,"session is closed");return;}
+    auto status=session->reanalyze();if(!status.ok())mint::jni::throwIllegalState(env,status.toString());
+}
+JNIEXPORT void JNICALL
+Java_com_ccs_mint_core_MintSession_nativeExportPatched(JNIEnv* env,jclass,jlong handle,jstring path) {
+    auto* session=asSession(handle);if(!session){mint::jni::throwIllegalState(env,"session is closed");return;}
+    auto status=session->exportPatchedCopy(mint::jni::fromJava(env,path));if(!status.ok())mint::jni::throwIoException(env,status.toString());
+}
 }  // extern "C"

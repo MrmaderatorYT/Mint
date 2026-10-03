@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<title>Mint — graph in a mint leaf</title>
+<circle cx="128" cy="128" r="128" fill="#10251D"/>
+<g transform="translate(128 128) scale(1.12) rotate(45) translate(-128 -128)"><path fill="#53DB9C" fill-rule="evenodd" d="M128 32 C148 44 164 64 172 86 L164 94 L180 110 H168 L180 122 H168 L176 130 L168 138 V160 C162 179 151 192 136 199 V224 H120 V199 C105 192 94 179 88 160 V138 L80 130 L88 122 H76 L88 110 H76 L92 94 L84 86 C92 64 108 44 128 32 Z M120 184 H136 V150 L152 134 H162 V110 H138 V134 L136 136 V98 H140 V74 H116 V98 H120 V144 L114 138 V128 H94 V152 H114 L120 158 Z"/></g>
+</svg>

@@ -20,6 +20,7 @@ public:
     void write(const Varnode& node, const InterpValue& value);
 
     void setRegister(u64 offset, u64 bits, u8 width);
+    void setRegisterWide(u64 offset,u64 low,u64 high,u8 width=16);
     InterpValue registerValue(u64 offset, u8 width) const;
 
     InterpMemory& memory() { return memory_; }

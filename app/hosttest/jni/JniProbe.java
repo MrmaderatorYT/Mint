@@ -41,6 +41,29 @@ public final class JniProbe {
             System.out.println(session.imageSummary());
 
             session.analyze();
+            java.nio.file.Path project = java.nio.file.Files.createTempFile("mint-jni-project-", ".mint");
+            java.nio.file.Files.delete(project);
+            session.attachProject(project.toString());
+            long[] firstEntry = new long[1];
+            session.functions(0,1,firstEntry,new int[1],new int[1],new int[1],new int[1],new String[1]);
+            session.edit(firstEntry[0],"name","jni_user_function");
+            session.edit(firstEntry[0],"comment","JNI persistent comment");
+            session.edit(firstEntry[0],"prototype","int32_t(uint64_t context)");
+            check(session.decompiledC(firstEntry[0]).contains("int32_t jni_user_function(uint64_t context)"),"user prototype/name crosses JNI into pseudo-C");
+            check(session.search("jni_user_function").contains("jni_user_function"),"global search crosses JNI");
+            session.undoEdit(false);
+            check(session.annotation(firstEntry[0],"prototype").isEmpty(),"undo crosses JNI");
+            session.undoEdit(true);
+            check(!session.annotation(firstEntry[0],"prototype").isEmpty(),"redo crosses JNI");
+            try (MintSession restored = MintSession.open(args[0])) {
+                restored.attachProject(project.toString());
+                check(restored.annotation(firstEntry[0],"comment").equals("JNI persistent comment"),"project survives new JNI session");
+            }
+            // Restore automatic names for the existing corpus-sensitive checks.
+            session.edit(firstEntry[0],"name","");
+            session.edit(firstEntry[0],"prototype","");
+            session.edit(firstEntry[0],"comment","");
+            java.nio.file.Files.delete(project);
 
             long[] stats = new long[MintSession.STAT_COUNT];
             session.stats(stats);
@@ -165,8 +188,24 @@ public final class JniProbe {
                     flags, null);
             int withLayout = 0;
             int fieldsFound = 0;
+            int withStrings = 0;
+            String sampleLiteral = null;
+            int literals = 0;
             for (int i = 0; i < sampled; i++) {
                 String c = session.decompiledC(sampleEntries[i]);
+                int quotes = 0;
+                for (int at = c.indexOf('"'); at >= 0; at = c.indexOf('"', at + 1)) quotes++;
+                if (quotes >= 2) {
+                    withStrings++;
+                    literals += quotes / 2;
+                    // A count proves the code ran; a sample proves it recovered text
+                    // rather than four printable bytes that happened to be adjacent.
+                    if (sampleLiteral == null) {
+                        int open = c.indexOf('"');
+                        int close = c.indexOf('"', open + 1);
+                        if (close > open) sampleLiteral = c.substring(open, close + 1);
+                    }
+                }
                 if (!c.contains("/* layout via ")) continue;
                 withLayout++;
                 for (int at = c.indexOf("+0x"); at >= 0; at = c.indexOf("+0x", at + 1)) {
@@ -175,6 +214,72 @@ public final class JniProbe {
             }
             check(withLayout > 0, "struct layouts recovered in " + withLayout + " of "
                     + sampled + " functions (" + fieldsFound + " fields)");
+            check(withStrings > 0, "string literals resolved in " + withStrings + " of "
+                    + sampled + " functions (" + literals + " literals)");
+
+            // The write map is the only view built from stores alone, so it is also
+            // the only check that store addresses survive SSA construction intact.
+            int withWrites = 0;
+            int slots = 0;
+            String sampleWrite = null;
+            String firstFailure = null;
+            int mapFailures = 0;
+            for (int i = 0; i < sampled; i++) {
+                String map = session.writeMap(sampleEntries[i]);
+                // Counting only successes hid that most functions were failing: the
+                // assertion passed on the 30 that worked. Failures are now their own
+                // signal.
+                if (map.contains("failed:")) {
+                    if (firstFailure == null) firstFailure = map.trim();
+                    mapFailures++;
+                    continue;
+                }
+                if (!map.contains("memory written")) continue;
+                withWrites++;
+                for (String row : map.split("\n")) {
+                    if (row.startsWith("    ") && row.contains("#")) {
+                        slots++;
+                        if (sampleWrite == null) sampleWrite = row.trim();
+                    }
+                }
+            }
+            check(withWrites > 0, "write maps built for " + withWrites + " of " + sampled
+                    + " functions (" + slots + " slots)");
+            check(mapFailures == 0, "every write map built without error"
+                    + (firstFailure == null ? "" : " — first failure: " + firstFailure));
+            System.out.println("       sample slot: " + sampleWrite);
+            System.out.println("       sample literal: " + sampleLiteral);
+
+            // Xrefs invert the call graph and pair each edge with its call site, so
+            // the thing that can break is the pairing: a caller counted with no site
+            // found means the site scan and the callee list disagree.
+            int withCallers = 0;
+            int siteLines = 0;
+            int countedButNoSite = 0;
+            String sampleXref = null;
+            for (int i = 0; i < sampled; i++) {
+                String refs = session.xrefs(sampleEntries[i]);
+                if (refs.contains("called from 0 function")) continue;
+                withCallers++;
+                boolean sawSite = false;
+                for (String row : refs.split("\n")) {
+                    if (!row.startsWith("  ") || !row.contains(" in ")) continue;
+                    sawSite = true;
+                    siteLines++;
+                    if (sampleXref == null) sampleXref = row.trim();
+                }
+                if (!sawSite) countedButNoSite++;
+            }
+            check(withCallers > 0, "xrefs found callers for " + withCallers + " of "
+                    + sampled + " functions (" + siteLines + " call sites)");
+            // What matters is that no counted caller is silently dropped from the
+            // listing, not that every edge has a branch behind it: some edges come
+            // from stubs or relocations rather than from a call instruction.
+            check(countedButNoSite == 0,
+                    "every function with callers listed at least one of them"
+                            + (countedButNoSite == 0 ? "" : " — " + countedButNoSite
+                                    + " listed none"));
+            System.out.println("       sample xref: " + sampleXref);
 
             // The call graph is whole-program and indexed rather than addressed, so
             // the things that can break it are all structural: a row per function,

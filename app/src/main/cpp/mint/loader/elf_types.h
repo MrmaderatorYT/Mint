@@ -9,9 +9,9 @@
 /// absent or differently spelled, and pinning the field widths ourselves means
 /// a platform header change can never silently alter how we parse a file.
 ///
-/// Only the 64-bit little-endian forms exist here. Android has been 64-bit-only
-/// for Play submissions for years, and supporting ELF32 would double the
-/// surface of every loader for inputs the app is not built to analyse anyway.
+/// These are the ELF64 little-endian forms. ELF32 disk records are decoded in
+/// elf32_image.cpp into the same architecture-independent image model. The APK
+/// host ABI does not restrict the architecture of the binary being analyzed.
 namespace mint::elf {
 
 // ---------------------------------------------------------------- identification

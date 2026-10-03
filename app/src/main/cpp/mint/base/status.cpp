@@ -34,6 +34,12 @@ const char* archName(Arch arch) {
         case Arch::kAArch64: return "arm64";
         case Arch::kX86_64: return "x86-64";
         case Arch::kDalvik: return "dalvik";
+        case Arch::kArm32: return "arm";
+        case Arch::kThumb: return "thumb";
+        case Arch::kX86_32: return "x86-32";
+        case Arch::kRiscV32: return "riscv32";
+        case Arch::kRiscV64: return "riscv64";
+        case Arch::kPluginFirst: return "plugin";
     }
     return "unknown";
 }

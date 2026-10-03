@@ -3,9 +3,11 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 #include "mint/base/log.h"
+#include "mint/disasm/disassembler.h"
 
 namespace mint {
 
@@ -46,6 +48,24 @@ void ElfImage::addWarning(std::string message) {
 
 Status ElfImage::load(ByteView file) {
     *this = ElfImage();
+    originalFile_ = file;
+
+    u32 magic = 0;
+    file.read(0, &magic);
+    if ((magic & 0xffff) == 0x5a4d) return loadPe64(file);
+    if (magic == 0xfeedfacf || magic == 0xfeedface) return loadMachO64(file);
+    if (magic == 0xcafebabe || magic == 0xbebafeca || magic == 0xcafebabf || magic == 0xbfbafeca)
+        return loadMachOFat(file);
+    if (magic == 0xcffaedfe || magic == 0xcefaedfe) {
+        return Status::error(ErrorCode::kUnsupported,
+                             "big-endian Mach-O slices are unsupported");
+    }
+    if (magic != 0x464c457f) {
+        return Status::error(ErrorCode::kBadFormat,
+                             "unrecognised native container; raw import requires architecture, base and entry");
+    }
+    u8 elfClass = 0;
+    if (file.read(elf::kEiClass, &elfClass) && elfClass == 1) return loadElf32(file);
 
     Status status = parseHeader(file);
     if (!status.ok()) return status;
@@ -56,6 +76,7 @@ Status ElfImage::load(ByteView file) {
     // The memory map must be complete before the dynamic table is read: every
     // pointer in that table is a virtual address that we resolve through the map.
     memory_.finalize();
+    imageBase_ = memory_.minAddress();
 
     // Order matters and is not obvious. Relocations need .dynsym to name their
     // symbols, and the pointer arrays need relocations because in a
@@ -83,6 +104,95 @@ Status ElfImage::load(ByteView file) {
     return Status::success();
 }
 
+Status ElfImage::loadDebugObject(ByteView file) {
+    Status status = load(file);
+    if (status.ok()) return status;
+    u32 magic = 0; u8 order = 0; file.read(0, &magic); file.read(5, &order);
+    if (magic != 0x464c457f || order != 1 || arch_ == Arch::kUnknown || sections_.empty() ||
+        (!findSection(".debug_info.dwo") && !findSection(".debug_info") && !findSection(".zdebug_info"))) return status;
+    // A successful header/section parse with no PT_LOAD is expected for a DWO.
+    // Other parse failures are not laundered into successful debug imports.
+    if (status.code() != ErrorCode::kBadFormat ||
+        (status.message().find("no loadable") == std::string::npos && status.message().find("no usable mapped") == std::string::npos)) return status;
+    loaded_ = true; return Status::success();
+}
+
+const char* ElfImage::formatName() const {
+    switch (format_) {
+        case ImageFormat::kElf64: return "ELF64";
+        case ImageFormat::kPe64: return pointerSize()==4?"PE32":"PE32+";
+        case ImageFormat::kMachO64: return pointerSize() == 4 ? "Mach-O32" : "Mach-O64";
+        case ImageFormat::kRaw: return "raw";
+        case ImageFormat::kElf32: return "ELF32";
+    }
+    return "unknown";
+}
+
+u8 ElfImage::pointerSize() const {
+    ArchitectureDescription description;
+    return architectureDescription(arch_, &description) ? description.pointerSize : 8;
+}
+
+Address ElfImage::canonicalAddress(Address address) const {
+    return arch_ == Arch::kArm32 || arch_ == Arch::kThumb ? address & ~Address{1} : address;
+}
+
+Arch ElfImage::architectureAt(Address address) const {
+    if (arch_ != Arch::kArm32 && arch_ != Arch::kThumb) return arch_;
+    if (address & 1) return Arch::kThumb;
+    const auto upper = std::upper_bound(armModes_.begin(), armModes_.end(), address,
+        [](Address value, const std::pair<Address, bool>& mode) { return value < mode.first; });
+    return upper == armModes_.begin() ? arch_ : (std::prev(upper)->second ? Arch::kThumb : Arch::kArm32);
+}
+
+Arch ElfImage::architectureAt(Address address, Address functionEntry, Arch fallback) const {
+    if (arch_ != Arch::kArm32 && arch_ != Arch::kThumb) return arch_;
+    if (address & 1) return Arch::kThumb;
+    const auto upper = std::upper_bound(armModes_.begin(), armModes_.end(), address,
+        [](Address value, const std::pair<Address, bool>& mode) { return value < mode.first; });
+    if (upper != armModes_.begin() && std::prev(upper)->first > functionEntry)
+        return std::prev(upper)->second ? Arch::kThumb : Arch::kArm32;
+    return fallback == Arch::kUnknown ? architectureAt(address) : fallback;
+}
+
+Status ElfImage::loadRaw(ByteView file, Arch architecture, Address base, Address entry) {
+    *this = ElfImage();
+    originalFile_ = file;
+    ArchitectureDescription description;
+    if (!architectureDescription(architecture, &description))
+        return Status::error(ErrorCode::kUnsupported, "raw import requires a registered native architecture");
+    if (file.empty() || file.size() > ~Address{0} - base) {
+        return Status::error(ErrorCode::kBadFormat, "empty raw input or address range overflow");
+    }
+    const bool thumb = architecture == Arch::kThumb || (architecture == Arch::kArm32 && (entry & 1));
+    const Address canonicalEntry = description.thumbAddressTag ? entry & ~Address{1} : entry;
+    const unsigned alignment = thumb ? 2 : description.instructionAlignment;
+    if ((description.thumbAddressTag && (base & 1)) || canonicalEntry < base || canonicalEntry - base >= file.size() ||
+        (canonicalEntry % alignment) != 0 ||
+        (description.pointerSize == 4 && (base >= (u64{1} << 32) || file.size() > (u64{1} << 32) - base))) {
+        return Status::error(ErrorCode::kBadFormat, "raw entry is outside input or is unaligned");
+    }
+    format_ = ImageFormat::kRaw;
+    arch_ = architecture;
+    imageBase_ = base;
+    entry_ = canonicalEntry;
+    if (description.thumbAddressTag) armModes_.emplace_back(base, thumb);
+    type_ = elf::kEtExec;
+    memory_.addSegment(base, file.size(), file, kMemRead | kMemExec, "raw");
+    memory_.finalize();
+    ElfSection section;
+    section.name = "raw";
+    section.type = elf::kShtProgBits;
+    section.flags = elf::kShfAlloc | elf::kShfExecInstr;
+    section.addr = base;
+    section.size = file.size();
+    section.data = file;
+    sections_.push_back(std::move(section));
+    addWarning("raw import uses user-specified architecture and addresses; all input bytes are mapped read/execute");
+    loaded_ = true;
+    return Status::success();
+}
+
 Status ElfImage::parseHeader(ByteView file) {
     Ehdr header{};
     if (!file.readPod(0, &header)) {
@@ -102,6 +212,7 @@ Status ElfImage::parseHeader(ByteView file) {
     switch (header.machine) {
         case kEmAArch64: arch_ = Arch::kAArch64; break;
         case kEmX86_64: arch_ = Arch::kX86_64; break;
+        case 243: arch_ = Arch::kRiscV64; break;
         default:
             return Status::error(
                 ErrorCode::kUnsupported,
@@ -330,28 +441,54 @@ void ElfImage::indexRelocations() {
 }
 
 bool ElfImage::resolvePointer(Address at, Address* out) const {
+    if (out == nullptr) return false;
+    const bool is32 = pointerSize() == 4;
+    auto readPointer = [&](const MemoryMap& memory, Address address, Address* value) {
+        if (is32) { u32 narrow = 0; if (!memory.readInt(address, &narrow)) return false; *value = narrow; return true; }
+        return memory.readInt(address, value);
+    };
+    if (!patchStorage_.empty()) {
+        u64 original = 0, patched = 0;
+        // A user patch changes the effective slot; the loader's on-disk
+        // relocation addend must not override an explicitly edited pointer.
+        if (readPointer(originalMemory_, at, &original) && readPointer(memory_, at, &patched) &&
+            original != patched) {
+            if (patched == 0 || patched == (is32 ? u64{0xffffffff} : ~u64{0})) return false;
+            *out = patched;
+            return true;
+        }
+    }
     auto it = relocationByOffset_.find(at);
     if (it != relocationByOffset_.end()) {
         const ElfRelocation& reloc = relocations_[it->second];
 
-        const bool isRelative = reloc.type == kRAArch64Relative ||
-                                reloc.type == kRX86_64Relative ||
-                                reloc.type == kRAArch64IRelative ||
-                                reloc.type == kRX86_64IRelative;
+        // Mach-O chain/rebase words are encodings, not native pointer bytes.
+        // Unresolved imported binds never fall through to their encoded value.
+        if (reloc.source == ElfRelocation::Source::kContainerRebase) {
+            *out = static_cast<Address>(reloc.addend);
+            return *out != 0 && *out != kNoAddress;
+        }
+
+        const bool isRelative =
+            (arch_ == Arch::kAArch64 && (reloc.type == kRAArch64Relative || reloc.type == kRAArch64IRelative)) ||
+            (arch_ == Arch::kX86_64 && (reloc.type == kRX86_64Relative || reloc.type == kRX86_64IRelative)) ||
+            (arch_ == Arch::kX86_32 && (reloc.type == 8 || reloc.type == 42)) ||
+            ((arch_ == Arch::kArm32 || arch_ == Arch::kThumb) && (reloc.type == 23 || reloc.type == 160)) ||
+            ((arch_ == Arch::kRiscV32 || arch_ == Arch::kRiscV64) && (reloc.type == 3 || reloc.type == 58));
         if (isRelative) {
             // The link-time target is the addend. For RELR there is no addend
             // field at all, so the value has to come from the slot itself, which
             // for RELR is where the linker did store it.
             if (reloc.source == ElfRelocation::Source::kRelr) {
                 u64 raw = 0;
-                if (memory_.readInt(at, &raw) && raw != 0) {
+                if (readPointer(memory_, at, &raw) && raw != 0) {
                     *out = raw;
                     return true;
                 }
                 return false;
             }
             if (reloc.addend != 0) {
-                *out = static_cast<Address>(reloc.addend);
+                *out = is32 ? static_cast<u32>(reloc.addend) : static_cast<Address>(reloc.addend);
                 return true;
             }
         }
@@ -363,20 +500,24 @@ bool ElfImage::resolvePointer(Address at, Address* out) const {
             const ElfSymbol* symbol = findSymbol(reloc.symbolName);
             if (symbol != nullptr && !symbol->undefined && symbol->value != 0) {
                 *out = symbol->value + static_cast<Address>(reloc.addend);
+                if (is32) *out = static_cast<u32>(*out);
                 return true;
             }
             return false;
         }
+        if (reloc.source == ElfRelocation::Source::kContainerBind) return false;
     }
 
+    if (containerPointersEncoded_) return false;
     u64 raw = 0;
-    if (!memory_.readInt(at, &raw)) return false;
-    if (raw == 0 || raw == ~static_cast<u64>(0)) return false;
+    if (!readPointer(memory_, at, &raw)) return false;
+    if (raw == 0 || raw == (is32 ? u64{0xffffffff} : ~static_cast<u64>(0))) return false;
     *out = raw;
     return true;
 }
 
 void ElfImage::resolvePointerArrays() {
+    const u64 width = pointerSize();
     // DT_INIT_ARRAY and friends hold function pointers. In a position-independent
     // image the slots are zero on disk and the addresses live in relocation
     // addends, so this has to go through resolvePointer() — reading the bytes
@@ -391,10 +532,10 @@ void ElfImage::resolvePointerArrays() {
         }
         if (arrayAddr == 0 || arraySize == 0) return;
 
-        const u64 count = std::min<u64>(arraySize / sizeof(u64), kMaxInitializers);
+        const u64 count = std::min<u64>(arraySize / width, kMaxInitializers);
         for (u64 i = 0; i < count; ++i) {
             Address target = 0;
-            if (resolvePointer(arrayAddr + i * sizeof(u64), &target)) {
+            if (resolvePointer(arrayAddr + i * width, &target)) {
                 out->push_back(target);
             }
         }
@@ -409,10 +550,10 @@ void ElfImage::resolvePointerArrays() {
         const ElfSection* section = findSection(".init_array");
         if (section != nullptr && section->size != 0) {
             const u64 count =
-                std::min<u64>(section->size / sizeof(u64), kMaxInitializers);
+                std::min<u64>(section->size / width, kMaxInitializers);
             for (u64 i = 0; i < count; ++i) {
                 Address target = 0;
-                if (resolvePointer(section->addr + i * sizeof(u64), &target)) {
+                if (resolvePointer(section->addr + i * width, &target)) {
                     initializers_.push_back(target);
                 }
             }
@@ -573,10 +714,11 @@ void ElfImage::readAndroidPackedRelocations(ByteView data) {
 
     ByteCursor cursor(data, 4);
     const i64 totalCount = cursor.nextSleb128();
-    Address offset = static_cast<Address>(cursor.nextSleb128());
+    const i64 firstOffset = cursor.nextSleb128();
+    Address offset = static_cast<Address>(firstOffset);
     i64 addend = 0;
 
-    if (!cursor.ok() || totalCount < 0 ||
+    if (!cursor.ok() || totalCount < 0 || firstOffset < 0 ||
         static_cast<u64>(totalCount) > kMaxRelocations) {
         addWarning("packed relocation header is malformed");
         return;
@@ -586,7 +728,10 @@ void ElfImage::readAndroidPackedRelocations(ByteView data) {
     while (emitted < static_cast<u64>(totalCount) && cursor.ok()) {
         const i64 groupSize = cursor.nextSleb128();
         const u64 groupFlags = static_cast<u64>(cursor.nextSleb128());
-        if (!cursor.ok() || groupSize <= 0) break;
+        if (!cursor.ok() || groupSize <= 0 || (groupFlags & ~u64{15}) ||
+            ((groupFlags & kGroupedByAddend) && !(groupFlags & kGroupHasAddend))) {
+            addWarning("packed relocation group flags/size are malformed"); break;
+        }
         if (static_cast<u64>(groupSize) > static_cast<u64>(totalCount) - emitted) {
             addWarning("packed relocation group overruns the declared count");
             break;
@@ -606,28 +751,42 @@ void ElfImage::readAndroidPackedRelocations(ByteView data) {
         }
 
         for (i64 i = 0; i < groupSize && cursor.ok(); ++i) {
-            offset += static_cast<Address>((groupFlags & kGroupedByOffsetDelta) != 0
-                                              ? groupOffsetDelta
-                                              : cursor.nextSleb128());
+            const i64 delta = (groupFlags & kGroupedByOffsetDelta) ? groupOffsetDelta : cursor.nextSleb128();
+            if ((delta >= 0 && offset > std::numeric_limits<Address>::max() - static_cast<u64>(delta)) ||
+                (delta < 0 && offset < static_cast<u64>(-(delta + 1)) + 1)) {
+                addWarning("packed relocation offset overflows"); return;
+            }
+            offset += static_cast<Address>(delta);
 
             const u64 info = (groupFlags & kGroupedByInfo) != 0
                                  ? groupInfo
                                  : static_cast<u64>(cursor.nextSleb128());
 
             if ((groupFlags & kGroupHasAddend) != 0) {
-                addend += (groupFlags & kGroupedByAddend) != 0 ? groupAddendDelta
-                                                              : cursor.nextSleb128();
+                const i64 deltaAddend = (groupFlags & kGroupedByAddend) ? groupAddendDelta : cursor.nextSleb128();
+                if ((deltaAddend > 0 && addend > std::numeric_limits<i64>::max() - deltaAddend) ||
+                    (deltaAddend < 0 && addend < std::numeric_limits<i64>::min() - deltaAddend)) {
+                    addWarning("packed relocation addend overflows"); return;
+                }
+                addend += deltaAddend;
             } else {
                 addend = 0;
             }
 
-            if (relocations_.size() >= kMaxRelocations) return;
+            if (!cursor.ok() || relocations_.size() >= kMaxRelocations) return;
+            if (format_ == ImageFormat::kElf32 && (offset > 0xffffffff || info > 0xffffffff)) {
+                addWarning("packed ELF32 relocation address/info exceeds 32-bit width"); return;
+            }
 
             ElfRelocation reloc;
             reloc.offset = offset;
-            reloc.type = relocType(info);
-            reloc.symbolIndex = relocSymbol(info);
+            reloc.type = format_ == ImageFormat::kElf32 ? static_cast<u32>(info & 255) : relocType(info);
+            reloc.symbolIndex = format_ == ImageFormat::kElf32 ? static_cast<u32>(info >> 8) : relocSymbol(info);
             reloc.addend = addend;
+            if (format_ == ImageFormat::kElf32 && !(groupFlags & kGroupHasAddend)) {
+                u32 implicit = 0;
+                if (memory_.readInt(offset, &implicit)) reloc.addend = static_cast<i32>(implicit);
+            }
             reloc.source = ElfRelocation::Source::kAndroidPacked;
             reloc.symbolName = dynamicSymbolName(reloc.symbolIndex);
             relocations_.push_back(std::move(reloc));
@@ -658,7 +817,7 @@ void ElfImage::readRelrRelocations(ByteView data) {
             if (relocations_.size() >= kMaxRelocations) return;
             ElfRelocation reloc;
             reloc.offset = where;
-            reloc.type = arch_ == Arch::kAArch64 ? kRAArch64Relative : kRX86_64Relative;
+            reloc.type = arch_ == Arch::kAArch64 ? kRAArch64Relative : (arch_ == Arch::kRiscV64 ? 3 : kRX86_64Relative);
             reloc.source = ElfRelocation::Source::kRelr;
             relocations_.push_back(std::move(reloc));
             where += sizeof(u64);
@@ -671,7 +830,7 @@ void ElfImage::readRelrRelocations(ByteView data) {
             if (relocations_.size() >= kMaxRelocations) return;
             ElfRelocation reloc;
             reloc.offset = bitmapBase + static_cast<Address>(bit - 1) * sizeof(u64);
-            reloc.type = arch_ == Arch::kAArch64 ? kRAArch64Relative : kRX86_64Relative;
+            reloc.type = arch_ == Arch::kAArch64 ? kRAArch64Relative : (arch_ == Arch::kRiscV64 ? 3 : kRX86_64Relative);
             reloc.source = ElfRelocation::Source::kRelr;
             relocations_.push_back(std::move(reloc));
         }
@@ -755,8 +914,9 @@ void ElfImage::reconstructPlt() {
     // same order as the stubs themselves. That ordering is the whole basis for
     // this recovery; a non-standard linker would break it, which is why the
     // result is advisory naming rather than anything analysis depends on.
-    const u32 jumpSlot =
-        arch_ == Arch::kAArch64 ? kRAArch64JumpSlot : kRX86_64JumpSlot;
+    const u32 jumpSlot = arch_ == Arch::kAArch64 ? kRAArch64JumpSlot :
+        (arch_ == Arch::kArm32 || arch_ == Arch::kThumb ? 22 :
+         (arch_ == Arch::kRiscV32 || arch_ == Arch::kRiscV64 ? 5 : kRX86_64JumpSlot));
 
     std::vector<const ElfRelocation*> jumpSlots;
     for (const ElfRelocation& reloc : relocations_) {
@@ -780,11 +940,15 @@ void ElfImage::reconstructPlt() {
     };
     static const Layout kAArch64Layouts[] = {{32, 16}, {32, 24}, {0, 16}, {0, 24}};
     static const Layout kX86Layouts[] = {{16, 16}, {0, 16}};
+    static const Layout kArmLayouts[] = {{20, 12}, {32, 16}};
+    static const Layout kRiscVLayouts[] = {{32, 16}};
 
-    const Layout* candidates =
-        arch_ == Arch::kAArch64 ? kAArch64Layouts : kX86Layouts;
-    const size_t candidateCount =
-        arch_ == Arch::kAArch64 ? std::size(kAArch64Layouts) : std::size(kX86Layouts);
+    const Layout* candidates = arch_ == Arch::kAArch64 ? kAArch64Layouts :
+        (arch_ == Arch::kArm32 || arch_ == Arch::kThumb ? kArmLayouts :
+         (arch_ == Arch::kRiscV32 || arch_ == Arch::kRiscV64 ? kRiscVLayouts : kX86Layouts));
+    const size_t candidateCount = arch_ == Arch::kAArch64 ? std::size(kAArch64Layouts) :
+        (arch_ == Arch::kArm32 || arch_ == Arch::kThumb ? std::size(kArmLayouts) :
+         (arch_ == Arch::kRiscV32 || arch_ == Arch::kRiscV64 ? std::size(kRiscVLayouts) : std::size(kX86Layouts)));
 
     const u64 slots = jumpSlots.size();
     const Layout* chosen = nullptr;

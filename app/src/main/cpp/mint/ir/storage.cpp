@@ -1,6 +1,7 @@
 #include "mint/ir/storage.h"
 
 #include "mint/ir/registers.h"
+#include "mint/plugin/architecture_bridge.h"
 
 namespace mint {
 namespace {
@@ -34,7 +35,27 @@ StorageUnit canonicalUnit(Arch arch, u64 offset, u8 size) {
     switch (arch) {
         case Arch::kAArch64: return arm64Unit(offset);
         case Arch::kX86_64: return x86Unit(offset);
+        case Arch::kX86_32:
+            if(offset<x86::kFlagCf)return {offset-offset%8,4};
+            if(offset<=x86::kFlagOf)return {offset,1};
+            if(offset<x86::kXmm0)return {x86::kFsBase+((offset-x86::kFsBase)/8)*8,4};
+            return alignedUnit(x86::kXmm0,offset,16);
+        case Arch::kArm32:case Arch::kThumb:
+            if(offset<64)return alignedUnit(0,offset,4);
+            if(offset<=arm32::kFlagV)return {offset,1};
+            return alignedUnit(arm32::kV0,offset,16);
+        case Arch::kRiscV32:case Arch::kRiscV64:
+            if(offset<=riscv::kPc)return {offset-offset%8,static_cast<u8>(arch==Arch::kRiscV32?4:8)};
+            return alignedUnit(riscv::kF0,offset,8);
         default:
+            if(static_cast<u8>(arch)>=128) {
+                MintArchitectureSemanticsV2 custom{};StorageUnit best{offset,size};
+                if(architecturePluginAbi(arch,&custom))for(u32 n=0;n<custom.register_count;++n) {
+                    const auto& reg=custom.registers[n];
+                    if(reg.byte_offset<=offset && offset+size<=u64(reg.byte_offset)+reg.width && reg.width>=best.size)best={reg.byte_offset,reg.width};
+                }
+                return best;
+            }
             // With no layout to consult, treating the access as its own unit keeps
             // every caller working: SSA then renames exactly what the lifter wrote,
             // which is the best available answer for an architecture we do not model.

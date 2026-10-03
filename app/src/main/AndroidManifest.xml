@@ -2,14 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!--
-      There is no INTERNET permission anywhere in this project, and no permission
-      of any kind is declared here. "Fully offline" should be something the
-      manifest guarantees rather than something a store description claims.
-    -->
+    <!-- Static analysis stays local. Network is used only for an explicit
+         debugger connection to the numeric address entered by the user. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"

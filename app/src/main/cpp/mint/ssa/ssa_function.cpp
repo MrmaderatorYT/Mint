@@ -49,6 +49,9 @@ bool dominatesValue(const SsaFunction& function, const Dominance& dominance,
 
 bool hasSideEffect(MintOp op) {
     switch (op) {
+        case MintOp::kMemoryFence:
+        case MintOp::kAtomicLoad:case MintOp::kAtomicStore:case MintOp::kAtomicExchange:case MintOp::kAtomicAdd:case MintOp::kAtomicCompareExchange:
+        case MintOp::kVectorStore:
         case MintOp::kStore:
         case MintOp::kBranch:
         case MintOp::kCondBranch:
@@ -161,6 +164,10 @@ std::vector<std::string> SsaFunction::verify() const {
         if (entry.second != kNoValue && entry.second < observedUses.size()) {
             ++observedUses[entry.second];
         }
+    }
+    for(const auto& entry:abiReturnValues) {
+        if(entry.instruction>=insns.size() || insns[entry.instruction].op!=MintOp::kReturn || entry.value>=values.size() || !entry.storage.isRegister())report("invalid ABI return evidence");
+        else ++observedUses[entry.value];
     }
     for (size_t index = 0; index < insns.size(); ++index) {
         const SsaInsn& insn = insns[index];

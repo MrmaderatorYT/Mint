@@ -8,15 +8,17 @@ public final class NavigationHistory {
     private final Deque<Long> back = new ArrayDeque<>();
     private final Deque<Long> forward = new ArrayDeque<>();
     private long current;
+    private boolean initialized;
 
     public void push(long address) {
         // Going Back first updates current, then the Activity renders that address
         // through the same navigation path as a fresh jump. Re-pushing the current
         // address must always be a no-op, including after the final back entry was
         // popped; otherwise that last entry immediately recreates itself.
-        if (address == current) return;
-        if (current != 0) back.push(current);
+        if (initialized && address == current) return;
+        if (initialized) back.push(current);
         current = address;
+        initialized = true;
         forward.clear();
     }
 
@@ -37,5 +39,5 @@ public final class NavigationHistory {
     public long current() { return current; }
     public boolean canGoBack() { return !back.isEmpty(); }
     public boolean canGoForward() { return !forward.isEmpty(); }
-    public void clear() { back.clear(); forward.clear(); current = 0; }
+    public void clear() { back.clear(); forward.clear(); current = 0; initialized = false; }
 }

@@ -33,8 +33,9 @@ u64 truncateToWidth(u64 value, u8 size) {
     return value & ((u64(1) << (unsigned(size) * 8)) - 1);
 }
 
-Varnode registerView(unsigned capstoneRegister, u8 operandSize) {
-    Varnode value = registerFromCapstone(Arch::kX86_64, capstoneRegister);
+u8 wordSize(IrBuilder& builder) {return builder.function()->arch==Arch::kX86_32?4:8;}
+Varnode registerView(unsigned capstoneRegister, u8 operandSize,IrBuilder& builder) {
+    Varnode value = registerFromCapstone(builder.function()->arch, capstoneRegister);
     // Capstone names scalar XMM operands with XMM registers, whose architectural
     // storage is 16 bytes, while the instruction may touch only the low 4 or 8.
     // Keep the operand's view instead of widening a movss/movsd into a full write.
@@ -49,21 +50,22 @@ Varnode effectiveAddress(const cs_insn& insn, const cs_x86_op& operand,
     const x86_op_mem& mem = operand.mem;
     Varnode address;
     if (mem.base == X86_REG_RIP) {
-        address = Varnode::constant(static_cast<u64>(insn.address + insn.size + mem.disp), 8);
+        address = Varnode::constant(static_cast<u64>(insn.address + insn.size + mem.disp), wordSize(builder));
     } else if (mem.base != X86_REG_INVALID) {
-        address = registerFromCapstone(Arch::kX86_64, mem.base);
+        address = registerFromCapstone(builder.function()->arch, mem.base);
     } else {
-        address = Varnode::constant(static_cast<u64>(mem.disp), 8);
+        // The displacement is the whole address, not an additional displacement.
+        address = Varnode::constant(truncateToWidth(static_cast<u64>(mem.disp),wordSize(builder)), wordSize(builder));
     }
     if (mem.index != X86_REG_INVALID) {
-        Varnode index = registerFromCapstone(Arch::kX86_64, mem.index);
+        Varnode index = registerFromCapstone(builder.function()->arch, mem.index);
         if (mem.scale != 1) index = builder.binary(MintOp::kMul, index,
                                                      Varnode::constant(mem.scale, index.size));
         address = builder.binary(MintOp::kAdd, address, index);
     }
-    if (mem.base != X86_REG_RIP && mem.disp != 0) {
+    if (mem.base != X86_REG_INVALID && mem.base != X86_REG_RIP && mem.disp != 0) {
         address = builder.binary(MintOp::kAdd, address,
-                                 Varnode::constant(static_cast<u64>(mem.disp), 8));
+                                 Varnode::constant(truncateToWidth(static_cast<u64>(mem.disp),address.size), address.size));
     }
     return address;
 }
@@ -71,9 +73,9 @@ Varnode effectiveAddress(const cs_insn& insn, const cs_x86_op& operand,
 Operand readOperand(const cs_insn& insn, const cs_x86_op& operand, IrBuilder& builder) {
     Operand result;
     if (operand.type == X86_OP_REG) {
-        result.value = registerView(operand.reg, operand.size);
+        result.value = registerView(operand.reg, operand.size,builder);
     } else if (operand.type == X86_OP_IMM) {
-        const u8 width = operand.size ? operand.size : 8;
+        const u8 width = operand.size ? operand.size : wordSize(builder);
         // Capstone exposes signed immediates as i64. The IR constant is an
         // unsigned bit pattern, so -48 in an 8-bit add must become 0xd0 rather
         // than 0xffffffffffffffd0 tagged as one byte.
@@ -82,7 +84,7 @@ Operand readOperand(const cs_insn& insn, const cs_x86_op& operand, IrBuilder& bu
     } else if (operand.type == X86_OP_MEM) {
         result.memory = true;
         result.address = effectiveAddress(insn, operand, builder);
-        result.value = builder.newTemp(operand.size ? operand.size : 8);
+        result.value = builder.newTemp(operand.size ? operand.size : wordSize(builder));
         builder.emit(MintOp::kLoad, result.value, result.address);
     }
     return result;
@@ -92,7 +94,7 @@ Operand writeTarget(const cs_insn& insn, const cs_x86_op& operand,
                     IrBuilder& builder) {
     Operand result;
     if (operand.type == X86_OP_REG) {
-        result.value = registerView(operand.reg, operand.size);
+        result.value = registerView(operand.reg, operand.size,builder);
     } else if (operand.type == X86_OP_MEM) {
         result.memory = true;
         result.address = effectiveAddress(insn, operand, builder);
@@ -107,12 +109,12 @@ void writeOperand(const cs_x86_op& operand, const Operand& destination,
         if (value.size != operand.size) value = builder.resize(value, operand.size, false);
         builder.emit(MintOp::kStore, Varnode::invalid(), destination.address, value);
     } else if (operand.type == X86_OP_REG) {
-        const Varnode target = registerView(operand.reg, operand.size);
+        const Varnode target = registerView(operand.reg, operand.size,builder);
         if (!target.valid()) return;
         if (value.size != target.size) value = builder.resize(value, target.size, false);
         // Every 32-bit GPR write in 64-bit mode clears the upper half. Treating
         // eax as an ordinary four-byte window would preserve stale rax[63:32].
-        if (target.size == 4 && target.offset < x86::kRip &&
+        if (wordSize(builder)==8 && target.size == 4 && target.offset < x86::kRip &&
             target.offset % 8 == 0) {
             builder.assign(Varnode::reg(target.offset, 8),
                            builder.resize(value, 8, false));
@@ -360,7 +362,7 @@ const PackedOp* findIn(const PackedOp* table, size_t count, unsigned id) {
 bool liftPacked(const cs_insn& insn, const cs_x86_op* ops, u8 count,
                 IrBuilder& builder) {
     if (count < 2 || ops[0].type != X86_OP_REG) return false;
-    const Varnode target = registerView(ops[0].reg, ops[0].size);
+    const Varnode target = registerView(ops[0].reg, ops[0].size,builder);
     if (!target.valid() || target.size != 16) return false;
 
     if (const PackedOp* packed =
@@ -433,7 +435,74 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
     const auto& ops = x86Insn.operands;
     const u8 count = x86Insn.op_count;
 
-    if (insn.id == X86_INS_NOP || insn.id == X86_INS_ENDBR64) return;
+    if (insn.id == X86_INS_NOP || insn.id == X86_INS_ENDBR64 || insn.id==X86_INS_ENDBR32) return;
+    if(insn.id==X86_INS_MFENCE||insn.id==X86_INS_LFENCE||insn.id==X86_INS_SFENCE){builder.emit(MintOp::kMemoryFence,Varnode::invalid());return;}
+    const bool locked=x86Insn.prefix[0]==X86_PREFIX_LOCK;
+    if(count==2 && ops[0].type==X86_OP_MEM && ops[1].type==X86_OP_REG && (insn.id==X86_INS_XCHG || (locked&&(insn.id==X86_INS_XADD||insn.id==X86_INS_CMPXCHG)))) {
+        const u8 width=ops[0].size;
+        if((width!=1&&width!=2&&width!=4&&width!=8)||ops[1].size!=width){builder.emitIntrinsic(u16(insn.id));return;}
+        const auto address=effectiveAddress(insn,ops[0],builder),source=registerView(ops[1].reg,width,builder);
+        const auto previous=builder.newTemp(width),snapshot=builder.newTemp(width);builder.assign(snapshot,source);
+        if(insn.id==X86_INS_CMPXCHG) {
+            const auto expected=builder.newTemp(width);builder.assign(expected,Varnode::reg(x86::kRax,width));
+            builder.emit(MintOp::kAtomicCompareExchange,previous,address,expected,snapshot);
+            setArithmeticFlags(builder,MintOp::kSub,expected,previous,builder.binary(MintOp::kSub,expected,previous));
+            auto accumulator=ops[1];accumulator.reg=width==8?X86_REG_RAX:width==4?X86_REG_EAX:width==2?X86_REG_AX:X86_REG_AL;
+            writeOperand(accumulator,{},previous,builder);
+        } else {
+            builder.emit(insn.id==X86_INS_XADD?MintOp::kAtomicAdd:MintOp::kAtomicExchange,previous,address,snapshot);
+            if(insn.id==X86_INS_XADD)setArithmeticFlags(builder,MintOp::kAdd,previous,snapshot,builder.binary(MintOp::kAdd,previous,snapshot));
+            writeOperand(ops[1],{},previous,builder);
+        }
+        return;
+    }
+    // Other LOCK operations need an atomic read/modify/write opcode, not a
+    // nonatomic load followed by store. Keep them visible as unsupported.
+    if(locked){builder.emitIntrinsic(u16(insn.id));return;}
+    // String MOVSD shares its Capstone id with scalar SSE MOVSD. It updates
+    // RSI/RDI according to DF and possibly repeats; ordinary move is unsound.
+    if(insn.id==X86_INS_MOVSD && count==2 && ops[0].type==X86_OP_MEM && ops[1].type==X86_OP_MEM){builder.emitIntrinsic(u16(insn.id));return;}
+    MintOp scalarFp=MintOp::kInvalid;u8 fpWidth=0;bool fpUnary=false,integerSource=false,integerDestination=false;
+    switch(insn.id) {
+        case X86_INS_ADDSS:scalarFp=MintOp::kFloatAdd;fpWidth=4;break;case X86_INS_ADDSD:scalarFp=MintOp::kFloatAdd;fpWidth=8;break;
+        case X86_INS_SUBSS:scalarFp=MintOp::kFloatSub;fpWidth=4;break;case X86_INS_SUBSD:scalarFp=MintOp::kFloatSub;fpWidth=8;break;
+        case X86_INS_MULSS:scalarFp=MintOp::kFloatMul;fpWidth=4;break;case X86_INS_MULSD:scalarFp=MintOp::kFloatMul;fpWidth=8;break;
+        case X86_INS_DIVSS:scalarFp=MintOp::kFloatDiv;fpWidth=4;break;case X86_INS_DIVSD:scalarFp=MintOp::kFloatDiv;fpWidth=8;break;
+        case X86_INS_SQRTSS:scalarFp=MintOp::kFloatSqrt;fpWidth=4;fpUnary=true;break;case X86_INS_SQRTSD:scalarFp=MintOp::kFloatSqrt;fpWidth=8;fpUnary=true;break;
+        case X86_INS_CVTSI2SS:scalarFp=MintOp::kIntToFloat;fpWidth=4;fpUnary=true;integerSource=true;break;
+        case X86_INS_CVTSI2SD:scalarFp=MintOp::kIntToFloat;fpWidth=8;fpUnary=true;integerSource=true;break;
+        case X86_INS_CVTTSS2SI:scalarFp=MintOp::kFloatToInt;fpWidth=4;fpUnary=true;integerDestination=true;break;
+        case X86_INS_CVTTSD2SI:scalarFp=MintOp::kFloatToInt;fpWidth=8;fpUnary=true;integerDestination=true;break;
+        case X86_INS_CVTSS2SD:scalarFp=MintOp::kFloatConvert;fpWidth=8;fpUnary=true;break;
+        case X86_INS_CVTSD2SS:scalarFp=MintOp::kFloatConvert;fpWidth=4;fpUnary=true;break;
+        default:break;
+    }
+    if(scalarFp!=MintOp::kInvalid) {
+        if(count!=2 || ops[0].type!=X86_OP_REG){builder.emitIntrinsic(u16(insn.id));return;}
+        auto source=readOperand(insn,ops[1],builder).value;
+        const u8 sourceWidth=integerSource ? ops[1].size : scalarFp==MintOp::kFloatConvert ? (fpWidth==4?8:4) : fpWidth;
+        if(!source.valid() || (sourceWidth!=4&&sourceWidth!=8)){builder.emitIntrinsic(u16(insn.id));return;}
+        source=builder.resize(source,sourceWidth,false);
+        const u8 destinationWidth=integerDestination ? ops[0].size : fpWidth;
+        const auto destination=registerView(ops[0].reg,destinationWidth,builder);
+        if(!destination.valid() || (destinationWidth!=4&&destinationWidth!=8)){builder.emitIntrinsic(u16(insn.id));return;}
+        const auto value=fpUnary ? builder.unary(scalarFp,source,destinationWidth) : builder.binary(scalarFp,destination,source);
+        Operand target;target.value=destination;auto destinationOperand=ops[0];destinationOperand.size=destinationWidth;writeOperand(destinationOperand,target,value,builder);return;
+    }
+    if((insn.id==X86_INS_MOVSS||insn.id==X86_INS_MOVSD) && count==2 && (ops[0].type==X86_OP_MEM || ops[0].type==X86_OP_REG) && ((ops[0].type==X86_OP_REG&&registerFromCapstone(builder.function()->arch,ops[0].reg).size==16)||(ops[1].type==X86_OP_REG&&registerFromCapstone(builder.function()->arch,ops[1].reg).size==16))) {
+        const u8 width=insn.id==X86_INS_MOVSS ? 4 : 8;
+        const auto source=readOperand(insn,ops[1],builder).value;
+        if(!source.valid()){builder.emitIntrinsic(u16(insn.id));return;}
+        const auto value=builder.resize(source,width,false);
+        if(ops[0].type==X86_OP_REG && ops[1].type==X86_OP_MEM) {
+            const auto whole=registerFromCapstone(builder.function()->arch,ops[0].reg);
+            if(!whole.valid() || whole.size!=16){builder.emitIntrinsic(u16(insn.id));return;}
+            builder.assign(whole,builder.resize(value,16,false));
+        } else {
+            auto destination=ops[0];destination.size=width;const auto target=writeTarget(insn,destination,builder);writeOperand(destination,target,value,builder);
+        }
+        return;
+    }
     if (insn.id == X86_INS_UCOMISS || insn.id == X86_INS_UCOMISD ||
         insn.id == X86_INS_COMISS || insn.id == X86_INS_COMISD) {
         // Scalar floating-point compare. The three flags encode a four-way result,
@@ -479,20 +548,21 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
         builder.emit(MintOp::kTrap, Varnode::invalid());
         return;
     }
-    if (insn.id == X86_INS_RET || insn.id == X86_INS_RETF || insn.id == X86_INS_IRETQ) {
+    if (insn.id == X86_INS_RET) {
         // x86 has no link register: `ret` reads the return address from the top of
         // the stack and pops it. Modelling that is not optional — kReturn declares a
         // source, so emitting none produced structurally invalid IR for every
         // function in the image, and the stack adjustment is real state the caller
         // observes. `ret imm16` pops that many extra bytes.
-        const Varnode stack = Varnode::reg(x86::kRsp, 8);
-        const Varnode target = builder.unary(MintOp::kLoad, stack, 8);
-        u64 popped = 8;
+        const auto word=wordSize(builder);
+        const Varnode stack = Varnode::reg(x86::kRsp, word);
+        const Varnode target = builder.unary(MintOp::kLoad, stack, word);
+        u64 popped = word;
         if (count > 0 && ops[0].type == X86_OP_IMM) {
             popped += static_cast<u64>(ops[0].imm);
         }
         builder.assign(stack,
-                       builder.binary(MintOp::kAdd, stack, Varnode::constant(popped, 8)));
+                       builder.binary(MintOp::kAdd, stack, Varnode::constant(popped, word)));
         builder.emit(MintOp::kReturn, Varnode::invalid(), target);
         return;
     }
@@ -524,10 +594,10 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
     if (insn.id == X86_INS_PUSH && count > 0) {
         Operand source = readOperand(insn, ops[0], builder);
         if (source.value.valid()) {
-            const u8 slot = ops[0].size == 2 ? 2 : 8;
-            const Varnode stack = Varnode::reg(x86::kRsp, 8);
+            const auto word=wordSize(builder);const u8 slot = ops[0].size == 2 ? 2 : word;
+            const Varnode stack = Varnode::reg(x86::kRsp, word);
             const Varnode next = builder.binary(
-                MintOp::kSub, stack, Varnode::constant(slot, 8));
+                MintOp::kSub, stack, Varnode::constant(slot, word));
             builder.assign(stack, next);
             Varnode value = source.value;
             if (value.size != slot) {
@@ -540,11 +610,11 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
     if (insn.id == X86_INS_POP && count > 0) {
         Operand destination = writeTarget(insn, ops[0], builder);
         if (destination.value.valid() || destination.address.valid()) {
-            const u8 slot = ops[0].size == 2 ? 2 : 8;
-            const Varnode stack = Varnode::reg(x86::kRsp, 8);
+            const auto word=wordSize(builder);const u8 slot = ops[0].size == 2 ? 2 : word;
+            const Varnode stack = Varnode::reg(x86::kRsp, word);
             const Varnode value = builder.unary(MintOp::kLoad, stack, slot);
             builder.assign(stack, builder.binary(
-                MintOp::kAdd, stack, Varnode::constant(slot, 8)));
+                MintOp::kAdd, stack, Varnode::constant(slot, word)));
             writeOperand(ops[0], destination, value, builder);
             return;
         }
@@ -602,9 +672,13 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
             }
             const Varnode result = builder.binary(
                 MintOp::kAdd, dst.value, source);
-            writeOperand(ops[0], dst, result, builder);
-            writeOperand(ops[1], src, dst.value, builder);
+            const Varnode oldDestination=builder.newTemp(dst.value.size);
+            builder.assign(oldDestination,dst.value);
             setArithmeticFlags(builder, MintOp::kAdd, dst.value, source, result);
+            writeOperand(ops[0], dst, result, builder);
+            writeOperand(ops[1], src, oldDestination, builder);
+            if(ops[0].type==X86_OP_REG && ops[1].type==X86_OP_REG && ops[0].reg==ops[1].reg)
+                writeOperand(ops[0],dst,result,builder);
             return;
         }
         if ((insn.id == X86_INS_ADC || insn.id == X86_INS_SBB) &&
@@ -627,7 +701,6 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
             const MintOp step = subtract ? MintOp::kSub : MintOp::kAdd;
             const Varnode partial = builder.binary(step, dst.value, source);
             const Varnode result = builder.binary(step, partial, carryIn);
-            writeOperand(ops[0], dst, result, builder);
             setCommonFlags(builder, result);
 
             const MintOp carryOp = subtract ? MintOp::kBorrowSub : MintOp::kCarryAdd;
@@ -651,6 +724,7 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
                 builder.binary(MintOp::kNotEqual, signResult, signLeft);
             builder.assign(flag(x86::kFlagOf),
                            builder.binary(MintOp::kAnd, related, turned));
+            writeOperand(ops[0], dst, result, builder);
             return;
         }
         if ((insn.id == X86_INS_BSR || insn.id == X86_INS_BSF) &&
@@ -701,13 +775,13 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
                 source = builder.resize(source, dst.value.size, false);
             }
             const Varnode result = builder.binary(op, dst.value, source);
-            writeOperand(ops[0], dst, result, builder);
             if (insn.id == X86_INS_ADD || insn.id == X86_INS_SUB) {
                 setArithmeticFlags(builder, op, dst.value, source, result);
             } else if (insn.id == X86_INS_AND || insn.id == X86_INS_OR ||
                        insn.id == X86_INS_XOR) {
                 setLogicalFlags(builder, result);
             }
+            writeOperand(ops[0], dst, result, builder);
             return;
         }
         if (insn.id == X86_INS_CMP || insn.id == X86_INS_TEST) {
@@ -820,17 +894,19 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
                 insn.id == X86_INS_INC ? MintOp::kAdd : MintOp::kSub;
             const Varnode one = Varnode::constant(1, dst.value.size);
             const Varnode result = builder.binary(operation, dst.value, one);
-            writeOperand(ops[0], dst, result, builder);
             // INC/DEC preserve CF, but update the remaining arithmetic flags.
             setCommonFlags(builder, result);
             builder.assign(flag(x86::kFlagOf), builder.binary(
                 operation == MintOp::kAdd ? MintOp::kOverflowAdd
                                           : MintOp::kOverflowSub,
                 dst.value, one));
+            writeOperand(ops[0], dst, result, builder);
             return;
         }
         if (insn.id == X86_INS_NEG) {
-            writeOperand(ops[0], dst, builder.unary(MintOp::kNeg, dst.value, dst.value.size), builder);
+            const Varnode result=builder.unary(MintOp::kNeg,dst.value,dst.value.size);
+            setArithmeticFlags(builder,MintOp::kSub,zero(dst.value.size),dst.value,result);
+            writeOperand(ops[0],dst,result,builder);
             return;
         }
         if (insn.id >= X86_INS_SETAE && insn.id <= X86_INS_SETS) {

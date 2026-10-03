@@ -10,6 +10,11 @@ import org.junit.Test;
 
 /** Regression tests for the address navigation used by the real workspace UI. */
 public final class NavigationHistoryTest {
+    @Test public void addressZeroIsARealHistoryEntry() {
+        NavigationHistory history=new NavigationHistory();history.push(0);history.push(4);
+        assertTrue(history.canGoBack());assertEquals(0,history.back());history.push(0);
+        assertFalse(history.canGoBack());assertTrue(history.canGoForward());assertEquals(4,history.forward());
+    }
     @Test
     public void backAndForwardPreserveTargets() {
         NavigationHistory history = new NavigationHistory();

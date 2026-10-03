@@ -14,21 +14,25 @@ void InterpState::reset(Arch arch) {
 }
 
 InterpValue InterpState::registerValue(u64 offset, u8 width) const {
-    if (width == 0 || width > 8 || offset > registerBytes_.size() || width > registerBytes_.size() - offset) {
+    if (width == 0 || width > 16 || offset > registerBytes_.size() || width > registerBytes_.size() - offset) {
         return InterpValue::unknown(width);
     }
-    u64 bits = 0;
+    u64 bits = 0,high=0;
     for (u8 i = 0; i < width; ++i) {
         if (!registerKnown_[offset + i]) return InterpValue::unknown(width);
-        bits |= static_cast<u64>(registerBytes_[offset + i]) << (i * 8);
+        if(i<8)bits |= static_cast<u64>(registerBytes_[offset + i]) << (i * 8);
+        else high|=static_cast<u64>(registerBytes_[offset+i])<<((i-8)*8);
     }
-    return InterpValue::concrete(bits, width);
+    return InterpValue::wide(bits,high,width);
 }
 
 void InterpState::setRegister(u64 offset, u64 bits, u8 width) {
-    if (width == 0 || width > 8 || offset > registerBytes_.size() || width > registerBytes_.size() - offset) return;
+    setRegisterWide(offset,bits,0,width);
+}
+void InterpState::setRegisterWide(u64 offset,u64 bits,u64 high,u8 width) {
+    if (width == 0 || width > 16 || offset > registerBytes_.size() || width > registerBytes_.size() - offset) return;
     for (u8 i = 0; i < width; ++i) {
-        registerBytes_[offset + i] = static_cast<u8>(bits >> (i * 8));
+        registerBytes_[offset + i] = static_cast<u8>(i<8 ? bits >> (i * 8) : high>>((i-8)*8));
         registerKnown_[offset + i] = true;
     }
 }
@@ -47,7 +51,7 @@ InterpValue InterpState::read(const Varnode& node) const {
 void InterpState::write(const Varnode& node, const InterpValue& value) {
     if (!node.valid() || !node.size) return;
     if (node.isRegister()) {
-        if (value.concreteLike()) setRegister(node.offset, value.bits, node.size);
+        if (value.concreteLike()) setRegisterWide(node.offset, value.bits,value.highBits, node.size);
         else if (node.offset <= registerBytes_.size() && node.size <= registerBytes_.size() - node.offset) {
             for (u8 i = 0; i < node.size; ++i) registerKnown_[node.offset + i] = false;
         }

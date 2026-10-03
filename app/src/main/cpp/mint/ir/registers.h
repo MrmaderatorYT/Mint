@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "mint/base/types.h"
 #include "mint/ir/varnode.h"
@@ -95,6 +96,19 @@ constexpr u64 kFileSize = 416;
 
 }  // namespace x86
 
+namespace arm32 {
+constexpr u64 kRn(unsigned n){return u64(n)*4;}
+constexpr u64 kSp=kRn(13),kLr=kRn(14),kPc=kRn(15);
+constexpr u64 kFlagN=64,kFlagZ=65,kFlagC=66,kFlagV=67;
+constexpr u64 kV0=72,kFileSize=328;
+}
+namespace riscv {
+// XLEN32 uses the low four-byte unit of each eight-byte slot. This keeps the
+// logical register mapping stable without introducing false64-bit aliases.
+constexpr u64 kXn(unsigned n){return u64(n)*8;}
+constexpr u64 kSp=kXn(2),kPc=256,kF0=264,kFileSize=520;
+}
+
 /// Size of the register file for an architecture, which is how much storage an
 /// emulator has to provide.
 u64 registerFileSize(Arch arch);
@@ -111,5 +125,6 @@ std::string registerName(Arch arch, u64 offset, u8 size);
 /// Declared here but implemented per-architecture next to the lifter that needs
 /// it, so that Capstone's headers stay out of the IR's public interface.
 Varnode registerFromCapstone(Arch arch, unsigned capstoneReg);
+std::vector<Varnode> abiResultRegisters(Arch arch);
 
 }  // namespace mint

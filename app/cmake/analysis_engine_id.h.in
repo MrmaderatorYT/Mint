@@ -1,0 +1,2 @@
+#pragma once
+#define MINT_ANALYSIS_ENGINE_ID "@MINT_ANALYSIS_ENGINE_ID@"

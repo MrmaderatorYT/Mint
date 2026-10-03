@@ -232,6 +232,16 @@ enum class MintOp : u8 {
     kFloatLess,
     /// dest = 1 when either operand is a NaN, so no ordering holds.
     kFloatUnordered,
+    kIntToFloatU, ///< Unsigned integer -> IEEE scalar; distinct from signed.
+    kFloatToIntU, ///< IEEE scalar -> unsigned integer, truncate toward zero.
+    kFloatConvert, ///< IEEE32 <-> IEEE64 representation conversion, not a copy.
+    kMemoryFence, ///< Ordering barrier; no single-thread value effect.
+    kAtomicLoad,
+    kAtomicStore,
+    kAtomicExchange,
+    kAtomicAdd,
+    /// Returns original memory; write c iff original memory equals b.
+    kAtomicCompareExchange,
 };
 
 /// Static facts about an opcode, for the printer, the verifier and the emulator.

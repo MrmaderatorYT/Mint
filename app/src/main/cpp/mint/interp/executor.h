@@ -29,6 +29,9 @@ struct InterpOptions {
     u32 maxSteps = 100000;
     bool stopOnCall = false;
     bool executeIntrinsics = false;
+    // Explicit assumption: IEEE32/64 nearest-even, no FTZ/default-NaN/traps.
+    // Disabled by default because target FPCR/MXCSR are not generally known.
+    bool assumeDefaultFloatingPoint = false;
 };
 
 Status executeIr(const IrFunction& function, InterpState* state,

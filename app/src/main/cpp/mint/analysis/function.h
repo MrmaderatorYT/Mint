@@ -18,6 +18,11 @@ enum class FunctionOrigin : u8 {
     kCallTarget,    ///< Discovered as the target of a direct call.
     kPltStub,
     kJniExport,     ///< Named Java_* or JNI_OnLoad.
+    kUser,          ///< Explicit persistent user-defined function entry.
+    kUnwind,        ///< Validated ELF EH-frame binary-search entry.
+    kRelocation,    ///< Executable pointer supplied by an ELF relocation.
+    kLinearSweep,   ///< Prologue heuristic; lower confidence than metadata.
+    kDwarf,         ///< Validated debug-information function entry.
 };
 
 const char* functionOriginName(FunctionOrigin origin);
@@ -26,6 +31,7 @@ struct Function {
     Address entry = 0;
     std::string name;
     FunctionOrigin origin = FunctionOrigin::kCallTarget;
+    Arch decodeArch = Arch::kUnknown; ///< Function entry mode; ARM and Thumb may coexist.
 
     /// Address span actually covered by decoded instructions. Not necessarily
     /// contiguous — obfuscated code is routinely scattered — so this is a hull,

@@ -10,6 +10,7 @@
 #include "mint/ir/dominance.h"
 #include "mint/ir/registers.h"
 #include "mint/ir/storage.h"
+#include "mint/plugin/architecture_bridge.h"
 
 namespace mint {
 namespace {
@@ -55,7 +56,10 @@ Varnode resultRegister(Arch arch) {
     switch (arch) {
         case Arch::kAArch64: return Varnode::reg(arm64::kXn(0), 8);
         case Arch::kX86_64: return Varnode::reg(x86::kRax, 8);
-        default: return Varnode::invalid();
+        case Arch::kX86_32:return Varnode::reg(x86::kRax,4);
+        case Arch::kArm32:case Arch::kThumb:return Varnode::reg(arm32::kRn(0),4);
+        case Arch::kRiscV32:case Arch::kRiscV64:return Varnode::reg(riscv::kXn(10),arch==Arch::kRiscV32?4:8);
+        default:{const auto candidates=abiResultRegisters(arch);return candidates.empty()?Varnode::invalid():candidates[0];}
     }
 }
 
@@ -74,6 +78,11 @@ Varnode resultRegister(Arch arch) {
 /// that cannot produce a wrong answer is acceptable as a default.
 std::vector<Varnode> callerSavedUnits(Arch arch) {
     std::vector<Varnode> units;
+    if(static_cast<u8>(arch)>=128) {
+        MintArchitectureSemanticsV2 custom{};
+        if(architecturePluginAbi(arch,&custom))for(u32 n=0;n<custom.register_count;++n)if(custom.registers[n].byte_offset!=custom.stack_pointer_offset)units.push_back(Varnode::reg(custom.registers[n].byte_offset,custom.registers[n].width));
+        return units;
+    }
     if (arch == Arch::kAArch64) {
         // x0..x18: arguments, results and scratch, plus the platform register, which
         // Android's runtime is free to use. x19..x28 are callee-saved and survive.
@@ -97,6 +106,20 @@ std::vector<Varnode> callerSavedUnits(Arch arch) {
         }
         for (unsigned n = 0; n < 16; ++n) units.push_back(Varnode::reg(x86::kXmmN(n), 16));
         return units;
+    }
+    if(arch==Arch::kX86_32) {
+        for(auto offset:{x86::kRax,x86::kRcx,x86::kRdx})units.push_back(Varnode::reg(offset,4));
+        for(u64 offset=x86::kFlagCf;offset<=x86::kFlagOf;++offset)units.push_back(Varnode::reg(offset,1));
+        for(unsigned n=0;n<8;++n)units.push_back(Varnode::reg(x86::kXmmN(n),16));
+    } else if(arch==Arch::kArm32 || arch==Arch::kThumb) {
+        for(unsigned n:{0,1,2,3,12,14})units.push_back(Varnode::reg(arm32::kRn(n),4));
+        for(u64 flag=arm32::kFlagN;flag<=arm32::kFlagV;++flag)units.push_back(Varnode::reg(flag,1));
+        // Whole Q units, conservatively including ABI-dependent VFP argument state.
+        for(unsigned n=0;n<16;++n)units.push_back(Varnode::reg(arm32::kV0+n*16,16));
+    } else if(arch==Arch::kRiscV32 || arch==Arch::kRiscV64) {
+        const u8 word=arch==Arch::kRiscV32?4:8;
+        for(unsigned n:{1,5,6,7,10,11,12,13,14,15,16,17,28,29,30,31})units.push_back(Varnode::reg(riscv::kXn(n),word));
+        for(unsigned n=0;n<32;++n)units.push_back(Varnode::reg(riscv::kF0+n*8,8));
     }
     return units;
 }
@@ -280,11 +303,9 @@ void Builder::computeVariableLiveness() {
                 // dead in the epilogue, pruned placement drops the phi that merges
                 // the values the branches computed, and the function is reported as
                 // returning nothing at all.
-                const Varnode result = resultRegister(input_.arch);
-                const u32 variable =
-                    result.valid() ? variableFor(result, false) : Dominance::kUnreachable;
-                if (variable != Dominance::kUnreachable && !killed[b][variable]) {
-                    upwardExposed[b][variable] = 1;
+                for(const auto& result:abiResultRegisters(input_.arch)) {
+                    const u32 variable=variableFor(result,false);
+                    if(variable!=Dominance::kUnreachable && !killed[b][variable])upwardExposed[b][variable]=1;
                 }
             }
             if (isCall(insn.op)) {
@@ -459,6 +480,13 @@ void Builder::renameBlock(u32 block, std::vector<u8>* visited) {
                 output_->returnValues.push_back({instructionIndex, value});
                 ++output_->values[value].uses;
             }
+            for(const auto& alternative:abiResultRegisters(input_.arch)) {
+                if(alternative==result)continue;
+                const auto alternativeVariable=variableFor(alternative,false);
+                if(alternativeVariable==Dominance::kUnreachable)continue;
+                const auto value=currentValue(alternativeVariable,false);
+                output_->abiReturnValues.push_back({instructionIndex,alternative,value});++output_->values[value].uses;
+            }
         }
         if (isCall(insn.op)) {
             for (u32 variable : callerSaved_) {
@@ -549,6 +577,10 @@ void Builder::simplifyAliases() {
     for (SsaPhi& phi : output_->phis) {
         for (SsaId& arg : phi.args) arg = findAlias(arg, &parent);
     }
+    // Implicit ABI returns are uses as well. Point them at the same canonical
+    // definition as ordinary operands before removing copy/phi aliases.
+    for(auto& returned:output_->returnValues)returned.second=findAlias(returned.second,&parent);
+    for(auto& returned:output_->abiReturnValues)returned.value=findAlias(returned.value,&parent);
 }
 
 void Builder::recalculateUses() {
@@ -571,6 +603,7 @@ void Builder::recalculateUses() {
             ++output_->values[entry.second].uses;
         }
     }
+    for(const auto& entry:output_->abiReturnValues)if(entry.value<output_->values.size())++output_->values[entry.value].uses;
 }
 
 Status Builder::run() {

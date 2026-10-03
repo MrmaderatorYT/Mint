@@ -93,7 +93,10 @@ struct SsaBlock {
 
 /// A function in SSA form.
 ///
-/// **Memory is not versioned.** Loads and stores carry their address and value as
+/// **General memory is not versioned in this core register SSA.** The bounded
+/// StackAnalysis sidecar versions exact stack stores and checks reaching loads;
+/// it invalidates facts across unknown aliases/calls rather than deleting stores.
+/// Loads and stores here carry their address and value as
 /// ordinary SSA values, but the memory they touch is a single unnamed state that no
 /// value names. So a load cannot yet be told which store it reads, and a store is
 /// never dead. That is a deliberate first step: register SSA is what unlocks
@@ -123,6 +126,10 @@ struct SsaFunction {
     /// live, which matters because otherwise nothing references it and dead-code
     /// elimination removes the one definition the caller actually wanted.
     std::vector<std::pair<u32, SsaId>> returnValues;
+    struct AbiReturnValue {u32 instruction;Varnode storage;SsaId value;};
+    // Additional possible ABI result registers, with storage retained after copy
+    // aliases are removed. Recorded only for units already mentioned by IR.
+    std::vector<AbiReturnValue> abiReturnValues;
 
     /// Checks the property that makes SSA worth building: every use is reached by
     /// exactly one definition, and that definition dominates the use.

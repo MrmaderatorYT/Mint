@@ -20,7 +20,7 @@ import subprocess
 import sys
 import tempfile
 
-PROBE = "./build/hosttest/mint_probe"
+PROBE = os.environ.get("MINT_FUZZ_PROBE", "./build/hosttest/mint_probe")
 BASE_BYTES = 300_000
 
 

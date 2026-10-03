@@ -5,10 +5,12 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <map>
 
 #include "mint/analysis/cfg.h"
 #include "mint/analysis/code_map.h"
 #include "mint/analysis/function.h"
+#include "mint/analysis/indirect_flow.h"
 #include "mint/base/status.h"
 #include "mint/base/types.h"
 #include "mint/disasm/disassembler.h"
@@ -28,6 +30,11 @@ namespace mint {
 /// user a dispatcher still needs resolving.
 class CodeAnalyzer {
 public:
+    struct AddressRange {
+        Address start = 0;
+        Address end = 0;  ///< Exclusive; empty/reversed ranges are rejected.
+    };
+
     struct Options {
         /// Whether a direct call seeds a new function. Off would leave the call
         /// graph empty, so this exists for isolating a single function on demand.
@@ -45,6 +52,16 @@ public:
         /// functions, so it is reported separately.
         bool linearSweepFallback = true;
 
+        /// Explicit user entries take naming/provenance precedence and are
+        /// installed as boundaries before any descent, independent of order.
+        std::vector<Address> userFunctionEntries;
+        /// Debug-information roots; explicit user entries retain precedence.
+        std::vector<Address> debugFunctionEntries;
+
+        /// Authoritative user-defined data: decoding cannot start in, or span
+        /// across, these half-open ranges. Applies to every discovery source.
+        std::vector<AddressRange> excludedRanges;
+
         /// Optional cooperative cancellation owned by the caller. Analysis is
         /// deliberately cancellable at worklist boundaries so a mobile UI can
         /// stop a scan without closing the mapped file underneath it.
@@ -58,6 +75,32 @@ public:
     // the enclosing class to be complete.
     Status analyze(const ElfImage& image);
     Status analyze(const ElfImage& image, const Options& options);
+
+    struct Snapshot {
+        std::vector<InsnRecord> instructions;
+        std::vector<Function> functions;
+        std::vector<std::string> warnings;
+        std::vector<Address> functionBoundaries;
+        bool reachedInstructionLimit = false;
+    };
+    Snapshot snapshot() const;
+
+    /// Validates persisted instruction/function ownership against the current
+    /// image and options, then rebuilds derived CFGs, indexes and statistics.
+    /// A rejected snapshot leaves the current analysis unchanged.
+    Status restore(const ElfImage& image, const Options& options, const Snapshot& state);
+
+    struct IncrementalResult {
+        bool used = false;
+        size_t functionsReanalyzed = 0;
+        std::string reason;
+    };
+    /// Re-decodes all owners of patched instructions and reuses unaffected
+    /// functions only when flow topology and authoritative metadata stay fixed.
+    /// Unsupported/uncertain cases fall back to full analysis with a reason.
+    Status reanalyzeChanged(const ElfImage& image, const Options& options,
+                            const std::vector<AddressRange>& dirtyRanges,
+                            IncrementalResult* result);
 
     const CodeMap& code() const { return code_; }
     const std::vector<Function>& functions() const { return functions_; }
@@ -74,6 +117,9 @@ public:
     const std::vector<Address>& callersOf(Address entry) const;
 
     const std::vector<std::string>& warnings() const { return warnings_; }
+    /// Derived SSA evidence. Cache restore re-proves it from current bytes;
+    /// only complete sites contribute actual CFG edges or discovered callees.
+    const std::map<Address, IndirectFlowReport>& indirectFlowReports() const { return indirectFlowReports_; }
 
     struct Stats {
         size_t instructions = 0;
@@ -94,9 +140,13 @@ private:
         Address address;
         FunctionOrigin origin;
         std::string name;
+        Arch decodeArch = Arch::kUnknown;
     };
+    Status prepareState(const ElfImage& image, const Options& options,
+                        std::vector<Root>* roots);
 
-    void collectRoots(const ElfImage& image, std::vector<Root>* roots);
+    void collectRoots(const ElfImage& image, const Options& options,
+                      std::vector<Root>* roots);
     void seedRoot(Address addr, FunctionOrigin origin, std::string name,
                   std::vector<Root>* roots);
 
@@ -110,6 +160,19 @@ private:
 
     void buildIndexes();
     void addWarning(std::string message);
+
+    bool excluded(Address address) const;
+    size_t decodeLimit(Address address, size_t requested) const;
+    bool decodeRecord(const ElfImage& image, Address address, InsnRecord* record,
+                      Address functionEntry = kNoAddress, Arch functionArch = Arch::kUnknown);
+    bool recoverBranchTargets(const ElfImage& image, Address functionEntry,
+                              const InsnRecord& record, std::vector<Address>* targets);
+    const IndirectFlowSite* provenIndirectSite(Address functionEntry, Address site, bool call) const;
+    Status proveIndirectFlow(const ElfImage& image, const Function& function, IndirectFlowReport* report) const;
+    Status analyzeDiscovery(const ElfImage& image, const Options& options,
+                           const std::map<Address, IndirectFlowReport>& proven);
+    static bool sameProvenFlow(const IndirectFlowReport& a, const IndirectFlowReport& b);
+    void adoptState(CodeAnalyzer&& state);
 
     Disassembler disassembler_;
     CodeMap code_;
@@ -133,12 +196,25 @@ private:
     /// descending are function entries too, but adding them as we go would make
     /// the result depend on the order functions happened to be visited in.
     std::unordered_set<Address> functionBoundaries_;
+    std::vector<Address> sortedFunctionBoundaries_;
 
     std::unordered_map<Address, size_t> functionByEntry_;
     std::unordered_map<Address, size_t> functionByInstruction_;
     std::unordered_map<Address, std::vector<Address>> callers_;
 
     std::vector<std::string> warnings_;
+    std::vector<AddressRange> excludedRanges_;
+    std::vector<Address> userFunctionEntries_;
+    std::vector<Address> debugFunctionEntries_;
+    Arch imageArch_ = Arch::kUnknown;
+    std::unordered_map<Address, Arch> branchModeHints_;
+    std::unordered_map<Address, Arch> instructionArchitectures_;
+    std::map<Address, IndirectFlowReport> indirectFlowReports_;
+    bool followedCalls_ = true;
+    bool linearSweepEnabled_ = true;
+    size_t instructionLimit_ = 4000000;
+    size_t functionLimit_ = 200000;
+    bool hasState_ = false;
     Stats stats_;
 };
 

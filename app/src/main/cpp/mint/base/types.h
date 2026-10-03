@@ -35,6 +35,14 @@ enum class Arch : u8 {
     kAArch64,
     kX86_64,
     kDalvik,
+    kArm32,
+    kThumb,
+    kX86_32,
+    kRiscV32,
+    kRiscV64,
+    /// External decoder descriptors may use values 128..254. Builtin IDs are
+    /// stable because persisted Programs include the architecture byte.
+    kPluginFirst = 128,
 };
 
 enum class Endian : u8 {

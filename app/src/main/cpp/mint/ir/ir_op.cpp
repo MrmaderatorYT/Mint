@@ -115,10 +115,19 @@ constexpr OpInfo kTable[] = {
     {"feq", 2, true, false},
     {"flt", 2, true, false},
     {"funord", 2, true, false},
+    {"uinttof",1,true,false},
+    {"ftouint",1,true,false},
+    {"fconvert",1,true,false},
+    {"memory_fence",0,false,false},
+    {"atomic_load",1,true,false},
+    {"atomic_store",2,false,false},
+    {"atomic_exchange",2,true,false},
+    {"atomic_add",2,true,false},
+    {"atomic_compare_exchange",3,true,false},
 };
 
 static_assert(sizeof(kTable) / sizeof(kTable[0]) ==
-                  static_cast<size_t>(MintOp::kFloatUnordered) + 1,
+                  static_cast<size_t>(MintOp::kAtomicCompareExchange) + 1,
               "the opcode table must have exactly one entry per MintOp");
 
 }  // namespace

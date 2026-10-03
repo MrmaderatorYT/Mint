@@ -17,7 +17,10 @@ final class Pane {
     static final int IR = 2;
     static final int C = 3;
     static final int GRAPH = 4;
-    static final int LOG = 5;
+    static final int WRITES = 5;
+    static final int XREFS = 6;
+    static final int STRINGS = 7;
+    static final int LOG = 8;
 
     /** Tab labels, indexed by pane. */
     static final int[] TITLES = {
@@ -26,6 +29,9 @@ final class Pane {
             R.string.pane_ir,
             R.string.pane_c,
             R.string.pane_graph,
+            R.string.pane_writes,
+            R.string.pane_xrefs,
+            R.string.pane_strings,
             R.string.pane_log,
     };
 

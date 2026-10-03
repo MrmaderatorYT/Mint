@@ -38,6 +38,8 @@ bool isPure(MintOp op) {
         case MintOp::kCallInd:
         case MintOp::kIntrinsic:
         case MintOp::kUndefined:
+        case MintOp::kAtomicLoad:case MintOp::kAtomicStore:case MintOp::kAtomicExchange:case MintOp::kAtomicAdd:case MintOp::kAtomicCompareExchange:
+        case MintOp::kVectorLoad:case MintOp::kVectorStore:
             return false;
         default:
             return !isTerminator(op);
@@ -74,16 +76,18 @@ bool ExprBuilder::needsStatement(SsaId id) const {
     if (v.def != SsaDef::kInsn) return false;
     if (v.uses == 0) return false;
     if (v.defIndex >= function_.insns.size()) return false;
-    return v.uses > 1 || !isPure(function_.insns[v.defIndex].op);
+    return materialized_.count(id) || v.uses > 1 || !isPure(function_.insns[v.defIndex].op);
 }
 
 std::string ExprBuilder::value(SsaId id) {
     if (id == kNoValue || id >= function_.values.size()) return "/*invalid*/0";
     const SsaValue& v = function_.values[id];
     if (v.def == SsaDef::kConstant || v.def == SsaDef::kEntry || v.def == SsaDef::kPhi) {
+        // Machine address arithmetic counts bytes, not C pointed-to elements.
+        if(numericPointers_.count(id))return "((uintptr_t)"+name(id)+")";
         return name(id);
     }
-    if (needsStatement(id)) return name(id);
+    if (needsStatement(id)) return numericPointers_.count(id) ? "((uintptr_t)"+name(id)+")" : name(id);
     // A cycle can only be reached through a phi, which is handled above, but the guard
     // stays: emitting an expression that contains itself would hang rather than fail.
     if (!visiting_.insert(id).second) return name(id);
@@ -103,11 +107,17 @@ std::string ExprBuilder::operation(const SsaInsn& insn) {
     if (insn.op == MintOp::kNeg) return "(-" + a + ")";
     if (insn.op == MintOp::kNot) return "(~" + a + ")";
     if (insn.op == MintOp::kLoad) {
+        // A recovered field reads as itself; the cast and the arithmetic are what
+        // the field name replaces.
+        const std::string field = fieldAccess(insn.use[0]);
+        if (!field.empty()) return field;
         const u8 width = insn.dest != kNoValue && insn.dest < function_.values.size()
                              ? function_.values[insn.dest].storage.size
                              : 8;
         return "*(" + unsignedType(width) + "*)" + a;
     }
+    if(insn.op==MintOp::kAtomicLoad)return "__atomic_load_n(("+unsignedType(valueWidth(insn.dest))+"*)(uintptr_t)("+a+"), __ATOMIC_ACQUIRE)";
+    if(insn.op==MintOp::kAtomicExchange || insn.op==MintOp::kAtomicAdd)return std::string(insn.op==MintOp::kAtomicExchange?"__atomic_exchange_n((":"__atomic_fetch_add((")+unsignedType(valueWidth(insn.dest))+"*)(uintptr_t)("+a+"), "+b+", __ATOMIC_SEQ_CST)";
     if (insn.op == MintOp::kSelect) return "(" + a + " ? " + b + " : " + c + ")";
     if (insn.op == MintOp::kSignExt) {
         return "((int64_t)(int" + std::to_string(unsigned(valueWidth(insn.use[0])) * 8) +

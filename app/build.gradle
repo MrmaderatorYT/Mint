@@ -26,15 +26,13 @@ android {
         applicationId "com.ccs.mint"
         minSdk 26
         targetSdk 36
-        versionCode 2
-        versionName "0.2 preview"
+        versionCode 3
+        versionName "0.3 preview"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 
-        // 64-bit only. Play requires a 64-bit build, and a reverse engineering
-        // engine has no reason to carry 32-bit code paths: pointer-width
-        // assumptions in the loaders and the IR are all for 64-bit hosts.
-        // x86_64 is here purely so the app runs on the emulator.
+        // These are the Android host ABIs, not the binary ISAs Mint can analyze.
+        // The same 64-bit app also decodes/lifts 32-bit target binaries.
         ndk {
             abiFilters 'arm64-v8a', 'x86_64'
         }
@@ -42,6 +40,7 @@ android {
         externalNativeBuild {
             cmake {
                 arguments '-DANDROID_STL=c++_static'
+                arguments "-DMINT_COMPACT_DEBUG=${providers.gradleProperty('mintCompactDebug').getOrElse('false').toBoolean() ? 'ON' : 'OFF'}"
             }
         }
     }

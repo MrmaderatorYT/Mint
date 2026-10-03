@@ -24,6 +24,25 @@ public:
     /// Overrides the printed name of a value — used to call the entry value of the
     /// first argument register `a0` rather than `arg_0`, which reads as an offset.
     void setName(SsaId id, const std::string& name) { names_[id] = name; }
+    void setNumericPointer(SsaId id) { numericPointers_.insert(id); }
+    void materialize(SsaId id) { materialized_.insert(id); }
+
+    /// Renders an address value as a struct field access — `p->field_18` — instead
+    /// of `(p + 0x18)`.
+    ///
+    /// Safe because a load is never re-materialised: it is impure, so it always gets
+    /// a statement of its own and happens exactly once, where the machine had it.
+    /// Inlining the field expression into several uses would be a different matter —
+    /// an intervening store could make the second rendering a different value.
+    void setFieldAccess(SsaId addressValue, const std::string& text) {
+        fields_[addressValue] = text;
+    }
+
+    /// The field text for an address value, or empty when it is not a known field.
+    std::string fieldAccess(SsaId addressValue) const {
+        const auto found = fields_.find(addressValue);
+        return found == fields_.end() ? std::string() : found->second;
+    }
 
     std::string value(SsaId id);
     std::string instruction(const SsaInsn& insn);
@@ -39,6 +58,9 @@ private:
     const SsaFunction& function_;
     std::unordered_set<SsaId> visiting_;
     std::unordered_map<SsaId, std::string> names_;
+    std::unordered_map<SsaId, std::string> fields_;
+    std::unordered_set<SsaId> numericPointers_;
+    std::unordered_set<SsaId> materialized_;
 };
 
 }  // namespace mint

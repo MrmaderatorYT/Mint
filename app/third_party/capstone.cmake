@@ -6,12 +6,11 @@
 # We deliberately do NOT add_subdirectory() the upstream CMakeLists: it
 # unconditionally declares a fuzz_disasm executable plus cstool and test
 # targets that we do not ship. Listing the sources ourselves also lets us
-# compile exactly two architectures, which is the difference between a ~2 MB
+# compile only the native architectures exposed by Mint, controlling the
 # and a ~20 MB static library.
 #
-# Only AArch64 and X86 decoders are built. The vendored tree keeps the
-# *Module.h header of every other architecture — cs.c includes all of them
-# unconditionally — but none of their sources or decoder tables.
+# AArch64, ARM/Thumb, X86 (32/64) and RISC-V (32/64+C) decoders are built.
+# Additional decoder provenance is recorded in capstone/NATIVE_DECODERS.md.
 
 set(CS_DIR ${CMAKE_CURRENT_LIST_DIR}/capstone)
 
@@ -32,6 +31,20 @@ add_library(capstone STATIC
         ${CS_DIR}/arch/AArch64/AArch64Mapping.c
         ${CS_DIR}/arch/AArch64/AArch64Module.c
 
+        ${CS_DIR}/arch/ARM/ARMBaseInfo.c
+        ${CS_DIR}/arch/ARM/ARMDisassembler.c
+        ${CS_DIR}/arch/ARM/ARMDisassemblerExtension.c
+        ${CS_DIR}/arch/ARM/ARMInstPrinter.c
+        ${CS_DIR}/arch/ARM/ARMMapping.c
+        ${CS_DIR}/arch/ARM/ARMModule.c
+
+        ${CS_DIR}/arch/RISCV/RISCVBaseInfo.c
+        ${CS_DIR}/arch/RISCV/RISCVDisassembler.c
+        ${CS_DIR}/arch/RISCV/RISCVDisassemblerExtension.c
+        ${CS_DIR}/arch/RISCV/RISCVInstPrinter.c
+        ${CS_DIR}/arch/RISCV/RISCVMapping.c
+        ${CS_DIR}/arch/RISCV/RISCVModule.c
+
         ${CS_DIR}/arch/X86/X86ATTInstPrinter.c
         ${CS_DIR}/arch/X86/X86Disassembler.c
         ${CS_DIR}/arch/X86/X86DisassemblerDecoder.c
@@ -51,8 +64,12 @@ target_include_directories(capstone
 target_compile_definitions(capstone PRIVATE
         CAPSTONE_HAS_AARCH64
         CAPSTONE_HAS_X86
+        CAPSTONE_HAS_ARM
+        CAPSTONE_HAS_RISCV
         CAPSTONE_AARCH64_SUPPORT
         CAPSTONE_X86_SUPPORT
+        CAPSTONE_ARM_SUPPORT
+        CAPSTONE_RISCV_SUPPORT
         CAPSTONE_USE_SYS_DYN_MEM
 )
 

@@ -27,21 +27,22 @@ bool InterpMemory::readByte(Address address, u8* value) const {
 }
 
 void InterpMemory::write(Address address, const InterpValue& value, u8 width) {
-    if (!value.concreteLike()) return;
-    for (u8 i = 0; i < width && i < 8; ++i) {
-        writeByte(address + i, static_cast<u8>(value.bits >> (i * 8)));
+    if(!width || width>16)return;
+    for (u8 i = 0; i < width; ++i) {
+        if(!value.concreteLike())bytes_.erase(address+i);
+        else writeByte(address + i, static_cast<u8>(i<8 ? value.bits >> (i * 8) : value.highBits>>((i-8)*8)));
     }
 }
 
 InterpValue InterpMemory::read(Address address, u8 width) const {
-    if (width == 0 || width > 8) return InterpValue::unknown(width);
-    u64 bits = 0;
+    if (width == 0 || width > 16) return InterpValue::unknown(width);
+    u64 bits = 0,high=0;
     for (u8 i = 0; i < width; ++i) {
         u8 byte = 0;
         if (!readByte(address + i, &byte)) return InterpValue::unknown(width);
-        bits |= static_cast<u64>(byte) << (i * 8);
+        if(i<8)bits |= static_cast<u64>(byte) << (i * 8);else high|=static_cast<u64>(byte)<<((i-8)*8);
     }
-    return InterpValue::concrete(bits, width);
+    return InterpValue::wide(bits,high,width);
 }
 
 }  // namespace mint

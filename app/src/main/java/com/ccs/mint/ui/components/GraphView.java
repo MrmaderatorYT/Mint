@@ -141,7 +141,11 @@ public final class GraphView extends View {
         gapY = 44 * density;
         padding = 24 * density;
         minNodeWidth = 84 * density;
-        maxNodeWidth = 260 * density;
+        // Tight on purpose. A mangled C++ name is hundreds of pixels wide, and one of
+        // them in a graph is enough to zoom the whole thing out past legibility; the
+        // label is clipped to the box, so a long name loses its tail rather than the
+        // graph losing its labels.
+        maxNodeWidth = 150 * density;
 
         label.setTextSize(12 * getResources().getDisplayMetrics().scaledDensity);
         label.setTypeface(android.graphics.Typeface.MONOSPACE);
@@ -333,26 +337,40 @@ public final class GraphView extends View {
     }
 
     private void placeNodes() {
+        // Nodes are packed by their own widths rather than dropped into a grid whose
+        // pitch is the widest label. One long symbol used to set the column width for
+        // the entire graph, which made it several times wider than its content and
+        // pushed fit-to-view below the zoom where labels are drawn — the graph
+        // arrived unreadable, and it looked like a layout bug rather than spacing.
+        final float rowHeight = nodeHeight + gapY * 0.35f;
+
         float y = padding;
         float widest = 0;
         for (List<Node> layer : layers) {
             if (layer.isEmpty()) continue;
-            // A layer wider than LAYER_ASPECT times its height wraps into rows, so a
-            // library whose functions all sit at one depth stays roughly rectangular.
-            final int columns = Math.max(1,
-                    Math.min(layer.size(),
-                            (int) Math.ceil(Math.sqrt((double) layer.size() * LAYER_ASPECT))));
-            final int rows = (int) Math.ceil(layer.size() / (double) columns);
 
-            for (int i = 0; i < layer.size(); i++) {
-                final Node node = layer.get(i);
-                final int column = i % columns;
-                final int row = i / columns;
-                node.x = padding + column * (maxNodeWidth + gapX);
-                node.y = y + row * (nodeHeight + gapY * 0.35f);
+            float total = 0;
+            for (Node node : layer) total += node.width + gapX;
+
+            // Wrap wide layers into rows so a library whose functions all sit at one
+            // depth stays roughly rectangular instead of becoming one endless line.
+            final int rows = Math.max(1, (int) Math.round(
+                    Math.sqrt(total / (LAYER_ASPECT * rowHeight))));
+            final float targetWidth = total / rows;
+
+            float cursor = padding;
+            int row = 0;
+            for (Node node : layer) {
+                if (cursor > padding && cursor + node.width > padding + targetWidth) {
+                    ++row;
+                    cursor = padding;
+                }
+                node.x = cursor;
+                node.y = y + row * rowHeight;
+                cursor += node.width + gapX;
                 widest = Math.max(widest, node.x + node.width);
             }
-            y += rows * (nodeHeight + gapY * 0.35f) + gapY;
+            y += (row + 1) * rowHeight + gapY;
         }
         graphWidth = widest + padding;
         graphHeight = y + padding;
@@ -472,7 +490,10 @@ public final class GraphView extends View {
         final float scale = Math.min(getWidth() / graphWidth, getHeight() / graphHeight);
         zoom = Math.max(MIN_ZOOM, Math.min(1f, scale));
         panX = (getWidth() - graphWidth * zoom) / 2;
-        panY = Math.min(0f, (getHeight() - graphHeight * zoom) / 2);
+        // Centre a graph that fits, but pin a taller one to the top: starting a deep
+        // graph half-scrolled hides its entry, which is where reading begins.
+        final float slack = getHeight() - graphHeight * zoom;
+        panY = slack > 0 ? slack / 2 : 0f;
     }
 
     // ------------------------------------------------------------------- input

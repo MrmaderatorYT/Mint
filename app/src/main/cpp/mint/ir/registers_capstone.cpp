@@ -148,6 +148,7 @@ Varnode x86Register(unsigned reg) {
         case X86_REG_BH: return Varnode::reg(x86::kGpr(3) + 1, 1);
 
         case X86_REG_RIP: return Varnode::reg(x86::kRip, 8);
+        case X86_REG_EIP:return Varnode::reg(x86::kRip,4);
 
         // Segment registers stand in for their bases. Only fs and gs have a base
         // that matters in 64-bit mode, and fs is where the thread pointer lives —
@@ -171,6 +172,28 @@ Varnode registerFromCapstone(Arch arch, unsigned capstoneReg) {
     switch (arch) {
         case Arch::kAArch64: return aarch64Register(capstoneReg);
         case Arch::kX86_64: return x86Register(capstoneReg);
+        case Arch::kX86_32: {
+            auto reg=x86Register(capstoneReg);
+            if(reg.valid() && reg.size==8)reg.size=4;
+            return reg;
+        }
+        case Arch::kArm32:case Arch::kThumb:
+            if(capstoneReg>=ARM_REG_R0 && capstoneReg<=ARM_REG_R12)return Varnode::reg(arm32::kRn(capstoneReg-ARM_REG_R0),4);
+            if(capstoneReg==ARM_REG_SP)return Varnode::reg(arm32::kSp,4);
+            if(capstoneReg==ARM_REG_LR)return Varnode::reg(arm32::kLr,4);
+            if(capstoneReg==ARM_REG_PC)return Varnode::reg(arm32::kPc,4);
+            if(capstoneReg>=ARM_REG_S0 && capstoneReg<=ARM_REG_S31)return Varnode::reg(arm32::kV0+4*(capstoneReg-ARM_REG_S0),4);
+            if(capstoneReg>=ARM_REG_D0 && capstoneReg<=ARM_REG_D31)return Varnode::reg(arm32::kV0+8*(capstoneReg-ARM_REG_D0),8);
+            if(capstoneReg>=ARM_REG_Q0 && capstoneReg<=ARM_REG_Q15)return Varnode::reg(arm32::kV0+16*(capstoneReg-ARM_REG_Q0),16);
+            return Varnode::invalid();
+        case Arch::kRiscV32:case Arch::kRiscV64: {
+            const u8 word=arch==Arch::kRiscV32?4:8;
+            if(capstoneReg==RISCV_REG_X0)return Varnode::constant(0,word);
+            if(capstoneReg>RISCV_REG_X0 && capstoneReg<=RISCV_REG_X31)return Varnode::reg(riscv::kXn(capstoneReg-RISCV_REG_X0),word);
+            if(capstoneReg>=RISCV_REG_F0_D && capstoneReg<=RISCV_REG_F31_D)return Varnode::reg(riscv::kF0+8*(capstoneReg-RISCV_REG_F0_D),8);
+            if(capstoneReg>=RISCV_REG_F0_F && capstoneReg<=RISCV_REG_F31_F)return Varnode::reg(riscv::kF0+8*(capstoneReg-RISCV_REG_F0_F),4);
+            return Varnode::invalid();
+        }
         default: return Varnode::invalid();
     }
 }

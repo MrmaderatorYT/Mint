@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- The logo was drawn on black, and the mint outline is what separates it from
-         the surround. Filling the adaptive background with anything lighter would
-         put the dark body of the mark against a light field it was not drawn for. -->
-    <color name="ic_launcher_background">#FF000000</color>
+    <!-- Approved Mint icon background. -->
+    <color name="ic_launcher_background">#10251D</color>
 </resources>

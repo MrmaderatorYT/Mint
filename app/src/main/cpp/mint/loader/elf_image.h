@@ -1,8 +1,10 @@
 #pragma once
 
 #include <string>
+#include <memory>
 #include <unordered_map>
 #include <vector>
+#include <array>
 
 #include "mint/base/byte_view.h"
 #include "mint/base/status.h"
@@ -79,7 +81,23 @@ struct ElfRelocation {
     /// Where the relocation was found. Packed and RELR relocations are the norm
     /// in modern Android libraries, and knowing which encoding a library uses
     /// is itself a fingerprint worth keeping.
-    enum class Source : u8 { kRela, kRel, kAndroidPacked, kRelr } source = Source::kRela;
+    enum class Source : u8 { kRela, kRel, kAndroidPacked, kRelr, kContainerRebase, kContainerBind } source = Source::kRela;
+};
+
+/// Container-proven function ranges, with opaque ABI-specific unwind encoding.
+/// Recording a range does not imply that the runtime unwind program is evaluated.
+struct RuntimeFunction {
+    Address start = 0, end = 0, unwindInfo = kNoAddress;
+    Address lsda = kNoAddress, personality = kNoAddress;
+    u32 encoding = 0;
+    std::string source;
+    Address handler = kNoAddress, handlerData = kNoAddress, chainedStart = kNoAddress;
+    bool unwindValidated = false;
+};
+struct PeCodeViewRecord {
+    std::array<u8, 16> guid{};
+    u32 age = 0;
+    std::string path; // Display only; never followed automatically.
 };
 
 struct AddressInterval {
@@ -96,9 +114,36 @@ struct AddressInterval {
 /// structure that does not fit is dropped with a recorded warning rather than
 /// aborting the load — a protected library with a deliberately broken section
 /// table is still worth disassembling through its program headers.
+enum class ImageFormat : u8 { kElf64, kPe64, kMachO64, kRaw, kElf32 };
+
 class ElfImage {
 public:
+    /// Sniffs native containers only. Unrecognised bytes require explicit raw
+    /// import parameters and are never interpreted as executable code silently.
     Status load(ByteView file);
+    /// A explicitly selected debug-only ELF may be relocatable and have no
+    /// loadable segments (.dwo/objcopy --only-keep-debug). This does not create
+    /// a Program/code image; only validated section views may be consumed.
+    Status loadDebugObject(ByteView file);
+    /// Explicit slice selection for a universal Mach-O. Normal load chooses the
+    /// first supported slice in table order, recorded in warnings.
+    Status loadMachOSlice(ByteView file, Arch architecture);
+    Status loadRaw(ByteView file, Arch architecture, Address base, Address entry);
+
+    ImageFormat format() const { return format_; }
+    const char* formatName() const;
+    Address imageBase() const { return imageBase_; }
+    u8 pointerSize() const;
+    /// ARM/Thumb share a byte-addressed memory map. Thumb's pointer tag is not
+    /// part of the memory address or instruction-index key.
+    Address canonicalAddress(Address address) const;
+    Arch architectureAt(Address address) const;
+    Arch architectureAt(Address address, Address functionEntry, Arch fallback) const;
+    /// In-memory overlays only: never writes the input file. A patch must fit
+    /// entirely in one unambiguous file-backed segment and is capped at 4 KiB.
+    Status applyPatch(Address address, ByteView bytes);
+    void resetPatches();
+    bool fileOffsetAt(Address address, size_t length, u64* offset) const;
 
     bool loaded() const { return loaded_; }
 
@@ -110,7 +155,10 @@ public:
     /// Position-independent, i.e. every Android .so and modern executable. When
     /// true, the addresses here are link-time addresses that the runtime will
     /// rebase; analysis works entirely in link-time space.
-    bool isPositionIndependent() const { return type_ == elf::kEtDyn; }
+    bool isPositionIndependent() const {
+        return (format_ == ImageFormat::kElf64 || format_ == ImageFormat::kElf32)
+            ? type_ == elf::kEtDyn : positionIndependent_;
+    }
 
     /// No .symtab, so only exported names are known.
     bool isStripped() const { return stripped_; }
@@ -119,6 +167,8 @@ public:
     const std::vector<ElfSection>& sections() const { return sections_; }
     const std::vector<ElfSymbol>& symbols() const { return symbols_; }
     const std::vector<ElfRelocation>& relocations() const { return relocations_; }
+    const std::vector<RuntimeFunction>& runtimeFunctions() const { return runtimeFunctions_; }
+    const std::vector<PeCodeViewRecord>& peCodeViewRecords() const { return peCodeViewRecords_; }
 
     /// DT_NEEDED entries, in link order.
     const std::vector<std::string>& neededLibraries() const { return needed_; }
@@ -139,6 +189,7 @@ public:
     /// to the user: a library whose section table disagrees with its program
     /// headers has usually been processed by a protector.
     const std::vector<std::string>& warnings() const { return warnings_; }
+    ByteView originalFile() const { return originalFile_; }
 
     const ElfSection* findSection(const std::string& name) const;
     const ElfSymbol* findSymbol(const std::string& name) const;
@@ -166,6 +217,10 @@ public:
     std::string describeAddress(Address addr) const;
 
 private:
+    Status loadElf32(ByteView file);
+    Status loadPe64(ByteView file);
+    Status loadMachO64(ByteView file);
+    Status loadMachOFat(ByteView file, Arch preferred = Arch::kUnknown);
     Status parseHeader(ByteView file);
     void parseProgramHeaders(ByteView file);
     void parseSectionHeaders(ByteView file);
@@ -206,7 +261,17 @@ private:
     std::string dynamicSymbolName(u32 index) const;
 
     bool loaded_ = false;
+    ImageFormat format_ = ImageFormat::kElf64;
+    Address imageBase_ = 0;
+    bool positionIndependent_ = false;
+    bool containerPointersEncoded_ = false;
+    ByteView originalFile_;
+    MemoryMap originalMemory_;
+    std::vector<ElfSection> originalSections_;
+    std::unordered_map<Address, std::shared_ptr<std::vector<u8>>> patchStorage_;
     Arch arch_ = Arch::kUnknown;
+    /// Sorted ARM mapping/function mode changes: true is Thumb, false is ARM.
+    std::vector<std::pair<Address, bool>> armModes_;
     u16 type_ = 0;
     Address entry_ = 0;
     bool stripped_ = true;
@@ -216,6 +281,8 @@ private:
     std::vector<ElfSection> sections_;
     std::vector<ElfSymbol> symbols_;
     std::vector<ElfRelocation> relocations_;
+    std::vector<RuntimeFunction> runtimeFunctions_;
+    std::vector<PeCodeViewRecord> peCodeViewRecords_;
     std::vector<std::string> needed_;
     std::vector<Address> initializers_;
     std::vector<Address> finalizers_;

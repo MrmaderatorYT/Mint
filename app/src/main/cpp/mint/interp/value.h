@@ -22,11 +22,13 @@ struct InterpValue {
     u8 width = 8;
     u64 bits = 0;
     u32 symbolicId = 0;
+    u64 highBits = 0;
 
     static InterpValue unknown(u8 width = 8) { return {InterpKind::kUnknown, width, 0, 0}; }
     static InterpValue concrete(u64 bits, u8 width = 8) {
         return {InterpKind::kConcrete, width, bits, 0};
     }
+    static InterpValue wide(u64 low,u64 high,u8 width=16) {return {InterpKind::kConcrete,width,low,0,high};}
     static InterpValue pointer(Address address, u8 width = 8) {
         return {InterpKind::kPointer, width, address, 0};
     }

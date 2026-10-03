@@ -16,5 +16,7 @@ void liftAArch64(const cs_insn& insn, IrBuilder& builder);
 
 /// Lifts one decoded x86-64 instruction, with the same contract.
 void liftX86(const cs_insn& insn, IrBuilder& builder);
+void liftArm32(const cs_insn& insn, IrBuilder& builder, bool thumb);
+void liftRiscV(const cs_insn& insn, IrBuilder& builder, bool rv64);
 
 }  // namespace mint

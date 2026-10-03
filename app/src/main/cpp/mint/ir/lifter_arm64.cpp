@@ -93,6 +93,10 @@ private:
         const bool isGpr = dest.offset <= arm64::kSp;
         if (isGpr && dest.size == 4) {
             b_.emit(MintOp::kZeroExt, Varnode::reg(dest.offset, 8), sized);
+        } else if(dest.offset>=arm64::kV0 && dest.offset<arm64::kFpsr && dest.size<16) {
+            // Scalar SIMD/FP writes clear the rest of their architectural V
+            // register (unlike legacy SSE scalar writes, which preserve it).
+            b_.emit(MintOp::kZeroExt,Varnode::reg(arm64::kV0+((dest.offset-arm64::kV0)/16)*16,16),sized);
         } else {
             b_.assign(dest, sized);
         }
@@ -371,31 +375,34 @@ private:
         }
 
         MintOp conversion = MintOp::kInvalid;
-        if (mnemonic == "scvtf" || mnemonic == "ucvtf") conversion = MintOp::kIntToFloat;
-        if (mnemonic.rfind("fcvtz", 0) == 0 || mnemonic.rfind("fcvta", 0) == 0 ||
-            mnemonic.rfind("fcvtm", 0) == 0 || mnemonic.rfind("fcvtp", 0) == 0 ||
-            mnemonic.rfind("fcvtn", 0) == 0) {
-            conversion = MintOp::kFloatToInt;
-        }
-        if (conversion != MintOp::kInvalid && opCount() >= 2) {
-            const Varnode source = readFpOperand(1, width);
+        if (mnemonic == "scvtf") conversion = MintOp::kIntToFloat;
+        if (mnemonic == "ucvtf") conversion = MintOp::kIntToFloatU;
+        if (mnemonic == "fcvtzs") conversion = MintOp::kFloatToInt;
+        if (mnemonic == "fcvtzu") conversion = MintOp::kFloatToIntU;
+        if (conversion != MintOp::kInvalid && opCount() == 2 && op(1).type==AARCH64_OP_REG) {
+            const auto sourceView=registerFromCapstone(Arch::kAArch64,op(1).reg);
+            if(sourceView.size!=4 && sourceView.size!=8)return b_.emitIntrinsic(u16(insn_.id));
+            const Varnode source = readFpOperand(1, sourceView.size);
             if (!source.valid()) return b_.emitIntrinsic(u16(insn_.id));
             writeReg(op(0).reg, b_.unary(conversion, source, width));
             return;
         }
-        // `fcvt s0, d1` is a representation conversion, not an integer
-        // conversion. The bit-precise cast is intentionally kept as a copy at
-        // this IR layer; width recovery still sees the destination width.
-        if (mnemonic == "fcvt" && opCount() >= 2) {
-            const Varnode source = readFpOperand(1, width);
+        if (mnemonic == "fcvt" && opCount() == 2 && op(1).type==AARCH64_OP_REG) {
+            const auto sourceView=registerFromCapstone(Arch::kAArch64,op(1).reg);
+            if((width!=4&&width!=8)||(sourceView.size!=4&&sourceView.size!=8))return b_.emitIntrinsic(u16(insn_.id));
+            const Varnode source = readFpOperand(1, sourceView.size);
             if (!source.valid()) return b_.emitIntrinsic(u16(insn_.id));
-            writeReg(op(0).reg, source);
+            writeReg(op(0).reg, b_.unary(MintOp::kFloatConvert,source,width));
             return;
         }
         b_.emitIntrinsic(u16(insn_.id));
     }
 
     void vectorMemory(bool isLoad) {
+        const std::string mnemonic(insn_.mnemonic);
+        // Structure/interleaved and post-indexed vector memory operations have
+        // lane/stride/base effects not represented by sequential full-Q slots.
+        if((mnemonic!="ldr"&&mnemonic!="ldur"&&mnemonic!="str"&&mnemonic!="stur"&&mnemonic!="ldp"&&mnemonic!="stp") || insn_.detail->writeback)return b_.emitIntrinsic(u16(insn_.id));
         unsigned memIndex = opCount();
         for (unsigned i = 0; i < opCount(); ++i) {
             if (op(i).type == AARCH64_OP_MEM) {
@@ -426,6 +433,10 @@ private:
 
     void liftVector() {
         const std::string mnemonic(insn_.mnemonic);
+        if(mnemonic=="fadd"||mnemonic=="fsub"||mnemonic=="fmul")return b_.emitIntrinsic(u16(insn_.id));
+        // The current lane IR is full 128-bit only. A 64-bit arrangement also
+        // clears the upper half, and cannot be silently widened to more lanes.
+        if(opCount() && op(0).vas!=AARCH64LAYOUT_INVALID && (static_cast<unsigned>(op(0).vas)>>8)*laneBytesFrom(op(0).vas)!=16)return b_.emitIntrinsic(u16(insn_.id));
         if (mnemonic == "ldr" || mnemonic == "ldur" || mnemonic == "ldp" ||
             mnemonic == "ld1" ||
             mnemonic.rfind("ld1", 0) == 0 || mnemonic.rfind("ld2", 0) == 0 ||
@@ -440,8 +451,7 @@ private:
             vectorMemory(false);
             return;
         }
-        if ((mnemonic == "add" || mnemonic == "sub" || mnemonic == "mul" ||
-             mnemonic == "fadd" || mnemonic == "fsub" || mnemonic == "fmul") &&
+        if ((mnemonic == "add" || mnemonic == "sub" || mnemonic == "mul") &&
             opCount() >= 3) {
             const Varnode a = vectorRegister(op(1).reg);
             const Varnode c = vectorRegister(op(2).reg);
@@ -462,29 +472,30 @@ private:
         }
         if (mnemonic == "dup" || mnemonic == "movi") {
             if (opCount() < 2) return b_.emitIntrinsic(u16(insn_.id));
+            const u8 lane=laneBytesFrom(op(0).vas);
+            if(!lane || lane>8)return b_.emitIntrinsic(u16(insn_.id));
             Varnode source;
-            if (op(1).type == AARCH64_OP_REG) source = readReg(op(1).reg, 8);
-            if (op(1).type == AARCH64_OP_IMM) source = Varnode::constant(
-                static_cast<u64>(op(1).imm), 8);
+            if (op(1).type == AARCH64_OP_REG) {
+                if(op(1).vector_index>=0) {
+                    const auto vector=vectorRegister(op(1).reg);if(!vector.valid() || static_cast<unsigned>(op(1).vector_index)>=16/lane)return b_.emitIntrinsic(u16(insn_.id));
+                    source=b_.vector(MintOp::kVectorExtract,lane,vector,Varnode::constant(op(1).vector_index,1),Varnode::invalid(),lane);
+                } else source=b_.resize(readReg(op(1).reg,lane),lane,false);
+            }
+            if (op(1).type == AARCH64_OP_IMM) {
+                if(op(1).shift.type!=AARCH64_SFT_INVALID && op(1).shift.type!=AARCH64_SFT_LSL)return b_.emitIntrinsic(u16(insn_.id));
+                if(op(1).shift.value>=lane*8)return b_.emitIntrinsic(u16(insn_.id));
+                u64 immediate=static_cast<u64>(op(1).imm)<<op(1).shift.value;
+                if(lane<8)immediate&=(u64{1}<<(lane*8))-1;
+                source=Varnode::constant(immediate,lane);
+            }
             if (!source.valid()) return b_.emitIntrinsic(u16(insn_.id));
-            writeVectorReg(op(0).reg, b_.unary(MintOp::kVectorSplat, source, 16));
+            writeVectorReg(op(0).reg, b_.vector(MintOp::kVectorSplat,lane,source));
             return;
         }
         if (mnemonic == "tbl" || mnemonic == "tbx" || mnemonic == "uzp1" ||
             mnemonic == "uzp2" || mnemonic == "zip1" || mnemonic == "zip2") {
-            if (opCount() < 3 || op(1).type != AARCH64_OP_REG ||
-                op(2).type != AARCH64_OP_REG) {
-                return b_.emitIntrinsic(u16(insn_.id));
-            }
-            const Varnode first = vectorRegister(op(1).reg);
-            const Varnode second = vectorRegister(op(2).reg);
-            if (!first.valid() || !second.valid()) return b_.emitIntrinsic(u16(insn_.id));
-            const Varnode selector = Varnode::constant(
-                mnemonic == "uzp2" || mnemonic == "zip2" ? 1 : 0, 16);
-            const Varnode dest = vectorRegister(op(0).reg);
-            if (!dest.valid()) return b_.emitIntrinsic(u16(insn_.id));
-            b_.emit(MintOp::kVectorShuffle, dest, first, second, selector);
-            return;
+            // These are different selectors, not one generic binary shuffle.
+            return b_.emitIntrinsic(u16(insn_.id));
         }
         if (mnemonic == "bit" || mnemonic == "bif") {
             if (opCount() < 3) return b_.emitIntrinsic(u16(insn_.id));
@@ -597,7 +608,6 @@ private:
         if (!a.valid() || !c.valid()) return b_.emitIntrinsic(u16(insn_.id));
 
         const Varnode result = b_.binary(irOp, a, c);
-        if (!discardResult) writeReg(op(0).reg, result);
         if (setsFlags) {
             switch (irOp) {
                 case MintOp::kAdd: setFlagsAdd(a, c, result); break;
@@ -605,6 +615,7 @@ private:
                 default: setFlagsLogical(result); break;
             }
         }
+        if (!discardResult) writeReg(op(0).reg, result);
     }
 
     void unaryOp(MintOp irOp, bool setsFlags) {
@@ -613,7 +624,6 @@ private:
         const Varnode a = readOperand(1, width);
         if (!a.valid()) return b_.emitIntrinsic(u16(insn_.id));
         const Varnode result = b_.unary(irOp, a, width);
-        writeReg(op(0).reg, result);
         if (setsFlags) {
             if (irOp == MintOp::kNeg) {
                 setFlagsSub(zero(width), a, result);
@@ -621,6 +631,7 @@ private:
                 setFlagsLogical(result);
             }
         }
+        writeReg(op(0).reg, result);
     }
 
     /// mul, madd, msub and mneg, which all reduce to a multiply plus an optional
@@ -776,8 +787,7 @@ private:
         const MintOp step = subtract ? MintOp::kSub : MintOp::kAdd;
         const Varnode partial = b_.binary(step, a, c);
         const Varnode result = b_.binary(step, partial, carryWide);
-        writeReg(op(0).reg, result);
-        if (!setsFlags) return;
+        if (!setsFlags) {writeReg(op(0).reg, result);return;}
 
         setNZ(result);
 
@@ -798,6 +808,7 @@ private:
             b_.binary(subtract ? MintOp::kNotEqual : MintOp::kEqual, signA, signB);
         const Varnode resultTurned = b_.binary(MintOp::kNotEqual, signR, signA);
         b_.emit(MintOp::kAnd, flagV(), inputsRelated, resultTurned);
+        writeReg(op(0).reg, result);
     }
 
     /// umulh and smulh: the high half of a full-width product.
@@ -1145,6 +1156,31 @@ A64Mnemonic lookupMnemonic(const char* text) {
 
 void Arm64Lifter::lift() {
     b_.setAddress(insn_.address);
+    const std::string atomic(insn_.mnemonic);
+    if(atomic=="dmb" || atomic=="dsb" || atomic=="isb") {b_.emit(MintOp::kMemoryFence,Varnode::invalid());return;}
+    // Exclusive reservations require a separate monitor model; never disguise
+    // them as ordinary loads/stores. Their retry loop remains explicit.
+    if(atomic.rfind("ldxr",0)==0 || atomic.rfind("ldaxr",0)==0 || atomic.rfind("stxr",0)==0 || atomic.rfind("stlxr",0)==0) {b_.emitIntrinsic(u16(insn_.id));return;}
+    const bool acquire=atomic=="ldar"||atomic=="ldarb"||atomic=="ldarh";
+    const bool release=atomic=="stlr"||atomic=="stlrb"||atomic=="stlrh";
+    const bool exchange=atomic.rfind("swp",0)==0;
+    const bool add=atomic.rfind("ldadd",0)==0;
+    const bool compare=atomic.rfind("cas",0)==0 && atomic.rfind("casp",0)!=0;
+    if(acquire||release||exchange||add||compare) {
+        const unsigned mem=(acquire||release)?1:2;
+        // Capstone marks CAS as writeback because Rs is read/write, not because
+        // the memory base is updated. Atomic addressing has no post-index form.
+        if(opCount()!=mem+1 || op(0).type!=AARCH64_OP_REG || op(mem).type!=AARCH64_OP_MEM || (mem==2&&op(1).type!=AARCH64_OP_REG) || op(mem).mem.disp!=0 || op(mem).mem.index!=AARCH64_REG_INVALID) {b_.emitIntrinsic(u16(insn_.id));return;}
+        const u8 width=atomic.back()=='b'?1:atomic.back()=='h'?2:operationWidth();
+        if(width!=1&&width!=2&&width!=4&&width!=8){b_.emitIntrinsic(u16(insn_.id));return;}
+        const auto address=memoryAddress(op(mem),true);
+        if(release){b_.emit(MintOp::kAtomicStore,Varnode::invalid(),address,b_.resize(readReg(op(0).reg,width),width,false));return;}
+        const auto previous=b_.newTemp(width);
+        if(acquire)b_.emit(MintOp::kAtomicLoad,previous,address);
+        else if(compare)b_.emit(MintOp::kAtomicCompareExchange,previous,address,b_.resize(readReg(op(0).reg,width),width,false),b_.resize(readReg(op(1).reg,width),width,false));
+        else b_.emit(exchange?MintOp::kAtomicExchange:MintOp::kAtomicAdd,previous,address,b_.resize(readReg(op(0).reg,width),width,false));
+        writeReg(op(compare||acquire?0:1).reg,previous);return;
+    }
 
     // SIMD and scalar floating point share several mnemonics with the integer
     // forms. Route them before the integer switch so `add v0.4s, ...` cannot be

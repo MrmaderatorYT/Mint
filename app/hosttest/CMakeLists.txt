@@ -1,117 +1,144 @@
 cmake_minimum_required(VERSION 3.22.1)
 project(mint_hosttest C CXX)
-
-# Host build of the analysis engine. Not shipped — it exists so the loaders,
-# lifters and decompiler can be exercised in milliseconds against real Android
-# libraries instead of through an emulator install.
-#
-#   cmake -S core/hosttest -B build/hosttest -DCMAKE_BUILD_TYPE=Debug
-#   cmake --build build/hosttest -j
-#   ./build/hosttest/mint_probe <file.so>
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 99)
-
-# The engine now lives in the app module; this points at it.
 set(CORE_DIR ${CMAKE_CURRENT_LIST_DIR}/..)
-
 include(${CORE_DIR}/third_party/capstone.cmake)
-
+include(${CORE_DIR}/third_party/lua.cmake)
 find_library(MINT_ZLIB_LIBRARY NAMES z REQUIRED)
+file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS ${CORE_DIR}/src/main/cpp/mint/*.cpp)
+set(MINT_ENGINE_ID_ROOT ${CORE_DIR})
+include(${CORE_DIR}/cmake/analysis_engine_id.cmake)
 
-# Everything except the JNI layer, which needs a JVM to mean anything.
-file(GLOB_RECURSE ENGINE_SOURCES CONFIGURE_DEPENDS
-        ${CORE_DIR}/src/main/cpp/mint/*.cpp
-)
-
-add_executable(mint_probe
-        ${ENGINE_SOURCES}
-        ${CMAKE_CURRENT_LIST_DIR}/probe_main.cpp
-)
-
-add_executable(mint_ssa_test
-        ${ENGINE_SOURCES}
-        ${CMAKE_CURRENT_LIST_DIR}/ssa_main.cpp
-)
-
-add_executable(mint_perf_test
-        ${ENGINE_SOURCES}
-        ${CMAKE_CURRENT_LIST_DIR}/perf_main.cpp
-)
-
-add_executable(mint_feature_test
-        ${ENGINE_SOURCES}
-        ${CMAKE_CURRENT_LIST_DIR}/feature_main.cpp
-)
-
-target_include_directories(mint_probe PRIVATE
-        ${CORE_DIR}/src/main/cpp
-        ${CMAKE_CURRENT_LIST_DIR}/shim
-)
-
-target_include_directories(mint_ssa_test PRIVATE
-        ${CORE_DIR}/src/main/cpp
-        ${CMAKE_CURRENT_LIST_DIR}/shim
-)
-
-target_include_directories(mint_perf_test PRIVATE
-        ${CORE_DIR}/src/main/cpp
-        ${CMAKE_CURRENT_LIST_DIR}/shim
-)
-
-target_include_directories(mint_feature_test PRIVATE
-        ${CORE_DIR}/src/main/cpp
-        ${CMAKE_CURRENT_LIST_DIR}/shim
-)
-
-target_link_libraries(mint_probe PRIVATE capstone ${MINT_ZLIB_LIBRARY} ${CMAKE_DL_LIBS})
-target_link_libraries(mint_ssa_test PRIVATE capstone ${MINT_ZLIB_LIBRARY} ${CMAKE_DL_LIBS})
-target_link_libraries(mint_perf_test PRIVATE capstone ${MINT_ZLIB_LIBRARY} ${CMAKE_DL_LIBS})
-target_link_libraries(mint_feature_test PRIVATE capstone ${MINT_ZLIB_LIBRARY} ${CMAKE_DL_LIBS})
-
-target_compile_options(mint_probe PRIVATE -Wall -Wextra -Wno-unused-parameter -g)
-target_compile_options(mint_ssa_test PRIVATE -Wall -Wextra -Wno-unused-parameter -g)
-target_compile_options(mint_perf_test PRIVATE -Wall -Wextra -Wno-unused-parameter -g)
-target_compile_options(mint_feature_test PRIVATE -Wall -Wextra -Wno-unused-parameter -g)
-
-# The engine parses hostile input, so the host build is where we want sanitizers
-# on by default: a bounds bug found here is a crash never shipped.
-option(MINT_HOST_SANITIZE "Build the host probe with ASan and UBSan" ON)
-if (MINT_HOST_SANITIZE)
-    target_compile_options(mint_probe PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(mint_probe PRIVATE -fsanitize=address,undefined)
-    target_compile_options(mint_ssa_test PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(mint_ssa_test PRIVATE -fsanitize=address,undefined)
-    target_compile_options(mint_perf_test PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(mint_perf_test PRIVATE -fsanitize=address,undefined)
-    target_compile_options(mint_feature_test PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
-    target_link_options(mint_feature_test PRIVATE -fsanitize=address,undefined)
+# Compile the engine once for all host tools instead of once per test.
+add_library(mint_engine SHARED ${ENGINE_SOURCES})
+target_include_directories(mint_engine PUBLIC ${CORE_DIR}/src/main/cpp ${CMAKE_CURRENT_LIST_DIR}/shim)
+target_include_directories(mint_engine PRIVATE ${MINT_ENGINE_GENERATED_DIR})
+target_link_libraries(mint_engine PUBLIC capstone mint_lua ${MINT_ZLIB_LIBRARY} ${CMAKE_DL_LIBS})
+target_compile_options(mint_engine PRIVATE -Wall -Wextra -Wno-unused-parameter)
+option(MINT_HOST_SANITIZE "Build host tools with ASan and UBSan" ON)
+if(MINT_HOST_SANITIZE)
+    target_compile_options(mint_engine PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(mint_engine PUBLIC -fsanitize=address,undefined)
 endif()
+function(mint_tool target source)
+    add_executable(${target} ${CMAKE_CURRENT_LIST_DIR}/${source})
+    target_link_libraries(${target} PRIVATE mint_engine)
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wno-unused-parameter)
+    set_property(GLOBAL APPEND PROPERTY MINT_HOST_TOOLS ${target})
+endfunction()
+mint_tool(mint_probe probe_main.cpp)
+mint_tool(mint_ssa_test ssa_main.cpp)
+mint_tool(mint_perf_test perf_main.cpp)
+mint_tool(mint_feature_test feature_main.cpp)
+mint_tool(mint_types_test types_main.cpp)
+mint_tool(mint_unwind_test unwind_main.cpp)
+mint_tool(mint_native_loader_test native_loader_main.cpp)
+mint_tool(mint_cxx_metadata_test cxx_metadata_main.cpp)
+mint_tool(mint_program_platform_test program_platform_main.cpp)
+mint_tool(mint_program_cache_test program_cache_main.cpp)
+mint_tool(mint_stack_analysis_test stack_analysis_main.cpp)
+mint_tool(mint_elf32_test elf32_main.cpp)
+mint_tool(mint_dwarf_test dwarf_main.cpp)
+mint_tool(mint_lua_test lua_main.cpp)
+mint_tool(mint_assembler_test assembler_main.cpp)
+mint_tool(mint_native_isa_test native_isa_main.cpp)
+mint_tool(mint_plugin_test plugin_main.cpp)
+mint_tool(mint_debugger_test debugger_main.cpp)
+mint_tool(mint_version_tracking_test version_tracking_main.cpp)
+mint_tool(mint_indirect_flow_test indirect_flow_main.cpp)
+mint_tool(mint_interprocedural_test interprocedural_prototypes_main.cpp)
+mint_tool(mint_exception_metadata_test exception_metadata_main.cpp)
+mint_tool(mint_control_flow_ast_test control_flow_ast_main.cpp)
+mint_tool(mint_signature_library_test signature_library_main.cpp)
+mint_tool(mint_platform_extensions_test platform_extensions_main.cpp)
+mint_tool(mint_pe32_test pe32_main.cpp)
+mint_tool(mint_external_debug_test external_debug_main.cpp)
+mint_tool(mint_analysis_depth_tests analysis_depth_main.cpp)
+mint_tool(mint_pdb_test pdb_main.cpp)
+mint_tool(mint_floating_atomic_tests floating_atomic_main.cpp)
+mint_tool(mint_loader_depth_test loader_depth_main.cpp)
+option(MINT_HOST_CORPUS "Generate a reproducible seven-mode native compiler corpus" OFF)
+if(MINT_HOST_CORPUS)
+    include(${CMAKE_CURRENT_LIST_DIR}/corpus.cmake)
+    include(${CMAKE_CURRENT_LIST_DIR}/debug_loader_corpus.cmake)
+    mint_tool(mint_corpus_test corpus_main.cpp)
+    add_dependencies(mint_corpus_test mint_native_corpus_files)
+    add_dependencies(mint_platform_extensions_test mint_dwarf_corpus_files)
+    add_dependencies(mint_exception_metadata_test mint_exception_corpus_files)
+    add_dependencies(mint_external_debug_test mint_debug_loader_corpus_files)
+    add_dependencies(mint_cxx_metadata_test mint_debug_loader_corpus_files)
+    add_dependencies(mint_pdb_test mint_debug_loader_corpus_files)
+endif()
+add_library(mint_sample_plugin MODULE ${CMAKE_CURRENT_LIST_DIR}/fixtures/sample_plugin.c)
+target_include_directories(mint_sample_plugin PRIVATE ${CORE_DIR}/src/main/cpp)
+add_dependencies(mint_plugin_test mint_sample_plugin)
+mint_tool(mint_architecture_sdk_test architecture_sdk_main.cpp)
+add_library(mint_sample_architecture MODULE ${CMAKE_CURRENT_LIST_DIR}/fixtures/sample_architecture.c)
+add_library(mint_sample_semantics MODULE ${CMAKE_CURRENT_LIST_DIR}/fixtures/architecture_semantics_sample.c)
+target_include_directories(mint_sample_semantics PRIVATE ${CORE_DIR}/src/main/cpp)
+add_library(mint_sample_extension MODULE ${CMAKE_CURRENT_LIST_DIR}/fixtures/plugin_extension_sample.c)
+target_include_directories(mint_sample_extension PRIVATE ${CORE_DIR}/src/main/cpp)
+target_include_directories(mint_sample_architecture PRIVATE ${CORE_DIR}/src/main/cpp)
+add_dependencies(mint_architecture_sdk_test mint_sample_architecture mint_sample_plugin mint_sample_semantics)
+add_dependencies(mint_plugin_test mint_sample_extension)
+mint_tool(mint_headless headless_main.cpp)
+get_property(MINT_HOST_TOOL_TARGETS GLOBAL PROPERTY MINT_HOST_TOOLS)
+add_custom_target(mint_host_tools DEPENDS ${MINT_HOST_TOOL_TARGETS})
+enable_testing()
+add_test(NAME types COMMAND mint_types_test)
+add_test(NAME unwind COMMAND mint_unwind_test)
+add_test(NAME native_loaders COMMAND mint_native_loader_test)
+add_test(NAME program_platform COMMAND mint_program_platform_test)
+add_test(NAME program_cache COMMAND mint_program_cache_test)
+add_test(NAME stack_analysis COMMAND mint_stack_analysis_test)
+add_test(NAME elf32 COMMAND mint_elf32_test)
+add_test(NAME dwarf COMMAND mint_dwarf_test)
+add_test(NAME lua COMMAND mint_lua_test)
+add_test(NAME assembler COMMAND mint_assembler_test)
+add_test(NAME native_isa COMMAND mint_native_isa_test)
+add_test(NAME plugin_sdk COMMAND mint_plugin_test $<TARGET_FILE:mint_sample_plugin> $<TARGET_FILE:mint_sample_extension>)
+add_test(NAME architecture_sdk COMMAND mint_architecture_sdk_test $<TARGET_FILE:mint_sample_architecture> $<TARGET_FILE:mint_sample_plugin> $<TARGET_FILE:mint_sample_semantics>)
+add_test(NAME debugger_protocols COMMAND mint_debugger_test)
+add_test(NAME version_tracking COMMAND mint_version_tracking_test)
+add_test(NAME indirect_flow COMMAND mint_indirect_flow_test)
+add_test(NAME interprocedural_prototypes COMMAND mint_interprocedural_test)
+add_test(NAME exception_metadata COMMAND mint_exception_metadata_test)
+add_test(NAME control_flow_ast COMMAND mint_control_flow_ast_test)
+add_test(NAME signature_libraries COMMAND mint_signature_library_test)
+add_test(NAME platform_extensions COMMAND mint_platform_extensions_test)
+add_test(NAME pe32 COMMAND mint_pe32_test)
+add_test(NAME external_debug COMMAND mint_external_debug_test)
+add_test(NAME analysis_depth COMMAND mint_analysis_depth_tests)
+add_test(NAME floating_atomic_semantics COMMAND mint_floating_atomic_tests)
+add_test(NAME loader_depth COMMAND mint_loader_depth_test)
+if(MINT_HOST_CORPUS)
+    add_test(NAME native_compiler_corpus COMMAND mint_corpus_test ${MINT_CORPUS_BINARIES} ${MINT_CORPUS_LIBRARIES})
+    set_tests_properties(native_compiler_corpus PROPERTIES TIMEOUT 300)
+    add_test(NAME dwarf_program_integration COMMAND mint_platform_extensions_test ${MINT_DWARF_BINARIES})
+    add_test(NAME real_exception_metadata COMMAND mint_exception_metadata_test ${MINT_EXCEPTION_BINARIES})
+    add_test(NAME external_debug_integration COMMAND mint_external_debug_test ${MINT_DEBUG_LOADER_BINARIES})
+    add_test(NAME cxx_group_reconstruction COMMAND mint_cxx_metadata_test ${MINT_CXX_GROUP_FIXTURE})
+    add_test(NAME pdb_program_integration COMMAND mint_pdb_test ${MINT_PDB_BINARIES})
+endif()
+add_test(NAME headless_summary COMMAND mint_headless ${CORE_DIR}/src/main/assets/libmintdemo.so summary)
+add_test(NAME feature_demo COMMAND mint_feature_test ${CORE_DIR}/src/main/assets/libmintdemo.so)
+add_test(NAME headless_script COMMAND ${CMAKE_COMMAND}
+    -DTOOL=$<TARGET_FILE:mint_headless>
+    -DINPUT=${CORE_DIR}/src/main/assets/libmintdemo.so
+    -DSCRIPT=${CMAKE_CURRENT_LIST_DIR}/fixtures/codebrowser.mint
+    -DTEMP_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+    -P ${CMAKE_CURRENT_LIST_DIR}/headless_test.cmake)
 
-# ---------------------------------------------------------------- host JNI library
-#
-# The same JNI sources the app ships, built against the desktop JDK's headers so
-# the marshalling can be driven from a real JVM. mint_probe proves the engine but
-# never crosses JNI, and the JNI layer is where the sharp edges are: six parallel
-# output arrays per call, a local reference per string, and bounds checks that have
-# to hold for mismatched array lengths. Untested, those would first execute on a
-# user's device.
+# JNI stays unsanitized: the system JVM has no preloaded ASan runtime.
 find_package(JNI)
-if (JNI_FOUND)
-    file(GLOB_RECURSE JNI_SOURCES CONFIGURE_DEPENDS
-            ${CORE_DIR}/src/main/cpp/jni/*.cpp
-    )
+if(JNI_FOUND)
+    file(GLOB_RECURSE JNI_SOURCES CONFIGURE_DEPENDS ${CORE_DIR}/src/main/cpp/jni/*.cpp)
     add_library(mintcore SHARED ${ENGINE_SOURCES} ${JNI_SOURCES})
-    target_include_directories(mintcore PRIVATE
-            ${CORE_DIR}/src/main/cpp
-            ${CMAKE_CURRENT_LIST_DIR}/shim
-            ${JNI_INCLUDE_DIRS}
-    )
-    target_link_libraries(mintcore PRIVATE capstone ${MINT_ZLIB_LIBRARY} ${CMAKE_DL_LIBS})
-    target_compile_options(mintcore PRIVATE -Wall -Wextra -Wno-unused-parameter -g)
-    # System.loadLibrary on macOS wants a .dylib; the JVM resolves the bare name.
+    target_include_directories(mintcore PRIVATE ${CORE_DIR}/src/main/cpp ${CMAKE_CURRENT_LIST_DIR}/shim ${JNI_INCLUDE_DIRS})
+    target_include_directories(mintcore PRIVATE ${MINT_ENGINE_GENERATED_DIR})
+    target_link_libraries(mintcore PRIVATE capstone mint_lua ${MINT_ZLIB_LIBRARY} ${CMAKE_DL_LIBS})
+    target_compile_options(mintcore PRIVATE -Wall -Wextra -Wno-unused-parameter)
     set_target_properties(mintcore PROPERTIES SUFFIX ".dylib")
-else()
-    message(STATUS "JNI not found; skipping the host JNI library")
 endif()

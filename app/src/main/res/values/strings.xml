@@ -1,4 +1,5 @@
 <resources>
+    <string name="project_actions">Project actions</string>
     <string name="app_name">Mint</string>
     <string name="focus">Focus</string>
     <string name="relax">Relax</string>
@@ -18,6 +19,10 @@
     <string name="pane_ir">IR</string>
     <string name="pane_c">Pseudo-C</string>
     <string name="pane_graph">CFG</string>
+    <string name="pane_writes">Writes</string>
+    <string name="pane_xrefs">Xrefs</string>
+    <string name="xrefs_hint">Cross-references are per function. Pick one — the CFG pane holds the program-wide call graph.</string>
+    <string name="pane_strings">Strings</string>
     <string name="pane_log">Log</string>
     <string name="cancel_analysis">Stop</string>
     <string name="licences">Open-source licences</string>

@@ -1,8 +1,18 @@
 #include "mint/ir/registers.h"
 
 #include <cstdio>
+#include "mint/plugin/architecture_bridge.h"
 
 namespace mint {
+std::vector<Varnode> abiResultRegisters(Arch arch) {
+    std::vector<Varnode> result;
+    if(arch==Arch::kAArch64) {result={Varnode::reg(arm64::kXn(0),8),Varnode::reg(arm64::kXn(1),8)};for(unsigned n=0;n<4;++n)result.push_back(Varnode::reg(arm64::kVn(n),16));}
+    else if(arch==Arch::kX86_64 || arch==Arch::kX86_32) {const u8 word=arch==Arch::kX86_32?4:8;result={Varnode::reg(x86::kRax,word),Varnode::reg(x86::kRdx,word),Varnode::reg(x86::kXmmN(0),16),Varnode::reg(x86::kXmmN(1),16)};}
+    else if(arch==Arch::kArm32 || arch==Arch::kThumb)result={Varnode::reg(arm32::kRn(0),4),Varnode::reg(arm32::kRn(1),4)};
+    else if(arch==Arch::kRiscV32 || arch==Arch::kRiscV64){const u8 word=arch==Arch::kRiscV32?4:8;result={Varnode::reg(riscv::kXn(10),word),Varnode::reg(riscv::kXn(11),word),Varnode::reg(riscv::kF0+80,8),Varnode::reg(riscv::kF0+88,8)};}
+    else {MintArchitectureSemanticsV2 custom{};if(architecturePluginAbi(arch,&custom)&&custom.return_register_offset!=UINT32_MAX)result.push_back(Varnode::reg(custom.return_register_offset,custom.pointer_size));}
+    return result;
+}
 namespace {
 
 std::string synthetic(u64 offset, u8 size) {
@@ -116,15 +126,46 @@ u64 registerFileSize(Arch arch) {
     switch (arch) {
         case Arch::kAArch64: return arm64::kFileSize;
         case Arch::kX86_64: return x86::kFileSize;
+        case Arch::kX86_32:return x86::kFileSize;
+        case Arch::kArm32:case Arch::kThumb:return arm32::kFileSize;
+        case Arch::kRiscV32:case Arch::kRiscV64:return riscv::kFileSize;
         case Arch::kDalvik: return 4096;
-        default: return 0;
+        default:{MintArchitectureSemanticsV2 custom{};return architecturePluginAbi(arch,&custom)?custom.register_file_bytes:0;}
     }
 }
 
 std::string registerName(Arch arch, u64 offset, u8 size) {
+    if(static_cast<u8>(arch)>=128) {
+        MintArchitectureSemanticsV2 custom{};
+        if(architecturePluginAbi(arch,&custom))for(u32 n=0;n<custom.register_count;++n)if(custom.registers[n].byte_offset==offset && custom.registers[n].width==size)return custom.registers[n].name;
+        return synthetic(offset,size);
+    }
     switch (arch) {
         case Arch::kAArch64: return arm64Name(offset, size);
         case Arch::kX86_64: return x86Name(offset, size);
+        case Arch::kX86_32:return offset==x86::kRip?"eip":x86Name(offset,size);
+        case Arch::kArm32:case Arch::kThumb:
+            if(offset<64 && offset%4==0 && size==4) {
+                if(offset==arm32::kSp)return "sp";if(offset==arm32::kLr)return "lr";if(offset==arm32::kPc)return "pc";
+                return numbered("r",static_cast<unsigned>(offset/4));
+            }
+            if(offset==arm32::kFlagN)return "N";if(offset==arm32::kFlagZ)return "Z";
+            if(offset==arm32::kFlagC)return "C";if(offset==arm32::kFlagV)return "V";
+            if(offset>=arm32::kV0 && offset<arm32::kFileSize) {
+                const auto rel=offset-arm32::kV0;
+                if(size==4 && rel%4==0)return numbered("s",rel/4);
+                if(size==8 && rel%8==0)return numbered("d",rel/8);
+                if(size==16 && rel%16==0)return numbered("q",rel/16);
+            }
+            return synthetic(offset,size);
+        case Arch::kRiscV32:case Arch::kRiscV64:
+            if(offset<riscv::kPc && offset%8==0) {
+                static const char* names[]={"zero","ra","sp","gp","tp","t0","t1","t2","s0","s1","a0","a1","a2","a3","a4","a5","a6","a7","s2","s3","s4","s5","s6","s7","s8","s9","s10","s11","t3","t4","t5","t6"};
+                return names[offset/8];
+            }
+            if(offset==riscv::kPc)return "pc";
+            if(offset>=riscv::kF0 && offset<riscv::kFileSize && (offset-riscv::kF0)%8==0)return numbered("f",(offset-riscv::kF0)/8);
+            return synthetic(offset,size);
         default: return synthetic(offset, size);
     }
 }
