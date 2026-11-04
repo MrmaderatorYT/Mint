@@ -38,12 +38,14 @@ struct DebuggerSnapshot {
     DebuggerBackend backend = DebuggerBackend::kGdbRemote;
     DebuggerState state = DebuggerState::kDisconnected;
     u64 threadId = 0;
+    u64 processId = 0; // RSP multiprocess PID; zero means unavailable.
+    bool supportsMultiprocess = false;
     u32 signal = 0;
     std::string reason;
     bool supportsMemory = false, supportsInstructionBreakpoints = false;
     std::vector<std::string> notes;
 };
-struct DebuggerThread { u64 id = 0; std::string name; bool selected = false; };
+struct DebuggerThread { u64 id = 0; std::string name; bool selected = false; u64 processId = 0; };
 struct DebuggerFrame { u64 id = 0; Address pc = kNoAddress; std::string name, source; u64 line = 0; };
 struct DebuggerModule {
     std::string id, name, path;
@@ -90,7 +92,7 @@ public:
     Status readRegisters(std::vector<DebuggerRegister>* out);
     Status readMemory(Address address, size_t length, std::vector<u8>* out);
     Status threads(std::vector<DebuggerThread>* out);
-    Status selectThread(u64 id);
+    Status selectThread(u64 id, u64 processId = 0);
     Status stackFrames(size_t maximum, std::vector<DebuggerFrame>* out);
     Status modules(std::vector<DebuggerModule>* out); // DAP or advertised generic/SVR4 RSP list.
     Status programCounter(Address* out);

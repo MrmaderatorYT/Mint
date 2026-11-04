@@ -102,6 +102,46 @@ print(json.dumps({'input': sys.argv[1], 'args': sys.argv[2:]}))
         data = json.loads((self.output / row["output"]).read_text())
         self.assertEqual(data["args"], ["--raw", "aarch64", "0x1000", "0x1000", "--raw-endian", "big", "json"])
 
+    def test_address_command_forwarding_and_resume_identity(self):
+        (self.root / "first").write_text("input")
+        options = ("--command", "ir", "--address", "18446744073709551615")
+        result = self.run_batch("first", options=options)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row = self.report()[0]
+        data = json.loads((self.output / row["output"]).read_text())
+        self.assertEqual(data["args"], ["ir", "0xffffffffffffffff"])
+        self.assertEqual(json.loads((self.output / "report.json").read_text())["address"], "0xffffffffffffffff")
+        same = self.run_batch("first", options=("--resume", "--command", "ir", "--address", "0xFFFFFFFFFFFFFFFF"))
+        self.assertEqual(same.returncode, 0, same.stderr)
+        self.assertEqual(self.report()[0]["output"], row["output"])
+        changed = self.run_batch("first", options=("--resume", "--command", "ir", "--address", "0x1"))
+        self.assertEqual(changed.returncode, 2)
+        self.assertEqual(self.report()[0]["output"], row["output"])
+
+    def test_command_address_validation(self):
+        for options in (("--command", "ir"), ("--command", "json", "--address", "1"),
+                        ("--command", "cfg", "--address", "-1"), ("--command", "cfg", "--address", "0x10000000000000000"),
+                        ("--command", "cfg", "--address", "1; touch injected"), ("--command", "cfg", "--address", "1" * 5000)):
+            with self.subTest(options=options):
+                self.assertEqual(self.run_batch("first", options=options).returncode, 2)
+                self.assertFalse(self.output.exists())
+
+    def test_all_additional_read_only_commands_are_forwarded(self):
+        for command in ("types", "types-c", "prototypes", "signatures", "cxx", "dwarf"):
+            with self.subTest(command=command):
+                self.output = self.root / command
+                result = self.run_batch("first", options=("--command", command))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                data = json.loads((self.output / self.report()[0]["output"]).read_text())
+                self.assertEqual(data["args"], [command])
+        for command in ("listing", "decompile", "ir", "cfg", "refs", "provenance", "abi", "locals", "source"):
+            with self.subTest(command=command):
+                self.output = self.root / ("at-" + command)
+                result = self.run_batch("first", options=("--command", command, "--address", "0"))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                data = json.loads((self.output / self.report()[0]["output"]).read_text())
+                self.assertEqual(data["args"], [command, "0x0"])
+
     def test_input_list_paths_relative_to_list_and_spaces_preserved(self):
         folder = self.root / "list directory"
         folder.mkdir()
@@ -235,6 +275,23 @@ print(json.dumps({'input': sys.argv[1], 'args': sys.argv[2:]}))
         (self.output / "checkpoint.sqlite3").write_bytes(b"broken")
         self.assertEqual(self.run_batch("first", options=("--resume",)).returncode, 2)
         self.assertEqual((self.output / "report.json").read_bytes(), before)
+
+    @unittest.skipUnless(os.environ.get("MINT_BATCH_TOOL"), "requires built mint_headless")
+    def test_real_engine_address_commands(self):
+        source = self.root / "function.bin"
+        source.write_bytes(b"\xb8\x2a\x00\x00\x00\xc3")  # mov eax,42; ret
+        for command in ("listing", "decompile", "ir", "cfg"):
+            with self.subTest(command=command):
+                output = self.root / ("real-" + command)
+                result = subprocess.run([sys.executable, str(RUNNER), str(source),
+                                         "--tool", os.environ["MINT_BATCH_TOOL"], "--output", str(output),
+                                         "--raw", "x86-64", "0x1000", "0x1000",
+                                         "--command", command, "--address", "0x1000"],
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                report = json.loads((output / "report.json").read_text())
+                self.assertEqual(report["results"][0]["status"], "ok")
+                self.assertTrue((output / report["results"][0]["output"]).read_text().strip())
 
     @unittest.skipUnless(os.environ.get("MINT_BATCH_TOOL"), "requires built mint_headless")
     def test_real_engine_success_and_missing_input(self):

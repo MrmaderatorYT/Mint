@@ -40,6 +40,21 @@ bool integer(const std::string& text, unsigned base, u64* out) {
     for (char c : text) { const int d = digit(c); if (d < 0 || unsigned(d) >= base || value > (~u64(0) - unsigned(d)) / base) return false; value = value * base + unsigned(d); }
     *out = value; return true;
 }
+// Concrete server-reported thread identities only. Wildcards (0/-1) do not
+// identify a selectable thread and must never be silently converted to one.
+bool rspThreadId(const std::string& text, bool multiprocess, u64* process, u64* thread) {
+    *process=0;*thread=0;
+    if(!text.empty()&&text[0]=='p') {
+        const auto dot=text.find('.');
+        return multiprocess && dot!=std::string::npos && text.find('.',dot+1)==std::string::npos &&
+            integer(text.substr(1,dot-1),16,process) && *process &&
+            integer(text.substr(dot+1),16,thread) && *thread;
+    }
+    return integer(text,16,thread)&&*thread;
+}
+std::string rspThreadText(u64 process,u64 thread) {
+    return process ? "p"+hex(process)+"."+hex(thread) : hex(thread);
+}
 bool addressValue(const std::string& text, Address* out) { return text.size() >= 2 && text[0] == '0' && text[1] == 'x' ? integer(text.substr(2), 16, out) : integer(text, 10, out); }
 bool bytesFromHex(const std::string& text, std::vector<u8>* out, bool unavailable = false, bool* available = nullptr) {
     if (text.size() % 2 || text.size() > kMaxRsp) return false;
@@ -216,10 +231,11 @@ struct DebuggerClient::Impl {
     std::map<u32, std::string> requests;
     std::map<u32, Json> responses;
     std::set<Address> breakpoints;
+    std::map<u64,std::set<Address>> rspBreakpoints;
     std::vector<DebuggerImageMapping> mappings;
     ~Impl() { if (transport) transport->close(); }
     u64 deadline() const { return debuggerMonotonicMs() + options.timeoutMs; }
-    Status fail(Status status) { if (transport) transport->close(); transport.reset(); state.state = DebuggerState::kDisconnected; state.reason = safeText(status.message()); return status; }
+    Status fail(Status status) { if (transport) transport->close(); transport.reset(); mappings.clear(); rspBreakpoints.clear(); state.processId=0; state.threadId=0; state.state = DebuggerState::kDisconnected; state.reason = safeText(status.message()); return status; }
     Status stopped() const { return transport && attached && state.state == DebuggerState::kStopped ? Status::success() : unsupported("Operation requires a connected stopped target"); }
     Status read(u8* out, size_t size, u64 limit) {
         while (size) {
@@ -273,19 +289,43 @@ struct DebuggerClient::Impl {
         if (!out->empty() && (*out)[0] == 'E') return unsupported("GDB server rejected the request");
         return status;
     }
+    void changeProcess(u64 process) {
+        if(!state.supportsMultiprocess)return;
+        if(state.processId!=process || !process) {
+            mappings.clear();
+            if(attached && (state.processId!=process || !process)) {
+                options.registerLayout.clear();
+                if(state.notes.size()<32)state.notes.push_back("Process changed: explicit image mapping and register layout must be established again.");
+            }
+        }
+    }
+    Status selectRspGeneral(u64 limit) {
+        if(!state.supportsMultiprocess)return Status::success();
+        if(!state.threadId)return unsupported("Select an exact stopped thread for multiprocess RSP operations");
+        std::string reply;auto status=rsp("Hg"+rspThreadText(state.processId,state.threadId),&reply,limit);
+        if(!status.ok())return status;if(reply.empty())return unsupported("RSP server cannot select the current process/thread");
+        if(reply!="OK")return fail(bad("invalid RSP thread-selection acknowledgement"));return Status::success();
+    }
     Status stopReply(const std::string& reply) {
         if (reply.size() < 3 || digit(reply[1]) < 0 || digit(reply[2]) < 0) return fail(bad("invalid GDB stop reply"));
-        if (reply[0] == 'W' || reply[0] == 'X') { if (reply.size() != 3) return fail(bad("unsupported GDB exit-reply suffix")); state.state = DebuggerState::kExited; state.reason = reply[0] == 'W' ? "Target exited" : "Target terminated by signal"; return Status::success(); }
+        if (reply[0] == 'W' || reply[0] == 'X') {
+            if(reply.size()==3){changeProcess(0);state.processId=0;state.threadId=0;state.state=DebuggerState::kExited;state.reason=reply[0]=='W'?"Target exited":"Target terminated by signal";++stoppedEpoch;return Status::success();}
+            const std::string prefix=";process:";u64 exited=0;
+            if(!state.supportsMultiprocess || reply.compare(3,prefix.size(),prefix)!=0 || !integer(reply.substr(3+prefix.size()),16,&exited) || !exited)return fail(bad("invalid GDB process exit reply"));
+            rspBreakpoints.erase(exited);changeProcess(0);state.processId=0;state.threadId=0;
+            state.state=DebuggerState::kStopped;state.reason="Process 0x"+hex(exited)+(reply[0]=='W'?" exited":" terminated by signal")+"; select a remaining thread";++stoppedEpoch;return Status::success();
+        }
         if (reply[0] != 'T' && reply[0] != 'S') return fail(bad("GDB stop reply expected"));
         if (reply[0] == 'S' && reply.size() != 3) return fail(bad("unsupported GDB signal suffix"));
-        u64 thread = 0; bool hasThread = false;
+        u64 thread = 0, process = 0; bool hasThread = false;
         for (size_t pos = 3; pos < reply.size();) {
             const auto finish = reply.find(';', pos); if (finish == std::string::npos) return fail(bad("unterminated GDB stop field"));
             const auto colon = reply.find(':', pos); if (colon == std::string::npos || colon == pos || colon >= finish) return fail(bad("invalid GDB stop field"));
-            if (reply.compare(pos, colon - pos, "thread") == 0) { if (hasThread || !integer(reply.substr(colon + 1, finish - colon - 1), 16, &thread) || !thread) return fail(bad("invalid/duplicate GDB stopped thread")); hasThread = true; }
+            if (reply.compare(pos, colon - pos, "thread") == 0) { if (hasThread || !rspThreadId(reply.substr(colon + 1, finish - colon - 1), state.supportsMultiprocess, &process, &thread)) return fail(bad("invalid/duplicate GDB stopped thread")); hasThread = true; }
             pos = finish + 1;
         }
-        state.state = DebuggerState::kStopped; state.signal = static_cast<u32>(digit(reply[1]) * 16 + digit(reply[2])); state.threadId = thread;
+        changeProcess(process);
+        state.state = DebuggerState::kStopped; state.signal = static_cast<u32>(digit(reply[1]) * 16 + digit(reply[2])); state.threadId = thread;state.processId=process;
         state.reason = "GDB stop signal " + std::to_string(state.signal); ++stoppedEpoch; return Status::success();
     }
     Status dapSend(const std::string& command, const std::string& arguments, u32* id, u64 limit) {
@@ -381,11 +421,12 @@ Status DebuggerClient::connect(std::unique_ptr<DebuggerTransport> transport, Deb
     std::sort(candidate->options.registerLayout.begin(), candidate->options.registerLayout.end(), [](const auto& a, const auto& b) { return a.number < b.number; });
     const auto limit = candidate->deadline(); Status status;
     if (backend == DebuggerBackend::kGdbRemote) {
-        std::string features; status = candidate->rsp("qSupported:swbreak+;vContSupported+", &features, limit); if (!status.ok()) return status;
-        bool noAck = false;
+        std::string features; status = candidate->rsp("qSupported:swbreak+;vContSupported+;multiprocess+", &features, limit); if (!status.ok()) return status;
+        bool noAck = false, sawMultiprocess = false;
         for (size_t start = 0; start < features.size();) { const auto finish = features.find(';', start); const auto item = features.substr(start, finish == std::string::npos ? finish : finish - start);
             if (item.compare(0, 11, "PacketSize=") == 0) { u64 value = 0; if (!integer(item.substr(11), 16, &value) || value < 64) return candidate->fail(bad("invalid GDB PacketSize")); candidate->packetSize = static_cast<size_t>(std::min<u64>(value, kMaxRsp)); }
             if (item == "QStartNoAckMode+") noAck = true;
+            if (item == "multiprocess+" || item == "multiprocess-" || item == "multiprocess?") { if(sawMultiprocess)return candidate->fail(bad("duplicate GDB multiprocess capability")); sawMultiprocess=true; candidate->state.supportsMultiprocess = item == "multiprocess+"; }
             if (item == "qXfer:libraries-svr4:read+") candidate->svr4Libraries = true;
             if (item == "qXfer:libraries:read+") candidate->genericLibraries = true;
             if (finish == std::string::npos) break; start = finish + 1;
@@ -425,6 +466,7 @@ Status DebuggerClient::readMemory(Address address, size_t length, std::vector<u8
     auto status = p.stopped(); if (!status.ok()) return status; if (!p.state.supportsMemory) return unsupported("Adapter does not support memory reads");
     const auto limit = p.deadline(); const auto epoch = p.stoppedEpoch; std::vector<u8> candidate;
     if (p.state.backend == DebuggerBackend::kGdbRemote) {
+        status=p.selectRspGeneral(limit);if(!status.ok())return status;
         const size_t chunkSize = std::min(kMaxMemoryRead, (p.packetSize - 32) / 2);
         while (candidate.size() < length) { const auto count = std::min(chunkSize, length - candidate.size()); std::string reply; status = p.rsp("m" + hex(address + candidate.size()) + ',' + hex(count), &reply, limit); if (!status.ok()) return status; if (reply.empty()) return unsupported("GDB memory read unsupported"); std::vector<u8> chunk; if (!bytesFromHex(reply, &chunk) || chunk.size() != count) return p.fail(bad("GDB memory length/encoding mismatch")); candidate.insert(candidate.end(), chunk.begin(), chunk.end()); }
     }
@@ -441,7 +483,9 @@ Status DebuggerClient::readRegisters(std::vector<DebuggerRegister>* out) {
     const auto limit = p.deadline(); const auto epoch = p.stoppedEpoch; std::vector<DebuggerRegister> candidate;
     if (p.state.backend == DebuggerBackend::kGdbRemote) {
         std::string reply;
-        if (p.state.threadId) { status = p.rsp("Hg" + hex(p.state.threadId), &reply, limit); if (!status.ok()) return status; if (reply.empty()) return unsupported("GDB stub cannot select the stopped register thread"); if (reply != "OK") return p.fail(bad("invalid GDB thread-selection response")); }
+        if(p.state.supportsMultiprocess && !p.state.threadId)return unsupported("Select an exact stopped thread before reading registers");
+        if(p.state.supportsMultiprocess && !p.state.threadId)return unsupported("Select an exact stopped thread before reading multiprocess registers");
+        if (p.state.threadId) { status = p.rsp("Hg" + rspThreadText(p.state.processId,p.state.threadId), &reply, limit); if (!status.ok()) return status; if (reply.empty()) return unsupported("GDB stub cannot select the stopped register thread"); if (reply != "OK") return p.fail(bad("invalid GDB thread-selection response")); }
         status = p.rsp("g", &reply, limit); if (!status.ok()) return status; if (reply.empty()) return unsupported("GDB register read unsupported");
         if (p.options.registerLayout.empty()) { DebuggerRegister reg; reg.name = "raw-register-file (target order; layout unknown)"; reg.value = reply; if (!bytesFromHex(reply, &reg.bytes, true, &reg.available)) return p.fail(bad("invalid GDB register encoding")); candidate.push_back(std::move(reg)); }
         else { size_t position = 0; for (const auto& spec : p.options.registerLayout) { const auto count = spec.bits / 4; if (position > reply.size() || count > reply.size() - position) return p.fail(bad("GDB register layout length mismatch")); DebuggerRegister reg; reg.name = spec.name; reg.number = spec.number; reg.value = reply.substr(position, count); if (!bytesFromHex(reg.value, &reg.bytes, true, &reg.available)) return p.fail(bad("invalid GDB register bytes")); position += count; candidate.push_back(std::move(reg)); } if (position != reply.size()) return p.fail(bad("GDB extra register bytes outside exact layout")); }
@@ -470,17 +514,39 @@ Status DebuggerClient::readRegisters(std::vector<DebuggerRegister>* out) {
     if (p.state.state != DebuggerState::kStopped || p.stoppedEpoch != epoch) return unsupported("Target state changed during register read; result discarded");
     *out = std::move(candidate); return Status::success();
 }
-Status DebuggerClient::threads(std::vector<DebuggerThread>* out){
+Status DebuggerClient::threads(std::vector<DebuggerThread>* out) {
     auto& p=*impl_;if(!out)return bad("missing thread output");auto status=p.stopped();if(!status.ok())return status;
-    const auto limit=p.deadline(),epoch=p.stoppedEpoch;std::vector<DebuggerThread> candidate;std::set<u64> seen;
-    if(p.state.backend==DebuggerBackend::kLldbDap){Json body;status=p.dap("threads","{}",&body,limit);if(!status.ok())return status;const auto* values=body.get("threads");if(!values||values->kind!=Json::Array||values->array.size()>4096)return p.fail(bad("invalid DAP thread inventory"));for(const auto& value:values->array){u64 id=0;if(!value.uint("id",&id)||!id||id>INT_MAX||!seen.insert(id).second)return p.fail(bad("invalid/duplicate DAP thread ID"));candidate.push_back({id,safeText(value.string("name")),id==p.state.threadId});}}
-    else {std::string reply;for(unsigned page=0;page<64;++page){status=p.rsp(page?"qsThreadInfo":"qfThreadInfo",&reply,limit);if(!status.ok())return status;if(reply=="l")break;if(reply.empty())return unsupported("RSP thread inventory unavailable");if(reply[0]!='m')return p.fail(bad("invalid RSP thread inventory"));size_t at=1;while(at<reply.size()){const auto end=reply.find(',',at);u64 id=0;if(!integer(reply.substr(at,end==std::string::npos?std::string::npos:end-at),16,&id)||!id||!seen.insert(id).second||candidate.size()>=4096)return p.fail(bad("invalid/oversized RSP thread ID"));candidate.push_back({id,"thread 0x"+hex(id),id==p.state.threadId});if(end==std::string::npos)break;at=end+1;}if(page==63)return p.fail(bad("RSP thread inventory page limit"));}}
+    const auto limit=p.deadline(),epoch=p.stoppedEpoch;std::vector<DebuggerThread> candidate;std::set<std::pair<u64,u64>> seen;
+    if(p.state.backend==DebuggerBackend::kLldbDap){
+        Json body;status=p.dap("threads","{}",&body,limit);if(!status.ok())return status;
+        const auto* values=body.get("threads");if(!values||values->kind!=Json::Array||values->array.size()>4096)return p.fail(bad("invalid DAP thread inventory"));
+        for(const auto& value:values->array){u64 id=0;if(!value.uint("id",&id)||!id||id>INT_MAX||!seen.emplace(0,id).second)return p.fail(bad("invalid/duplicate DAP thread ID"));candidate.push_back({id,safeText(value.string("name")),id==p.state.threadId,0});}
+    } else {
+        std::string reply;bool complete=false,qualified=false,unqualified=false;
+        for(unsigned page=0;page<64;++page){
+            status=p.rsp(page?"qsThreadInfo":"qfThreadInfo",&reply,limit);if(!status.ok())return status;
+            if(reply=="l"){complete=true;break;}if(reply.empty())return unsupported("RSP thread inventory unavailable");
+            if(reply[0]!='m'||reply.size()==1||reply.back()==',')return p.fail(bad("invalid RSP thread inventory"));
+            size_t at=1;while(at<reply.size()){
+                const auto end=reply.find(',',at);u64 process=0,id=0;
+                if(!rspThreadId(reply.substr(at,end==std::string::npos?std::string::npos:end-at),p.state.supportsMultiprocess,&process,&id)||!seen.emplace(process,id).second||candidate.size()>=4096)return p.fail(bad("invalid/duplicate/oversized RSP thread ID"));
+                qualified|=process!=0;unqualified|=process==0;if(qualified&&unqualified)return p.fail(bad("ambiguous mixed RSP thread identities"));
+                candidate.push_back({id,"thread "+(process?rspThreadText(process,id):"0x"+hex(id)),id==p.state.threadId&&process==p.state.processId,process});
+                if(end==std::string::npos)break;at=end+1;
+            }
+        }
+        if(!complete)return p.fail(bad("RSP thread inventory page limit"));
+    }
     if(p.state.state!=DebuggerState::kStopped||p.stoppedEpoch!=epoch)return unsupported("Target changed during thread inventory");*out=std::move(candidate);return Status::success();
 }
-Status DebuggerClient::selectThread(u64 id){
-    auto& p=*impl_;if(!id)return bad("thread ID must be positive");std::vector<DebuggerThread> inventory;auto status=threads(&inventory);if(!status.ok())return status;if(std::none_of(inventory.begin(),inventory.end(),[&](const DebuggerThread& thread){return thread.id==id;}))return unsupported("Thread no longer exists in current inventory");
-    if(p.state.backend==DebuggerBackend::kGdbRemote){std::string reply;status=p.rsp("Hg"+hex(id),&reply,p.deadline());if(!status.ok())return status;if(reply!="OK")return unsupported("RSP server cannot select that thread");}
-    p.state.threadId=id;return Status::success();
+Status DebuggerClient::selectThread(u64 id,u64 processId){
+    auto& p=*impl_;if(!id)return bad("thread ID must be positive");
+    if(processId&&(p.state.backend!=DebuggerBackend::kGdbRemote||!p.state.supportsMultiprocess))return unsupported("Process-qualified thread selection requires negotiated RSP multiprocess support");
+    std::vector<DebuggerThread> inventory;auto status=threads(&inventory);if(!status.ok())return status;
+    if(std::none_of(inventory.begin(),inventory.end(),[&](const DebuggerThread& thread){return thread.id==id&&thread.processId==processId;}))return unsupported("Thread no longer exists in current inventory");
+    if(p.state.backend==DebuggerBackend::kGdbRemote){std::string reply;status=p.rsp("Hg"+rspThreadText(processId,id),&reply,p.deadline());if(!status.ok())return status;if(reply.empty())return unsupported("RSP server cannot select that thread");if(reply!="OK")return p.fail(bad("invalid RSP thread-selection acknowledgement"));}
+    p.changeProcess(processId);
+    p.state.threadId=id;p.state.processId=processId;return Status::success();
 }
 Status DebuggerClient::stackFrames(size_t maximum,std::vector<DebuggerFrame>* out){
     auto& p=*impl_;if(!out||!maximum||maximum>256)return bad("stack frame limit must be 1..256");auto status=p.stopped();if(!status.ok())return status;if(p.state.backend!=DebuggerBackend::kLldbDap)return unsupported("RSP does not expose a portable stackTrace; use a DAP adapter for unwind-backed frames");
@@ -494,6 +560,7 @@ Status DebuggerClient::modules(std::vector<DebuggerModule>* out){
     if(p.state.backend==DebuggerBackend::kGdbRemote) {
         if(!p.svr4Libraries&&!p.genericLibraries)return unsupported("RSP server did not advertise library inventory; use explicit mappings or DAP modules");
         const auto limit=p.deadline(),epoch=p.stoppedEpoch;std::string xml,reply;bool complete=false;
+        status=p.selectRspGeneral(limit);if(!status.ok())return status;
         for(size_t page=0;page<1024;++page) {
             status=p.rsp(std::string(p.svr4Libraries?"qXfer:libraries-svr4:read::":"qXfer:libraries:read::")+hex(xml.size())+",400",&reply,limit);
             if(!status.ok())return status;
@@ -522,6 +589,7 @@ Status DebuggerClient::discoverRegisterLayout(){
     auto& p=*impl_;auto status=p.stopped();if(!status.ok())return status;
     if(p.state.backend!=DebuggerBackend::kGdbRemote)return unsupported("RSP target XML only");
     const auto limit=p.deadline(),epoch=p.stoppedEpoch;size_t totalXml=0;
+    status=p.selectRspGeneral(limit);if(!status.ok())return status;
     const RspTargetXmlFetcher fetch=[&](const std::string& file,std::string* document)->Status{
         std::string candidate,reply;
         for(size_t page=0;page<64;++page){
@@ -540,6 +608,7 @@ Status DebuggerClient::discoverRegisterLayout(){
     p.options.registerLayout=std::move(layout);return Status::success();
 }
 Status DebuggerClient::setImageMappings(const std::vector<DebuggerImageMapping>& mappings){
+    if(!mappings.empty()&&impl_->state.supportsMultiprocess&&!impl_->state.processId)return unsupported("Select a process-qualified thread before mapping an image");
     if(mappings.size()>4096)return bad("image mapping limit exceeded");for(size_t i=0;i<mappings.size();++i){const auto& a=mappings[i];if(!a.size||a.imageStart>kNoAddress-a.size||a.runtimeStart>kNoAddress-a.size||a.module.size()>4096)return bad("invalid image mapping extent");for(size_t j=0;j<i;++j){const auto& b=mappings[j];if((a.imageStart<b.imageStart+b.size&&b.imageStart<a.imageStart+a.size)||(a.runtimeStart<b.runtimeStart+b.size&&b.runtimeStart<a.runtimeStart+a.size))return bad("ambiguous overlapping image mapping");}}impl_->mappings=mappings;return Status::success();
 }
 Status DebuggerClient::imageToRuntime(Address image,Address* runtime)const{if(!runtime)return bad("missing runtime address output");for(const auto& mapping:impl_->mappings)if(image>=mapping.imageStart&&image-mapping.imageStart<mapping.size){*runtime=mapping.runtimeStart+(image-mapping.imageStart);return Status::success();}return unsupported("Image address has no confirmed runtime mapping");}
@@ -549,7 +618,19 @@ Status DebuggerClient::setBreakpoint(Address address, bool enabled, u32 instruct
     if (!instructionSize || instructionSize > 16) return bad("breakpoint instruction kind must be 1..16 bytes");
     if (!p.state.supportsInstructionBreakpoints) return unsupported("Adapter does not support instruction breakpoints");
     const auto limit = p.deadline();
-    if (p.state.backend == DebuggerBackend::kGdbRemote) { if (enabled && !p.breakpoints.count(address) && p.breakpoints.size() >= 256) return unsupported("Instruction breakpoint limit is 256"); std::string reply; status = p.rsp(std::string(enabled ? "Z0," : "z0,") + hex(address) + ',' + hex(instructionSize), &reply, limit); if (!status.ok()) return status; if (reply.empty()) return unsupported("GDB software breakpoints unsupported"); if (reply != "OK") return p.fail(bad("GDB breakpoint acknowledgement invalid")); if (enabled) p.breakpoints.insert(address); else p.breakpoints.erase(address); }
+    if (p.state.backend == DebuggerBackend::kGdbRemote) {
+        status=p.selectRspGeneral(limit);if(!status.ok())return status;
+        auto found=p.rspBreakpoints.find(p.state.processId);
+        if(found==p.rspBreakpoints.end()) {
+            if(p.rspBreakpoints.size()>=4096)return unsupported("RSP breakpoint process limit reached");
+            found=p.rspBreakpoints.emplace(p.state.processId,std::set<Address>{}).first;
+        }
+        auto& processBreakpoints=found->second;
+        if (enabled && !processBreakpoints.count(address) && processBreakpoints.size() >= 256) return unsupported("Instruction breakpoint limit is 256 per process");
+        std::string reply; status = p.rsp(std::string(enabled ? "Z0," : "z0,") + hex(address) + ',' + hex(instructionSize), &reply, limit);
+        if (!status.ok()) return status; if (reply.empty()) return unsupported("GDB software breakpoints unsupported"); if (reply != "OK") return p.fail(bad("GDB breakpoint acknowledgement invalid"));
+        if (enabled) processBreakpoints.insert(address); else { processBreakpoints.erase(address); if(processBreakpoints.empty())p.rspBreakpoints.erase(found); }
+    }
     else {
         auto candidate = p.breakpoints; if (enabled) candidate.insert(address); else candidate.erase(address); if (candidate.size() > 256) return unsupported("Instruction breakpoint limit is 256");
         std::string args = "{\"breakpoints\":["; for (auto value : candidate) { if (args.back() != '[') args += ','; args += "{\"instructionReference\":" + quote("0x" + hex(value)) + '}'; } args += "]}";
@@ -563,8 +644,9 @@ Status DebuggerClient::setBreakpoint(Address address, bool enabled, u32 instruct
 Status DebuggerClient::step() {
     auto& p = *impl_; auto status = p.stopped(); if (!status.ok()) return status; const auto limit = p.deadline(); const auto epoch = p.stoppedEpoch;
     if (p.state.backend == DebuggerBackend::kGdbRemote) {
-        if (!p.vStep && p.state.threadId) { std::string reply; status = p.rsp("Hc" + hex(p.state.threadId), &reply, limit); if (!status.ok()) return status; if (reply.empty()) return unsupported("GDB stub cannot select the stopped stepping thread"); if (reply != "OK") return p.fail(bad("invalid GDB continue-thread response")); }
-        status = p.rspSend(p.vStep ? "vCont;s" + (p.state.threadId ? ':' + hex(p.state.threadId) : "") : "s", limit);
+        if(p.state.supportsMultiprocess && !p.state.threadId)return unsupported("Select an exact stopped thread before stepping a multiprocess target");
+        if (!p.vStep && p.state.threadId) { std::string reply; status = p.rsp("Hc" + rspThreadText(p.state.processId,p.state.threadId), &reply, limit); if (!status.ok()) return status; if (reply.empty()) return unsupported("GDB stub cannot select the stopped stepping thread"); if (reply != "OK") return p.fail(bad("invalid GDB continue-thread response")); }
+        status = p.rspSend(p.vStep ? "vCont;s" + (p.state.threadId ? ':' + rspThreadText(p.state.processId,p.state.threadId) : "") : "s", limit);
     }
     else { if (!p.instructionStep) return unsupported("Adapter lacks instruction stepping granularity"); status = p.thread(limit); if (!status.ok()) return status; Json body; status = p.dap("stepIn", "{\"threadId\":" + std::to_string(p.state.threadId) + ",\"granularity\":\"instruction\"}", &body, limit); }
     if (status.ok() && (!p.attached || p.state.state == DebuggerState::kExited)) return unsupported("Target session ended while stepping");
@@ -572,7 +654,11 @@ Status DebuggerClient::step() {
 }
 Status DebuggerClient::resume() {
     auto& p = *impl_; auto status = p.stopped(); if (!status.ok()) return status; const auto limit = p.deadline(); const auto epoch = p.stoppedEpoch;
-    if (p.state.backend == DebuggerBackend::kGdbRemote) status = p.rspSend(p.vContinue ? "vCont;c" : "c", limit);
+    if (p.state.backend == DebuggerBackend::kGdbRemote) {
+        if(p.state.supportsMultiprocess && !p.state.threadId)return unsupported("Select an exact stopped thread before continuing a multiprocess target");
+        if(p.state.supportsMultiprocess && !p.vContinue) {std::string reply;status=p.rsp("Hc"+rspThreadText(p.state.processId,p.state.threadId),&reply,limit);if(!status.ok())return status;if(reply.empty())return unsupported("RSP server cannot select continue thread");if(reply!="OK")return p.fail(bad("invalid continue-thread acknowledgement"));}
+        status=p.rspSend(p.vContinue ? "vCont;c"+(p.state.supportsMultiprocess?":"+rspThreadText(p.state.processId,p.state.threadId):"") : "c",limit);
+    }
     else { status = p.thread(limit); if (!status.ok()) return status; Json body; status = p.dap("continue", "{\"threadId\":" + std::to_string(p.state.threadId) + '}', &body, limit); }
     if (status.ok() && (!p.attached || p.state.state == DebuggerState::kExited)) return unsupported("Target session ended while continuing");
     if (status.ok() && p.stoppedEpoch == epoch) { p.state.state = DebuggerState::kRunning; p.state.reason = "Target running"; } return status;
@@ -592,7 +678,8 @@ Status DebuggerClient::waitForStop() {
 std::string debuggerSnapshotText(const DebuggerSnapshot& snapshot) {
     const char* names[] = {"disconnected", "connected", "stopped", "running", "exited"}; const auto index = static_cast<unsigned>(snapshot.state);
     std::ostringstream out; out << (snapshot.backend == DebuggerBackend::kGdbRemote ? "GDB Remote" : "LLDB-DAP") << ": " << (index < 5 ? names[index] : "unknown") << '\n';
-    if (snapshot.threadId) out << "thread " << snapshot.threadId << '\n'; if (!snapshot.reason.empty()) out << snapshot.reason << '\n';
+    if (snapshot.threadId && snapshot.processId) out << "process 0x" << std::hex << snapshot.processId << " thread 0x" << snapshot.threadId << std::dec << '\n';
+    else if (snapshot.threadId) out << "thread " << snapshot.threadId << '\n'; if (!snapshot.reason.empty()) out << snapshot.reason << '\n';
     for (const auto& note : snapshot.notes) out << "note: " << note << '\n'; return out.str();
 }
 }  // namespace mint

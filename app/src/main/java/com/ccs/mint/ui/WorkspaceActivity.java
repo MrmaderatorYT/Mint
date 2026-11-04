@@ -213,6 +213,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
 
         findViewById(R.id.open).setOnClickListener(v -> pickFile());
         findViewById(R.id.open_another).setOnClickListener(v -> pickFile());
+        findViewById(R.id.help).setOnClickListener(v -> WorkspaceHelp.show(this));
         findViewById(R.id.about).setOnClickListener(v -> showLicences());
         findViewById(R.id.project_actions).setOnClickListener(v -> showProjectActions());
         showBetaNoticeOnce();
@@ -444,12 +445,12 @@ public final class WorkspaceActivity extends AppCompatActivity {
     // ------------------------------------------------------------------ opening
 
     private void pickFile() {
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Import binary")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Import binary")
                 .setItems(new String[]{"Auto-detect native ELF / PE / Mach-O", "Raw binary — built-in or loaded plugin decoder", "Restore Mint project archive", "Mach-O — select CPU slice explicitly"},(d,which) -> {
                     if(which==0){pendingRawImport=null;launchFilePicker();}
                     else if(which==1)promptRawImport();
                     else if(which==2)pickDocument(PROJECT_OPEN_REQUEST);
-                    else new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Mach-O architecture").setItems(new String[]{"AArch64", "x86-64", "x86-32", "ARM"},(dialog,index)->{
+                    else new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Mach-O architecture").setItems(new String[]{"AArch64", "x86-64", "x86-32", "ARM"},(dialog,index)->{
                         pendingRawImport=RawImportConfig.machOSlice(new String[]{"aarch64","x86-64","x86-32","arm"}[index]);launchFilePicker();
                     }).show();
                 }).show();
@@ -462,13 +463,13 @@ public final class WorkspaceActivity extends AppCompatActivity {
         final String[] labels = new String[architectures.length];
         for (int i = 0; i < labels.length; ++i) labels[i] = architectures[i].name + " — " + (architectures[i].pointerSize * 8) + "-bit" +
                 (architectures[i].numericId >= 128 ? (architectures[i].hasLifter?" (plugin decoder + semantic lifter)":" (plugin decoder; no lifter)") : "");
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Raw architecture")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Raw architecture")
                 .setItems(labels,(d,which) -> {
                     LinearLayout form=new LinearLayout(this);form.setOrientation(LinearLayout.VERTICAL);
                     EditText base=new EditText(this),entry=new EditText(this);
                     base.setHint("Base address (hex)");base.setText("0x1000");entry.setHint("Entry address (hex)");entry.setText("0x1000");form.addView(base);form.addView(entry);
                     android.widget.CheckBox bigEndian=new android.widget.CheckBox(this);bigEndian.setText("Big-endian data");bigEndian.setVisibility(architectures[which].id.equals("aarch64")?android.view.View.VISIBLE:android.view.View.GONE);form.addView(bigEndian);
-                    new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Raw memory mapping").setView(form)
+                    new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Raw memory mapping").setView(form)
                             .setPositiveButton("Choose file",(dialog,w) -> {
                                 try{pendingRawImport=RawImportConfig.fromHex(architectures[which].id+(bigEndian.isChecked()?":be":""),base.getText().toString(),entry.getText().toString());launchFilePicker();}
                                 catch(IllegalArgumentException e){showProjectError(e.getMessage());}
@@ -1239,44 +1240,79 @@ public final class WorkspaceActivity extends AppCompatActivity {
 
     private void showProjectActions() {
         if (session == null) return;
-        String[] actions = {"Global search", "Go to address", "Edit current address", "References at current address", "Undo edit", "Redo edit", "Memory blocks", "Data Type Manager", "Function provenance", "C++ RTTI / vtables", "Reanalyze", "Export patched copy", "Navigate forward", "DWARF / source information", "Assemble patch at current address", "Lua script editor", "Open Lua script", "Compare another binary / version tracking", "External debugger", "Native plugins", "Interprocedural prototype constraints", "Back up complete project", "Restore project archive", "Edit local variables", "Function ABI storage", "Import external / split DWARF"};
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Project")
-                .setItems(actions,(dialog,which) -> {
-                    if (which == 0) promptSearch();
-                    else if (which == 1) {
-                        EditText input = new EditText(this); input.setHint("Hex address, e.g. 0x1000");
-                        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Go to address").setView(input)
-                                .setPositiveButton("Go",(d,w) -> {
-                                    try { jumpTo(Long.parseUnsignedLong(input.getText().toString().trim().replaceFirst("^(0x|0X)",""),16)); }
-                                    catch (NumberFormatException e) { showProjectError("Invalid hexadecimal address"); }
-                                }).setNegativeButton("Cancel",null).show();
-                    } else if (which == 2) editAddress(listingAddress);
-                    else if (which == 3) showReferences(listingAddress);
-                    else if(which==4 || which==5) { MintSession active = session; mutateProject(() -> active.undoEdit(which == 5)); }
-                    else if(which==6)showAddressResults("Memory blocks",MintSession::memoryBlocks);
-                    else if(which==7)showTypeManager();
-                    else if(which==8)showReport("Function provenance",active -> active.provenance(listingAddress));
-                    else if(which==9)showReport("C++ metadata",MintSession::cxxMetadata);
-                    else if(which==10){MintSession active=session;mutateProject(active::reanalyze);}
-                    else if(which==11){Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.setType("application/octet-stream");intent.addCategory(Intent.CATEGORY_OPENABLE);intent.putExtra(Intent.EXTRA_TITLE,"mint-patched.bin");startActivityForResult(intent,EXPORT_REQUEST);}
-                    else if(which==12 && history.canGoForward())jumpTo(history.forward());
-                    else if(which==13)showReport("DWARF debug information",MintSession::debugInfo);
-                    else if(which==14)promptAssembly(listingAddress);
-                    else if(which==15)promptScript("for _, f in ipairs(mint.functions()) do\n  print(f.entry, f.name, f.origin)\nend");
-                    else if(which==16){Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);intent.setType("*/*");intent.addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(intent,SCRIPT_REQUEST);}
-                    else if(which==17)showVersionTracking();
-                    else if(which==18)showDebugger();
-                    else if(which==19)showNativePlugins();
-                    else if(which==20)showReport("Call-graph prototype constraints",MintSession::interproceduralPrototypes);
-                    else if(which==21) {
-                        Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.setType("application/zip");
-                        intent.addCategory(Intent.CATEGORY_OPENABLE);intent.putExtra(Intent.EXTRA_TITLE,"mint-project.mintproj");
-                        startActivityForResult(intent,PROJECT_SAVE_REQUEST);
-                    } else if(which==22)pickDocument(PROJECT_OPEN_REQUEST);
-                    else if(which==23)showLocalVariables();
-                    else if(which==24){final long function=selected==null?listingAddress:selected.entry;showReport("Function ABI storage",s->s.abi(function));}
-                    else if(which==25)pickDocument(DEBUG_IMPORT_REQUEST);
-                }).show();
+        final com.google.android.material.bottomsheet.BottomSheetDialog sheet =
+                new com.google.android.material.bottomsheet.BottomSheetDialog(this);
+        android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        LinearLayout content = new LinearLayout(this);content.setOrientation(LinearLayout.VERTICAL);
+        int padding = Math.round(16 * getResources().getDisplayMetrics().density);
+        content.setPadding(padding,padding,padding,padding);
+        TextView title = new TextView(this);title.setText("Workspace tools");
+        title.setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_HeadlineSmall);
+        content.addView(title);
+        final List<LinearLayout> sections = new ArrayList<>();
+        final List<com.google.android.material.button.MaterialButton> headings = new ArrayList<>();
+        for(int group=0;group<ProjectActions.GROUPS.length;++group) {
+            final LinearLayout items = new LinearLayout(this);items.setOrientation(LinearLayout.VERTICAL);
+            items.setVisibility(View.GONE);sections.add(items);
+            com.google.android.material.button.MaterialButton heading = new com.google.android.material.button.MaterialButton(this, null,
+                    com.google.android.material.R.attr.materialButtonOutlinedStyle);
+            final String groupName=ProjectActions.GROUPS[group];
+            heading.setText(groupName+"  ▾");heading.setAllCaps(false);
+            heading.setContentDescription(groupName);ViewCompat.setStateDescription(heading,"Collapsed");headings.add(heading);
+            heading.setOnClickListener(view->{boolean expand=items.getVisibility()!=View.VISIBLE;
+                for(int index=0;index<sections.size();++index){sections.get(index).setVisibility(View.GONE);
+                    headings.get(index).setText(ProjectActions.GROUPS[index]+"  ▾");ViewCompat.setStateDescription(headings.get(index),"Collapsed");}
+                items.setVisibility(expand?View.VISIBLE:View.GONE);
+                if(expand){heading.setText(groupName+"  ▴");ViewCompat.setStateDescription(heading,"Expanded");}});
+            content.addView(heading,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT));
+            for(int action:ProjectActions.ITEMS[group]) {
+                com.google.android.material.button.MaterialButton button = new com.google.android.material.button.MaterialButton(new android.view.ContextThemeWrapper(this,
+                        com.google.android.material.R.style.Widget_Material3_Button_TextButton));
+                button.setText(ProjectActions.LABELS[action]);button.setAllCaps(false);button.setSingleLine(false);button.setMaxLines(3);button.setGravity(android.view.Gravity.START | android.view.Gravity.CENTER_VERTICAL);
+                button.setOnClickListener(view->{sheet.dismiss();runProjectAction(action);});
+                items.addView(button,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            content.addView(items);
+        }
+        scroll.setFillViewport(false);scroll.addView(content);sheet.setContentView(scroll);sheet.show();
+    }
+
+    private void runProjectAction(int which) {
+        if(session==null)return;
+        if (which == 0) promptSearch();
+        else if (which == 1) {
+            EditText input = new EditText(this); input.setHint("Hex address, e.g. 0x1000");
+            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Go to address").setView(input)
+                    .setPositiveButton("Go",(d,w) -> {
+                        try { jumpTo(Long.parseUnsignedLong(input.getText().toString().trim().replaceFirst("^(0x|0X)",""),16)); }
+                        catch (NumberFormatException e) { showProjectError("Invalid hexadecimal address"); }
+                    }).setNegativeButton("Cancel",null).show();
+        } else if (which == 2) editAddress(listingAddress);
+        else if (which == 3) showReferences(listingAddress);
+        else if(which==4 || which==5) { MintSession active = session; mutateProject(() -> active.undoEdit(which == 5)); }
+        else if(which==6)showMemoryBlocks();
+        else if(which==7)showTypeManager();
+        else if(which==8)showReport("Function provenance",active -> active.provenance(listingAddress));
+        else if(which==9)showReport("C++ metadata",MintSession::cxxMetadata);
+        else if(which==10){MintSession active=session;mutateProject(active::reanalyze);}
+        else if(which==11){Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.setType("application/octet-stream");intent.addCategory(Intent.CATEGORY_OPENABLE);intent.putExtra(Intent.EXTRA_TITLE,"mint-patched.bin");startActivityForResult(intent,EXPORT_REQUEST);}
+        else if(which==12 && history.canGoForward())jumpTo(history.forward());
+        else if(which==13)showReport("DWARF debug information",MintSession::debugInfo);
+        else if(which==14)promptAssembly(listingAddress);
+        else if(which==15)promptScript("for _, f in ipairs(mint.functions()) do\n  print(f.entry, f.name, f.origin)\nend");
+        else if(which==16){Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);intent.setType("*/*");intent.addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(intent,SCRIPT_REQUEST);}
+        else if(which==17)showVersionTracking();
+        else if(which==18)showDebugger();
+        else if(which==19)showNativePlugins();
+        else if(which==20)showReport("Call-graph prototype constraints",MintSession::interproceduralPrototypes);
+        else if(which==21) {
+            Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.setType("application/zip");
+            intent.addCategory(Intent.CATEGORY_OPENABLE);intent.putExtra(Intent.EXTRA_TITLE,"mint-project.mintproj");
+            startActivityForResult(intent,PROJECT_SAVE_REQUEST);
+        } else if(which==22)pickDocument(PROJECT_OPEN_REQUEST);
+        else if(which==23)showLocalVariables();
+        else if(which==24){final long function=selected==null?listingAddress:selected.entry;showReport("Function ABI storage",s->s.abi(function));}
+        else if(which==25)pickDocument(DEBUG_IMPORT_REQUEST);
     }
 
     private void pickDocument(int request) {
@@ -1285,7 +1321,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private void importExternalDebug(Uri uri) {
         final MintSession active=session;if(active==null)return;
         android.widget.CheckBox unverified=new android.widget.CheckBox(this);unverified.setText("Accept missing identity evidence (partial / unverified report)");
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Import external DWARF / PDB")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Import external DWARF / PDB")
                 .setMessage("Choose matching ELF/DWO debug information or a Windows PDB7 file. Available build IDs, debuglink CRC, split-unit IDs or PDB GUID/age must match; a mismatch is always rejected. A private bounded copy survives reopening and is included in project backups. No referenced path is followed automatically. Unsupported records stay explicitly partial.")
                 .setView(unverified).setNegativeButton("Cancel",null).setPositiveButton("Import",(dialog,button)->{
                     final boolean allow=unverified.isChecked();mutateProject(()->{java.io.File temporary=null;
@@ -1301,10 +1337,10 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 }).show();
     }
     private void showVersionTracking() {
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Binary diff / version tracking")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Binary diff / version tracking")
                 .setItems(new String[]{"Open comparison binary", "Function-level diff", "Confirm function pair", "Confirmed pairs", "Preview annotation transfer", "Apply transfer to comparison Program", "Save confirmed pairs", "Load confirmed pairs"},(d,which) -> {
                     if(which==0) {
-                        if(model.rawConfig()!=null)new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Explicit comparison interpretation")
+                        if(model.rawConfig()!=null)new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Explicit comparison interpretation")
                                 .setMessage(model.rawConfig().machOSlice?"The comparison Mach-O uses the same explicitly selected CPU slice. Addresses are read from the container.":"The comparison raw binary uses the same architecture, base and entry as this Program.")
                                 .setPositiveButton("Choose binary",(a,b)->pickDocument(COMPARISON_REQUEST)).setNegativeButton("Cancel",null).show();
                         else pickDocument(COMPARISON_REQUEST);
@@ -1356,7 +1392,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
         EditText source=new EditText(this);source.setHint("Source function entry (hex)");source.setText("0x"+Long.toUnsignedString(listingAddress,16));fields.addView(source);
         EditText target=new EditText(this);target.setHint("Comparison function entry (hex)");fields.addView(target);
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Confirm matching functions")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Confirm matching functions")
                 .setMessage("This is a manual decision, not an automatic match. It authorizes transfer previews for this exact pair and current code; no annotations are transferred yet.")
                 .setView(fields).setNegativeButton("Cancel",null).setPositiveButton("Confirm pair",(d,w)->{
                     try {long from=parseHexAddress(source.getText().toString()),to=parseHexAddress(target.getText().toString());showReport("Confirmed pair",active->active.comparison("confirm",from,to,""));}
@@ -1371,7 +1407,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
             final String body=result,failure=error;main.post(()->{
                 if(isDestroyed() || active!=session)return;busy(false);if(failure!=null){showProjectError(failure);return;}
                 if(!apply){displayReport("Transfer preview",body);return;}
-                new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Apply annotations to comparison Program?")
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Apply annotations to comparison Program?")
                         .setMessage(body+"\nExisting comparison annotations win. Only confirmed instruction-aligned symbols, comments, bookmarks and supported prototypes transfer. Patches and type libraries do not transfer. The current Program is unchanged.")
                         .setNegativeButton("Cancel",null).setPositiveButton("Apply transfer",(d,w)->showReport("Transfer result",s->s.comparison("apply",0,0,""))).show();
             });
@@ -1379,7 +1415,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
     }
     private void showDebugger() {
         String[] actions={"Connect debugger", "Status", "Attach LLDB DAP to PID", "Read registers", "Read 256 bytes at mapped current address", "Set mapped breakpoint here", "Remove mapped breakpoint here", "Step one instruction", "Continue", "Interrupt", "Wait for stop (bounded)", "Disconnect", "Threads / select thread", "Stack frames", "Loaded modules", "Map current binary to runtime base", "Go to mapped PC", "Read RSP register layout", "Clear address mapping"};
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("External debugger")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("External debugger")
                 .setItems(actions,(d,which)->{
                     if(which==0){promptDebuggerConnection();return;}
                     if(which==12){showDebuggerThreads();return;}
@@ -1387,7 +1423,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     if(which==15){promptDebuggerMapping();return;}
                     if(which==16){runDebuggerAndFollowPc("pc-image");return;}
                     if(which==2){EditText pid=new EditText(this);pid.setHint("Existing process ID (decimal)");pid.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-                        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Attach to existing process")
+                        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Attach to existing process")
                                 .setMessage("LLDB DAP only. Mint never launches a process or executes a shell command.")
                                 .setView(pid).setNegativeButton("Cancel",null).setPositiveButton("Attach",(a,b)->{
                                     try{long id=Long.parseLong(pid.getText().toString().trim());if(id<=0)throw new NumberFormatException();showReport("Debugger attach",s->s.debugger("attach",0,id));}
@@ -1396,7 +1432,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     }
                     String[] ops={"","status","","registers","memory-image","break-image","unbreak-image","step","continue","interrupt","wait","disconnect","threads","stack","modules","map-image","pc-image","layout","unmap"};
                     final long at=listingAddress;
-                    if(which>=5 && which<=9)new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(actions[which])
+                    if(which>=5 && which<=9)new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(actions[which])
                             .setMessage("This changes the connected target process. Breakpoints require your explicit image-to-runtime mapping; Mint never guesses the ASLR slide.")
                             .setNegativeButton("Cancel",null).setPositiveButton("Execute",(a,b)->{if(which==7 || which==9)runDebuggerAndFollowPc(ops[which]);else showReport("Debugger",s->s.debugger(ops[which],at,0));}).show();
                     else if(which==10)runDebuggerAndFollowPc("wait");
@@ -1405,7 +1441,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
     }
     private void promptDebuggerMapping() {
         EditText runtime=new EditText(this);runtime.setHint("Runtime load base, hexadecimal (e.g. 0x7f000000)");
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Explicit ASLR mapping")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Explicit ASLR mapping")
                 .setMessage("Inspect Loaded modules first. Enter the runtime address corresponding to this binary's preferred image base, not its entry point. Confirm this is the same binary. Mapping is session-only and is cleared on disconnect.")
                 .setView(runtime).setNegativeButton("Cancel",null).setPositiveButton("Map",(d,w)->{
                     try{String text=runtime.getText().toString().trim();if(text.startsWith("0x"))text=text.substring(2);long base=Long.parseUnsignedLong(text,16);showReport("Address mapping",s->s.debugger("map-image",base,0));}
@@ -1416,10 +1452,13 @@ public final class WorkspaceActivity extends AppCompatActivity {
         final MintSession active=session;if(active==null)return;busy(true);
         worker.execute(()->{String result;try{result=active.debugger("threads",0,0);}catch(Exception e){result=e.getMessage();}final String body=result;
             main.post(()->{if(isDestroyed() || active!=session)return;busy(false);
-                java.util.ArrayList<String> rows=new java.util.ArrayList<>();java.util.ArrayList<Long> ids=new java.util.ArrayList<>();
-                for(String line:body.split("\n")){int tab=line.indexOf('\t');if(tab<1)continue;try{long id=Long.parseUnsignedLong(line.substring(0,tab));ids.add(id);rows.add(line);}catch(NumberFormatException ignored){}}
+                java.util.ArrayList<String> rows=new java.util.ArrayList<>();java.util.ArrayList<Long> ids=new java.util.ArrayList<>(),processes=new java.util.ArrayList<>();
+                for(String line:body.split("\\n")){int tab=line.indexOf('\t');if(tab<1)continue;try{
+                    DebuggerThreadId identity=DebuggerThreadId.parse(line.substring(0,tab));
+                    ids.add(identity.thread);processes.add(identity.process);rows.add(line);
+                }catch(NumberFormatException ignored){}}
                 if(rows.isEmpty()){displayReport("Threads",body);return;}
-                new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Select debugger thread").setItems(rows.toArray(new String[0]),(d,index)->showReport("Selected thread",s->s.debugger("thread",0,ids.get(index)))).setNegativeButton("Close",null).show();
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Select debugger thread").setItems(rows.toArray(new String[0]),(d,index)->showReport("Selected thread",s->s.debugger("thread",processes.get(index),ids.get(index)))).setNegativeButton("Close",null).show();
             });});
     }
     private void showDebuggerFrames() {
@@ -1429,7 +1468,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 for(String line:body.split("\n")){String[] fields=line.split("\t",-1);if(fields.length<4 || !fields[2].startsWith("image 0x"))continue;
                     try{addresses.add(Long.parseUnsignedLong(fields[2].substring(8),16));labels.add(fields[3]+" — "+fields[2]+(fields.length>4?" — "+fields[4]:""));}catch(NumberFormatException ignored){}}
                 if(labels.isEmpty()){displayReport("Stack frames — no validated image mapping",body);return;}
-                new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Mapped stack frames").setItems(labels.toArray(new String[0]),(d,index)->jumpTo(addresses.get(index))).setNeutralButton("Full report",(d,w)->displayReport("Stack frames",body)).setNegativeButton("Close",null).show();
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Mapped stack frames").setItems(labels.toArray(new String[0]),(d,index)->jumpTo(addresses.get(index))).setNeutralButton("Full report",(d,w)->displayReport("Stack frames",body)).setNegativeButton("Close",null).show();
             });});
     }
     private void runDebuggerAndFollowPc(String operation) {
@@ -1446,7 +1485,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         EditText host=new EditText(this);host.setHint("Numeric IPv4 / IPv6");host.setText("127.0.0.1");fields.addView(host);
         EditText port=new EditText(this);port.setHint("TCP port");port.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);fields.addView(port);
         android.widget.CheckBox remote=new android.widget.CheckBox(this);remote.setText("I accept unencrypted, unauthenticated non-loopback TCP");fields.addView(remote);
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Connect external debugger")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Connect external debugger")
                 .setMessage("Connects only when you press Connect. Prefer loopback with your own authenticated tunnel. RSP expects an already attached all-stop stub; DAP requires a separate PID attach. Static analysis remains offline.")
                 .setView(fields).setNegativeButton("Cancel",null).setPositiveButton("Connect",(d,w)->{
                     try{int number=Integer.parseInt(port.getText().toString().trim());String address=host.getText().toString().trim();boolean dap=backend.getSelectedItemPosition()==1,allow=remote.isChecked();showReport("Debugger connection",s->s.connectDebugger(address,number,dap,allow));}
@@ -1454,7 +1493,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 }).show();
     }
     private void showNativePlugins() {
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Native plugins")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Native plugins")
                 .setItems(new String[]{"Load trusted .so plugin", "List commands", "Run plugin command", "Run isolated plugin command"},(d,which)->{
                     if(which==0)pickDocument(PLUGIN_REQUEST);
                     else if(which==1)showReport("Plugin commands",MintSession::pluginCommands);
@@ -1464,7 +1503,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                         EditText command=new EditText(this);command.setHint("plugin-id/command-id");fields.addView(command);
                         EditText arguments=new EditText(this);arguments.setHint("Arguments");fields.addView(arguments);
                         android.widget.CheckBox edits=new android.widget.CheckBox(this);edits.setText("Allow Program edits through the host API");fields.addView(edits);
-                        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Run trusted native code")
+                        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Run trusted native code")
                                 .setMessage("Native plugins are not sandboxed. The edits switch limits only the provided Mint API, not the plugin's OS access.")
                                 .setView(fields).setNegativeButton("Cancel",null).setPositiveButton("Run",(a,b)->{
                                     String id=command.getText().toString(),args=arguments.getText().toString();boolean allow=edits.isChecked();
@@ -1483,7 +1522,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
         EditText command=new EditText(this);command.setHint("plugin-id/command-id");fields.addView(command);
         EditText arguments=new EditText(this);arguments.setHint("Arguments");fields.addView(arguments);
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Run isolated native command")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Run isolated native command")
                 .setMessage("Runs in a separate isolated process with fresh read-only analysis of the original binary. Current project annotations and patches are not shared.")
                 .setView(fields).setNegativeButton("Cancel",null).setPositiveButton("Run",(d,w)->{
                     if(sandboxPlugin!=null || sandboxPreparing)return;
@@ -1525,7 +1564,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
 
     private void openNativePlugin(Uri uri) {
         final MintSession active=session;if(active==null)return;
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Trust and load native plugin?")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Trust and load native plugin?")
                 .setMessage("Loading this file executes unrestricted native code with Mint's permissions, including access to your private projects and network. Only load plugins you trust, built for this device ABI and Mint SDK v1/v2. Files are never auto-loaded on reopening a project.")
                 .setNegativeButton("Cancel",null).setPositiveButton("Trust and load",(d,w)->{
                     busy(true);worker.execute(()->{
@@ -1547,7 +1586,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
     }
 
     private void showProjectError(String message) {
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Project").setMessage(message)
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Project").setMessage(message)
                 .setPositiveButton("OK",null).show();
     }
 
@@ -1566,13 +1605,13 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     rows.add(fields);labels.add(fields[1]+" — "+fields[3]+" bytes, "+fields[4]+(fields[2].isEmpty()?"":" : "+fields[2]));
                 }
                 if(rows.isEmpty()){displayReport("Local variables",report);return;}
-                new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Persistent local variables")
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Persistent local variables")
                         .setItems(labels.toArray(new String[0]),(dialog,which) -> {
                             String[] row=rows.get(which);LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
                             EditText name=new EditText(this),type=new EditText(this);
                             name.setHint("Local name (empty preserves inference)");name.setText(row[1]);
                             type.setHint("Type: i32, u64, named pointer… (empty preserves inference)");type.setText(row[2]);fields.addView(name);fields.addView(type);
-                            new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Rename / retype "+row[1])
+                            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Rename / retype "+row[1])
                                     .setMessage("Storage width must match. Bindings are guarded by the current function structure; stale bindings are retained but never applied to different values. Parameter names/types belong in the function prototype.")
                                     .setView(fields).setNegativeButton("Cancel",null)
                                     .setNeutralButton("Remove override",(d,w)->mutateProject(()->active.editLocal(function,row[0],"","")))
@@ -1585,7 +1624,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private void promptAssembly(long address) {
         final MintSession active=session;if(active==null)return;
         EditText input=new EditText(this);input.setTypeface(Typeface.MONOSPACE);input.setMinLines(4);input.setHint("nop\nret");
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(String.format(Locale.US,"Assemble at 0x%x",address))
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(String.format(Locale.US,"Assemble at 0x%x",address))
                 .setMessage("Bounded scalar instruction subset with labels. Preview the encoded bytes before replacing code. Unsupported forms are rejected; original input remains unchanged.")
                 .setView(input).setNegativeButton("Cancel",null).setPositiveButton("Preview",(d,w) -> {
                     final String source=input.getText().toString();busy(true);
@@ -1595,7 +1634,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                         main.post(() -> {
                             if(isDestroyed() || active!=session)return;busy(false);
                             if(failure!=null){showProjectError(failure);return;}
-                            new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Confirm assembly patch")
+                            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Confirm assembly patch")
                                     .setMessage(String.format(Locale.US,"0x%x\n%s\n\nThis replaces %d bytes. Undo/redo and patched-copy export apply.",address,encoded,encoded.isEmpty()?0:(encoded.length()+1)/3))
                                     .setNegativeButton("Cancel",null).setPositiveButton("Apply patch",(confirm,button) -> mutateProject(() -> active.assemble(address,source,true))).show();
                         });
@@ -1608,7 +1647,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
         EditText input=new EditText(this);input.setTypeface(Typeface.MONOSPACE);input.setText(source);input.setMinLines(5);input.setMaxLines(14);fields.addView(input);
         android.widget.CheckBox edits=new android.widget.CheckBox(this);edits.setText("Allow this script to edit the Program");fields.addView(edits);
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Run Lua script")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Run Lua script")
                 .setMessage("Read-only by default. No files, network or process access. Execution and memory are bounded. Permitted edits are committed individually and remain undoable even if the script stops with an error.")
                 .setView(fields).setNegativeButton("Cancel",null).setPositiveButton("Run",(dialog,which) -> {
                     final String text=input.getText().toString();final boolean allow=edits.isChecked();++viewGeneration;busy(true);
@@ -1644,7 +1683,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         if (active == null) return;
         String[] kinds = {"name","comment","bookmark","data","prototype","function","patch"};
         String[] labels = {"Rename symbol", "Comment", "Bookmark", "Define data — type expression or cstring", "Function prototype: uint64_t(int32_t count, void* buffer)", "Define function entry — code", "Patch hex bytes — 1f 20 03 d5", "References"};
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(String.format(Locale.US,"0x%x",address))
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(String.format(Locale.US,"0x%x",address))
                 .setItems(labels,(dialog,which) -> {
                     if (which == 7) { showReferences(address); return; }
                     String kind = kinds[which];
@@ -1657,7 +1696,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                             if (isDestroyed() || active != session) return;
                             EditText input = new EditText(this); input.setText(initial);
                             input.setHint("Empty value removes the override");
-                            new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(labels[which]).setView(input)
+                            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(labels[which]).setView(input)
                                     .setPositiveButton("Save",(d,w) -> {
                                         String edited = input.getText().toString();
                                         mutateProject(() -> active.edit(address,kind,edited));
@@ -1688,7 +1727,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private void promptSearch() {
         EditText input = new EditText(this);
         input.setHint("Symbol, comment, bookmark, string, or bytes: 7f 45 4c 46");
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Global search (up to 500 hits)").setView(input)
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Global search (up to 500 hits)").setView(input)
                 .setPositiveButton("Search",(dialog,which) -> {
                     String query = input.getText().toString();
                     showAddressResults("Search",active -> active.search(query));
@@ -1716,7 +1755,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
 
     private void showTypeManager() {
         final MintSession active=session;if(active==null)return;
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Data Type Manager")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Data Type Manager")
                 .setItems(new String[]{"View definitions", "Add or replace definition", "Remove definition", "Exportable GNU C11 type header", "Import type / signature library", "View imported signatures"},(d,which) -> {
                     if(which==0){showReport("Data types",MintSession::types);return;}
                     if(which==3){showReport("C type header (select / copy)",MintSession::typesCHeader);return;}
@@ -1724,7 +1763,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     if(which==5){showReport("Signature library",MintSession::signatureLibrary);return;}
                     EditText input=new EditText(this);
                     input.setHint(which==1?"Packet=struct{length:u32;bytes:u8[16];next:Packet*}":"Type name");
-                    new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(which==1?"Define type":"Remove type").setView(input)
+                    new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(which==1?"Define type":"Remove type").setView(input)
                             .setPositiveButton("Save",(dialog,w) -> {String declaration=input.getText().toString();mutateProject(() -> {if(which==1)active.defineType(declaration);else active.eraseType(declaration);});})
                             .setNegativeButton("Cancel",null).show();
                 }).show();
@@ -1743,7 +1782,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
             final String source=result,failure=error;main.post(()->{
                 if(isDestroyed() || active!=session)return;busy(false);if(failure!=null){showProjectError(failure);return;}
                 boolean signatures=source.startsWith("MINTSIG ");String preview=source.length()>8192?source.substring(0,8192)+"\n[Preview truncated]":source;
-                new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(signatures?"Import signature library?":"Merge type library?")
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(signatures?"Import signature library?":"Merge type library?")
                         .setMessage(preview+"\n\nABI and pointer width must match the current Program. Import is one persisted undoable transaction. Type names in this file replace matching definitions; a signature import replaces the previous signature library. Explicit function prototypes retain priority.")
                         .setNegativeButton("Cancel",null).setPositiveButton("Import",(d,w)->mutateProject(()->active.importLibrary(source,signatures))).show();
             });
@@ -1763,7 +1802,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private void displayReport(String title,String result) {
         TextView view=new TextView(this);view.setTypeface(Typeface.MONOSPACE);view.setTextSize(12);view.setTextIsSelectable(true);view.setText(result==null || result.isEmpty()?"No output / metadata found.":result);
         android.widget.ScrollView scroll=new android.widget.ScrollView(this);scroll.addView(view);
-        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(title).setView(scroll).setPositiveButton("Close",null).show();
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(title).setView(scroll).setPositiveButton("Close",null).show();
     }
 
     private void exportPatchedTo(Uri destination) {
@@ -1821,6 +1860,19 @@ public final class WorkspaceActivity extends AppCompatActivity {
         showAddressResults("References at 0x"+Long.toHexString(address),active -> active.references(address));
     }
 
+    private void showMemoryBlocks() {
+        final MintSession active=session;if(active==null)return;busy(true);
+        worker.execute(()->{
+            String body;try{body=active.memoryBlocks();}catch(RuntimeException error){body=error.getMessage();}
+            final String report=body;
+            main.post(()->{if(isDestroyed()||active!=session)return;busy(false);
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                    .setTitle("Memory blocks").setMessage(report)
+                    .setNeutralButton("Navigate to block",(dialog,which)->showAddressResults("Memory blocks",MintSession::memoryBlocks))
+                    .setPositiveButton("Close",null).show();});
+        });
+    }
+
     private void showAddressResults(String title,AddressQuery query) {
         final MintSession active = session;
         if (active == null) return;
@@ -1840,7 +1892,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
             main.post(() -> {
                 if (isDestroyed() || active != session) return;
                 busy(false);
-                androidx.appcompat.app.AlertDialog.Builder dialog = new androidx.appcompat.app.AlertDialog.Builder(this).setTitle(title);
+                androidx.appcompat.app.AlertDialog.Builder dialog = new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(title);
                 if (labels.isEmpty()) dialog.setMessage(message);
                 else dialog.setItems(labels.toArray(new String[0]),(d,which) -> jumpTo(addresses.get(which)));
                 dialog.setNegativeButton("Close",null).show();

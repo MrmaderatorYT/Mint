@@ -1,0 +1,9 @@
+Mint 0.4 Preview
+
+• Explore a refreshed mint-green interface and built-in illustrated help.
+• Analyze big-endian AArch64 binaries and more ARM, RISC-V, x86 and AArch64 instructions.
+• Inspect improved DWARF, PDB, C++ metadata and memory analysis.
+• Select process-qualified threads when using supported remote debuggers.
+• Run supported plugin commands in an isolated Android process.
+
+Preview support remains partial; unsupported cases are reported explicitly.

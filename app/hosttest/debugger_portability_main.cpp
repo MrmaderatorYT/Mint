@@ -63,6 +63,56 @@ void endian(){
     auto trace=std::make_shared<Trace>();DebuggerOptions options;options.registerByteOrder=static_cast<ByteOrder>(255);DebuggerClient client;
     require(!client.connect(std::make_unique<Wire>(trace),DebuggerBackend::kGdbRemote,options).ok()&&trace->closed,"invalid byte order rejected before protocol I/O");
 }
+void multiprocessThreads(){
+    auto trace=std::make_shared<Trace>();
+    trace->fragment=3;
+    trace->incoming="+"+packet("PacketSize=4000;multiprocess+")+"+"+packet("vCont;c;s")+"+"+packet("T05thread:p1.2;")
+        +"+"+packet("mp1.2,p2.2")+"+"+packet("l")
+        +"+"+packet("mp1.2,p2.2")+"+"+packet("l")+"+"+packet("OK")
+        +"+"+packet("OK")+"+"+packet("01020304")
+        +"+"+packet("OK")+"+"+packet("aabb")
+        +"+"+packet("OK")+"+"+packet("OK")
+        +"+"+packet("T05thread:p1.2;")
+        +"+"+packet("W00;process:1")
+        +"+"+packet("mp2.2")+"+"+packet("l")
+        +"+"+packet("mp2.2")+"+"+packet("l")+"+"+packet("OK");
+    DebuggerOptions options;options.registerLayout={{"pc",0,32}};DebuggerClient client;
+    require(client.connect(std::make_unique<Wire>(trace),DebuggerBackend::kGdbRemote,options).ok(),"multiprocess negotiation");
+    require(client.snapshot().supportsMultiprocess&&client.snapshot().processId==1&&client.snapshot().threadId==2,"qualified stop identity");
+    require(trace->outgoing.find(packet("qSupported:swbreak+;vContSupported+;multiprocess+"))!=std::string::npos,"client advertises multiprocess support");
+    std::vector<DebuggerThread> threads;require(client.threads(&threads).ok()&&threads.size()==2&&threads[0].selected&&!threads[1].selected&&threads[0].id==threads[1].id&&threads[0].processId==1&&threads[1].processId==2,"equal thread IDs in distinct processes remain distinct");
+    require(client.setImageMappings({{0x1000,0x2000,0x100,"test"}}).ok(),"mapping tied to current process");
+    require(client.selectThread(2,2).ok()&&client.snapshot().processId==2,"select exact process/thread");
+    Address mapped=0;require(!client.imageToRuntime(0x1000,&mapped).ok(),"mapping invalidated on process switch");
+    std::vector<DebuggerRegister> regs;require(client.readRegisters(&regs).ok()&&regs.size()==1&&regs[0].name.find("raw-register")!=std::string::npos,"process switch drops prior register layout");
+    std::vector<u8> memory;require(client.readMemory(0x10,2,&memory).ok()&&memory==std::vector<u8>({0xaa,0xbb}),"memory uses selected process context");
+    require(client.setBreakpoint(0x10,true,4).ok(),"breakpoint uses selected process context");
+    require(client.step().ok()&&client.waitForStop().ok()&&client.snapshot().processId==1&&client.snapshot().threadId==2,"step uses pair and stop switches process");
+    require(client.resume().ok()&&client.waitForStop().ok()&&client.snapshot().state==DebuggerState::kStopped&&!client.snapshot().threadId,"one process exit does not mark whole multiprocess session exited");
+    require(!client.readRegisters(&regs).ok()&&!client.readMemory(0x10,2,&memory).ok()&&!client.resume().ok(),"operations cannot reuse an exited process identity");
+    require(client.threads(&threads).ok()&&threads.size()==1&&threads[0].processId==2,"remaining process can be enumerated");
+    require(client.selectThread(2,2).ok(),"select remaining process after exit");
+    for(const auto* command:{"Hgp2.2","m10,2","Z0,10,4","vCont;s:p2.2","vCont;c:p1.2"})require(trace->outgoing.find(packet(command))!=std::string::npos,"expected qualified operation was sent");
+    for(const auto& value:{std::string("p1."),std::string("p.2"),std::string("p0.2"),std::string("p1.0"),std::string("p1.-1"),std::string("p10000000000000000.2"),std::string("p1.2.3")}) {
+        auto bad=std::make_shared<Trace>();bad->incoming="+"+packet("PacketSize=4000;multiprocess+")+"+"+packet("vCont;c;s")+"+"+packet("T05thread:"+value+";");DebuggerClient invalid;
+        require(!invalid.connect(std::make_unique<Wire>(bad),DebuggerBackend::kGdbRemote).ok()&&bad->closed,"invalid multiprocess stop ID rejected");
+    }
+    auto unnegotiated=std::make_shared<Trace>();unnegotiated->incoming="+"+packet("PacketSize=4000")+"+"+packet("vCont;c;s")+"+"+packet("T05thread:p1.2;");DebuggerClient invalid;
+    require(!invalid.connect(std::make_unique<Wire>(unnegotiated),DebuggerBackend::kGdbRemote).ok()&&unnegotiated->closed,"qualified IDs require negotiated capability");
+    auto duplicate=std::make_shared<Trace>();duplicate->incoming="+"+packet("PacketSize=4000;multiprocess+")+"+"+packet("vCont;c;s")+"+"+packet("T05thread:p1.2;")+"+"+packet("mp1.2,p1.2");DebuggerClient badInventory;
+    require(badInventory.connect(std::make_unique<Wire>(duplicate),DebuggerBackend::kGdbRemote).ok(),"duplicate inventory fixture connects");
+    std::vector<DebuggerThread> preserved(1);preserved[0].name="preserved";require(!badInventory.threads(&preserved).ok()&&preserved.size()==1&&preserved[0].name=="preserved"&&duplicate->closed,"duplicate pair rejects transactionally");
+    auto mixed=std::make_shared<Trace>();mixed->incoming="+"+packet("PacketSize=4000;multiprocess+")+"+"+packet("vCont;c;s")+"+"+packet("T05thread:p1.2;")+"+"+packet("mp1.2,2");DebuggerClient ambiguous;
+    require(ambiguous.connect(std::make_unique<Wire>(mixed),DebuggerBackend::kGdbRemote).ok(),"mixed inventory fixture connects");
+    require(!ambiguous.threads(&preserved).ok()&&preserved[0].name=="preserved"&&mixed->closed,"mixed qualified and unqualified IDs rejected transactionally");
+    auto conflict=std::make_shared<Trace>();conflict->incoming="+"+packet("multiprocess+;multiprocess-");DebuggerClient conflicting;
+    require(!conflicting.connect(std::make_unique<Wire>(conflict),DebuggerBackend::kGdbRemote).ok()&&conflict->closed,"conflicting capability rejected");
+    auto max=std::make_shared<Trace>();max->incoming="+"+packet("PacketSize=4000;multiprocess+")+"+"+packet("vCont;c;s")+"+"+packet("T05thread:pffffffffffffffff.ffffffffffffffff;")+"+"+packet("mpffffffffffffffff.ffffffffffffffff")+"+"+packet("l");DebuggerClient exact;
+    require(exact.connect(std::make_unique<Wire>(max),DebuggerBackend::kGdbRemote).ok()&&exact.snapshot().processId==~u64(0)&&exact.snapshot().threadId==~u64(0),"full width process/thread stop IDs retained");
+    require(exact.threads(&threads).ok()&&threads.size()==1&&threads[0].selected&&threads[0].processId==~u64(0)&&threads[0].id==~u64(0),"full width IDs retained in inventory");
+    exact.disconnect();auto legacy=std::make_shared<Trace>();legacy->incoming="+"+packet("PacketSize=4000")+"+"+packet("vCont;c;s")+"+"+packet("T05thread:2;");
+    require(exact.connect(std::make_unique<Wire>(legacy),DebuggerBackend::kGdbRemote).ok()&&!exact.snapshot().supportsMultiprocess&&!exact.snapshot().processId&&exact.snapshot().threadId==2,"reconnect resets capability and process identity");
+}
 void targetDescriptions(){
     using Documents=std::map<std::string,std::string>;
     auto parse=[](const Documents& documents,std::vector<DebuggerRegisterSpec>* out,std::vector<std::string>* requested=nullptr){
@@ -136,4 +186,4 @@ void targetDescriptions(){
     require(exact.programCounter(&pc).ok()&&pc==0x12345678,"explicit layouts also use increasing register-number order");
 }
 }
-int main(){parser();transport();endian();targetDescriptions();std::cout<<checks<<" debugger portability checks passed\n";}
+int main(){parser();transport();endian();multiprocessThreads();targetDescriptions();std::cout<<checks<<" debugger portability checks passed\n";}

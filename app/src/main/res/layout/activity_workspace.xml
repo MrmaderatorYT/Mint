@@ -62,6 +62,14 @@
             android:contentDescription="@string/project_actions"
             app:icon="@android:drawable/ic_menu_more" />
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/help"
+            style="@style/Widget.Material3.Button.IconButton"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:contentDescription="@string/help_open"
+            app:icon="@drawable/ic_help_outline" />
+
         <!-- The bundled disassembler is BSD-licensed, and that licence requires its
              notice to reach whoever receives the binary. A screen inside the app is
              the only place a user actually can receive it. -->

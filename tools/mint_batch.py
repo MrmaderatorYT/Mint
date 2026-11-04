@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -15,6 +16,18 @@ import threading
 import time
 import fcntl
 from mint_batch_checkpoint import Checkpoint, digest, attempt_id
+
+READ_COMMANDS = ("json", "summary", "functions", "types", "types-c", "prototypes", "signatures", "cxx", "dwarf")
+ADDRESS_COMMANDS = ("listing", "decompile", "ir", "cfg", "refs", "provenance", "abi", "locals", "source")
+
+
+def address(value):
+    if len(value) > 128 or not re.fullmatch(r"(?:0[xX][0-9a-fA-F]+|[0-9]+)", value):
+        raise argparse.ArgumentTypeError("address must be unsigned decimal or 0x-prefixed hexadecimal")
+    number = int(value, 16 if value.lower().startswith("0x") else 10)
+    if number > 0xffffffffffffffff:
+        raise argparse.ArgumentTypeError("address exceeds 64 bits")
+    return f"0x{number:x}"
 
 
 def positive_int(value):
@@ -53,12 +66,15 @@ def main(argv=None):
     parser.add_argument("--jobs", type=positive_int, default=1)
     parser.add_argument("--timeout", type=timeout_seconds, default=300.0)
     parser.add_argument("--max-output-bytes", type=int, default=64 * 1024 * 1024, help="maximum bytes per output stream")
-    parser.add_argument("--command", choices=("json", "summary", "functions"), default="json")
+    parser.add_argument("--command", choices=READ_COMMANDS + ADDRESS_COMMANDS, default="json")
+    parser.add_argument("--address", type=address, help="address for address-based commands (same for every input)")
     mapping = parser.add_mutually_exclusive_group()
     mapping.add_argument("--raw", nargs=3, metavar=("ARCH", "BASE", "ENTRY"))
     mapping.add_argument("--macho", metavar="ARCH")
     parser.add_argument("--raw-endian", choices=("little", "big"))
     args = parser.parse_args(argv)
+    if (args.command in ADDRESS_COMMANDS) != (args.address is not None):
+        parser.error("--address is required for address-based commands and invalid for other commands")
     if args.raw_endian and not args.raw:
         parser.error("--raw-endian requires --raw")
     if args.max_output_bytes < 1:
@@ -86,6 +102,8 @@ def main(argv=None):
                   tool=str(tool))
     if args.raw_endian:
         config["raw_endian"] = args.raw_endian
+    if args.address is not None:
+        config["address"] = args.address
     try:
         if args.resume:
             if not args.output.is_dir() or args.output.is_symlink():
@@ -141,6 +159,8 @@ def main(argv=None):
         if args.raw_endian:
             command += ["--raw-endian", args.raw_endian]
         command.append(args.command)
+        if args.address is not None:
+            command.append(args.address)
         start = time.monotonic()
         process = None
         temporary = args.output / (output_name + ".partial")
@@ -247,6 +267,8 @@ def main(argv=None):
                         pending[executor.submit(analyze, item)] = item[0]
         report = dict(schema_version=1, command=args.command, jobs=args.jobs,
                       timeout_seconds=args.timeout, results=results)
+        if args.address is not None:
+            report["address"] = args.address
         temporary_report = args.output / "report.json.partial"
         temporary_report.write_text(json.dumps(report, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
         temporary_report.replace(args.output / "report.json")

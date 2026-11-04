@@ -28,8 +28,10 @@ Status Session::debuggerCommand(const std::string& operation,Address address,u64
     else if(operation=="wait")status=debugger_.waitForStop();
     else if(operation=="threads") {
         std::vector<DebuggerThread> threads;status=debugger_.threads(&threads);
-        if(status.ok())for(const auto& thread:threads)text<<thread.id<<'\t'<<(thread.selected?"* ":"")<<thread.name<<'\n';
-    } else if(operation=="thread")status=debugger_.selectThread(value);
+        if(status.ok())for(const auto& thread:threads){
+            if(thread.processId)text<<"p"<<std::hex<<thread.processId<<"."<<thread.id<<std::dec;else text<<thread.id;
+            text<<'\t'<<(thread.selected?"* ":"")<<thread.name<<'\n';}
+    } else if(operation=="thread")status=debugger_.selectThread(value,address);
     else if(operation=="stack") {
         std::vector<DebuggerFrame> frames;status=debugger_.stackFrames(value?static_cast<size_t>(std::min<u64>(value,256)):64,&frames);
         if(status.ok())for(const auto& frame:frames){Address mapped=kNoAddress;const auto mapping=debugger_.runtimeToImage(frame.pc,&mapped);

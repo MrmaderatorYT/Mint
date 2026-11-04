@@ -1,0 +1,101 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="help_open">Довідка</string>
+    <string name="help_title">Довідка та приклади</string>
+    <string name="help_example_label">Умовний приклад</string>
+    <string name="help_close">Закрити</string>
+    <string name="help_group_start">Початок роботи</string>
+    <string name="help_group_views">Перегляди workspace</string>
+    <string name="help_group_tools">Інструменти workspace</string>
+    <string name="help_group_advanced">Додаткові сценарії</string>
+    <string-array name="help_topics">
+        <item>Як почати?</item>
+        <item>Що показує Functions?</item>
+        <item>Як читати Disasm?</item>
+        <item>Що означає IR?</item>
+        <item>Як читати Pseudo-C?</item>
+        <item>Що показує CFG?</item>
+        <item>Що показує Writes?</item>
+        <item>Що показує Xrefs?</item>
+        <item>Де знайти Strings?</item>
+        <item>Для чого Log?</item>
+        <item>Що містить Navigate?</item>
+        <item>Що містить Edit?</item>
+        <item>Що містить Analyze?</item>
+        <item>Що містить Automate &amp; debug?</item>
+        <item>Що містить Project &amp; files?</item>
+        <item>Як користуватися Data Type Manager?</item>
+        <item>Як порівняти бінарні файли?</item>
+        <item>Як користуватися debugger?</item>
+        <item>Як працюють native-плагіни?</item>
+        <item>Як імпортувати raw AArch64?</item>
+    </string-array>
+    <string-array name="help_bodies">
+        <item>Натисніть Open і виберіть ELF, PE, Mach-O, APK або задайте raw mapping. Або натисніть Open the bundled example. Дочекайтеся аналізу й виберіть функцію у Functions. Вкладки внизу перемикають перегляди. Довге натискання на функцію або рядок відкриває редагування.</item>
+        <item>Functions містить знайдені точки входу функцій. Фільтруйте за назвою або адресою та натисніть рядок, щоб відкрити функцію. Чипи над вмістом зберігають відкриті функції: натисніть чип для перемикання або кнопку закриття для повернення до програми.</item>
+        <item>Disasm показує декодовані машинні інструкції та байти. Виберіть функцію для її лістингу або переглядайте програму без вибраної функції. Натисніть розпізнану адресу для переходу; довге натискання відкриває редагування рядка.</item>
+        <item>IR — проміжне представлення Mint: вибрану функцію перетворено на операції з регістрами, тимчасовими значеннями й пам’яттю. Без вибраної функції показується звіт про покриття всієї програми. Блоки показують наступників керування. Непідтримані інструкції залишаються явними intrinsic.</item>
+        <item>Виберіть функцію та відкрийте Pseudo-C. Без вибраної функції показуються прототипи всієї програми. Mint відновлює C-подібний потік керування з IR. Натискайте розпізнані імена або шістнадцяткові адреси для переходу. Мітки, допоміжні функції та goto залишаються там, де структура або типи не доведені.</item>
+        <item>CFG показує вибрану функцію як базові блоки та спрямовані переходи. Без вибраної функції може відображатися відновлений граф викликів програми. Вибирайте блоки для переходу, де це підтримується; великі графи можуть обмежуватися.</item>
+        <item>Виберіть функцію й відкрийте Writes: тут відновлені записи пам’яті згруповано за базою та зміщенням. Це свідчення статичного аналізу, а не повний перелік усіх runtime-ефектів.</item>
+        <item>Виберіть функцію, щоб побачити посилання до неї та з неї. Для конкретної адреси відкрийте інструменти → Navigate → References at current address. Натисніть результат для переходу.</item>
+        <item>Strings показує відновлені друковані рядки всієї програми або ті, на які посилається вибрана функція. Для переходу до показаної адреси скористайтеся Navigate → Go to address. Відсутність у списку не доводить, що рядка немає або що його неможливо декодувати під час виконання.</item>
+        <item>Log містить повідомлення завантаження, перебіг аналізу, попередження та помилки. Перевірте його, якщо імпорт відхилено, аналіз неповний або етап повідомляє про обмеження. Stop кооперативно скасовує роботу.</item>
+        <item>Натисніть інструменти поруч із Open і розкрийте Navigate. Global search шукає назви, адреси або байти. Go to address переходить за шістнадцятковою адресою. References at current address показує посилання. Navigate forward рухається вперед історією переходів, якщо це можливо.</item>
+        <item>Розкрийте Edit в інструментах. Edit current address змінює підтримані анотації, типи, рішення код/дані або байти. Undo edit і Redo edit переміщуються історією сесії. Assemble patch at current address показує та застосовує підтриманий асемблер. Edit local variables називає або типізує перевірені локальні змінні.</item>
+        <item>Розкрийте Analyze в інструментах. Memory blocks показує діапазони та порядок байтів; Navigate to block переходить до сегмента. Data Type Manager редагує типи. Function provenance пояснює походження функції. C++ RTTI / vtables і DWARF / source information показують метадані. Interprocedural prototype constraints і Function ABI storage показують свідчення про виклики та розміщення. Import external / split DWARF імпортує відповідні debug-дані.</item>
+        <item>Розкрийте Automate &amp; debug. Lua script editor відкриває редактор скриптів; Open Lua script імпортує скрипт. External debugger підключається до наявного RSP або DAP backend. Native plugins відкриває команди довірених та ізольованих плагінів. Скрипти типово лише читають дані; права плагіна залежать від режиму.</item>
+        <item>Розкрийте Project &amp; files. Reanalyze повторює пошук коду. Export patched copy записує новий бінарний файл. Compare another binary / version tracking відкриває порівняння. Back up complete project експортує input і Program; Restore project archive створює незалежний проєкт.</item>
+        <item>Відкрийте інструменти → Analyze → Data Type Manager. View definitions показує типи; Add or replace definition зберігає опис; Remove definition видаляє його. Exportable GNU C11 type header показує оголошення. Import type / signature library імпортує відповідну бібліотеку; View imported signatures показує її вміст.</item>
+        <item>Відкрийте інструменти → Project &amp; files → Compare another binary / version tracking. Open comparison binary створює окремий проєкт порівняння; Function-level diff показує кандидатів. Confirm function pair записує ваш вибір; Confirmed pairs його перелічує. Preview annotation transfer показує перенесення; Apply transfer записує анотації до проєкту порівняння. Save і Load confirmed pairs зберігають ці рішення.</item>
+        <item>Відкрийте інструменти → Automate &amp; debug → External debugger. Connect debugger обирає RSP або DAP; Status показує стан; Attach LLDB DAP to PID приєднує наявний процес. Read registers і Read 256 bytes читають дані. Set / Remove mapped breakpoint, Step, Continue, Interrupt і Wait керують виконанням. Threads показує ідентифікатори процесу й потоку, наприклад p1.2 та p2.2, якщо сервер їх підтримує; оберіть рядок для роботи саме з цією парою. При зміні процесу зіставлення адрес і опис регістрів очищаються, їх потрібно задати знову. Stack frames і Loaded modules показують runtime-стан. Map current binary to runtime base задає явне перетворення адрес; Go to mapped PC переходить до PC. Read RSP register layout отримує опис регістрів; Clear address mapping і Disconnect очищають стан сесії.</item>
+        <item>Відкрийте інструменти → Automate &amp; debug → Native plugins. Load trusted .so plugin завантажує native-код із повними правами застосунку; List commands показує команди; Run plugin command запускає команду з необов’язковими API-змінами. Run isolated plugin command використовує окремий ізольований Android-процес на підтриманих пристроях із read-only input і без поточних змін проєкту.</item>
+        <item>Натисніть Open → Raw binary → AArch64. Введіть шістнадцяткові base та entry, за потреби увімкніть Big-endian data і натисніть Choose file. Mint зберігає вибране зіставлення разом із проєктом. Для інших raw-архітектур наразі доступні little-endian дані.</item>
+    </string-array>
+    <string-array name="help_examples">
+        <item>"Open → вибрати файл → Functions\n00001000  example    3 insn\nDisasm | IR | Pseudo-C | CFG"</item>
+        <item>"Functions\n00001000  add_numbers    3 insn\n00001020  check_value   7 insn"</item>
+        <item>"00001000  20 00 80 d2   mov x0, #1\n00001004  c0 03 5f d6   ret"</item>
+        <item>"block 0 [0x1000..0x1008)\n  0x1000: x0 = copy 1:8\n  0x1004: return x30"</item>
+        <item>"uint64_t example(void) {\n    return 1;\n}"</item>
+        <item>"[0x1000: compare]\n      /       \\\n [0x1010]  [0x1020]\n      \\       /\n       [return]"</item>
+        <item>"via x0 — 1 slots, 8 bytes\n  +0     8  #1"</item>
+        <item>"0x1020 → 0x1000  call\n0x1030 → 0x2000  read"</item>
+        <item>"00002000  Hello, world\n00002020  invalid input"</item>
+        <item>"Loaded ELF: AArch64\nAnalysis: 16 functions\nWarning: unsupported instruction"</item>
+        <item>"Workspace tools\n▾ Navigate\n  Global search\n  Go to address\n  References at current address\n  Navigate forward"</item>
+        <item>"Workspace tools → Edit\n  Edit current address\n  Undo edit / Redo edit\n  Assemble patch at current address\n  Edit local variables"</item>
+        <item>"Workspace tools → Analyze\n  Memory blocks\n  Data Type Manager\n  C++ RTTI / vtables\n  DWARF / source information\n  Function ABI storage"</item>
+        <item>"Workspace tools → Automate &amp; debug\n  Lua script editor\n  Open Lua script\n  External debugger\n  Native plugins"</item>
+        <item>"Workspace tools → Project &amp; files\n  Reanalyze\n  Export patched copy\n  Compare another binary\n  Back up / Restore project"</item>
+        <item>"Packet=struct{length:u32;flags:u32}\n\nstruct Packet {\n  uint32_t length;\n  uint32_t flags;\n};"</item>
+        <item>"Початкова функція    Порівняння\n0x1000 parse   →    0x2200 parse\nConfirm → Preview → Apply"</item>
+        <item>"Image base 0x1000 → runtime 0x70001000\nThreads: 1\nPC: 0x70001020"</item>
+        <item>"Native plugins\n  Load trusted .so plugin\n  List commands\n  Run plugin command\n  Run isolated plugin command"</item>
+        <item>"Raw memory mapping\nBase:  0x1000\nEntry: 0x1000\n[x] Big-endian data"</item>
+    </string-array>
+    <string-array name="help_explanations">
+        <item>Це умовний приклад. Ім’я, адреса та кількість інструкцій залежать від вашого бінарного файлу.</item>
+        <item>Рядок містить адресу входу, відновлену або імпортовану назву та кількість декодованих інструкцій.</item>
+        <item>У рядку наведено адресу, машинні байти, мнемоніку й операнди. Декодування не означає, що семантика інструкції повністю підтримується в IR.</item>
+        <item>block — базовий блок; 0x1000 — адреса інструкції; x0 — регістр; 1:8 — восьмибайтна константа. Приклад схематичний.</item>
+        <item>Заголовок — припущена сигнатура, тіло — результат аналізу. Це не відновлений оригінальний вихідний код і не гарантія еквівалентного C.</item>
+        <item>Блоки відповідають ділянкам коду, стрілки — можливим переходам. Відсутнє непряме ребро може означати, що його ціль не доведена.</item>
+        <item>x0 — відновлена база; +0 — зміщення в байтах; 8 — ширина; #1 — кількість статично виявлених записів.</item>
+        <item>Перша адреса — джерело посилання, стрілка вказує на ціль, останнє слово описує його тип.</item>
+        <item>Адреса позначає розташування рядка, текст — декодований вміст, якщо він доступний.</item>
+        <item>Це приклади діагностики. Фактичні повідомлення залежать від файлу та аналізу.</item>
+        <item>Кожен рядок — окремий інструмент; результати пошуку та посилань можна відкрити за адресою.</item>
+        <item>Зміни зберігаються в Program overlay. Export patched copy створює окремий файл; оригінальний input не змінюється.</item>
+        <item>Звіти описують доступні свідчення. Відсутні метадані та непідтримані записи не відновлюються навмання.</item>
+        <item>Підключення debugger і запуск native-плагіна відбуваються після явної дії користувача.</item>
+        <item>Резервні копії містять оригінальний input та дослідницькі анотації. Обирайте відповідне місце збереження.</item>
+        <item>Перший рядок — вираз типу для Mint; оголошення C ілюструє розміщення полів. Підтримані явні типи перевіряються.</item>
+        <item>Пара й адреси умовні. Перевірте відповідність і preview перед застосуванням; недоведені збіги не дозволяють перенесення.</item>
+        <item>Перед операціями з адресами явно зіставте той самий бінарний файл. Можливості backend відрізняються; переносний RSP stack unwinding недоступний.</item>
+        <item>Довірені плагіни мають доступ до дозволів застосунку. Ізольовані команди виконуються окремим обмеженим шляхом і отримують лише вибрані дані.</item>
+        <item>Base — адреса розміщення байтів; entry — перша інструкція для аналізу. Прапорець обирає порядок байтів даних; байти інструкцій AArch64 залишаються little-endian.</item>
+    </string-array>
+    <string name="help_expanded">Розгорнуто</string>
+    <string name="help_collapsed">Згорнуто</string>
+</resources>

@@ -1,0 +1,101 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="help_open">Help</string>
+    <string name="help_title">Help and examples</string>
+    <string name="help_example_label">Illustrative example</string>
+    <string name="help_close">Close</string>
+    <string name="help_group_start">Getting started</string>
+    <string name="help_group_views">Workspace views</string>
+    <string name="help_group_tools">Workspace tools</string>
+    <string name="help_group_advanced">Advanced workflows</string>
+    <string-array name="help_topics">
+        <item>How do I start?</item>
+        <item>What is Functions?</item>
+        <item>How do I read Disasm?</item>
+        <item>What does IR mean?</item>
+        <item>How do I read Pseudo-C?</item>
+        <item>What does CFG show?</item>
+        <item>What does Writes show?</item>
+        <item>What does Xrefs show?</item>
+        <item>Where are Strings?</item>
+        <item>What is Log?</item>
+        <item>What is in Navigate?</item>
+        <item>What is in Edit?</item>
+        <item>What is in Analyze?</item>
+        <item>What is in Automate &amp; debug?</item>
+        <item>What is in Project &amp; files?</item>
+        <item>How do I use Data Type Manager?</item>
+        <item>How do I compare binaries?</item>
+        <item>How do I use the debugger?</item>
+        <item>How do native plugins work?</item>
+        <item>How do I import raw AArch64?</item>
+    </string-array>
+    <string-array name="help_bodies">
+        <item>Tap Open and choose an ELF, PE, Mach-O, APK or an explicit raw mapping. Or tap Open the bundled example. Wait for analysis, then choose a function in Functions. Tap a tab at the bottom to change views. Long-press a function or listing row for edits.</item>
+        <item>Functions lists discovered function entry points. Filter by name or address, then tap a row to open a function. The chips above the content keep several functions open; tap a chip to switch, or its close control to return to the program.</item>
+        <item>Disasm displays decoded machine instructions and bytes. Select a function first for its listing, or view the program listing when no function is selected. Tap a recognized address to navigate; long-press a row to edit it.</item>
+        <item>IR is Mint intermediate representation: the selected function lifted into operations on registers, temporary values and memory. Without a selected function it shows a program-wide coverage report. Blocks show control-flow successors. Unsupported instructions remain explicit intrinsics.</item>
+        <item>Select a function, then open Pseudo-C. Without a selection this view shows program-wide prototype summaries. Mint reconstructs C-like control flow from IR. Tap recognized names or hexadecimal addresses to navigate. Labels, helpers and goto remain where the structure or types cannot be proven.</item>
+        <item>CFG shows the selected function as basic blocks and directed edges. Without a selected function it can show the recovered program call graph. Select blocks to navigate when supported; large graphs may be bounded.</item>
+        <item>Select a function and open Writes to inspect recovered memory writes grouped by base and offset. The view is evidence from the analysis, not a complete list of all runtime effects.</item>
+        <item>Select a function to inspect references into and out of it. Open Project tools → Navigate → References at current address for address-based results. Tap a result to jump.</item>
+        <item>Strings displays recovered printable strings from the entire program, or those referenced by the selected function. Use Navigate → Go to address to open a displayed address. Absence from the list does not prove that a string is absent or cannot be decoded at runtime.</item>
+        <item>Log reports loading, analysis progress, warnings and failures. Look here when an import is rejected, analysis is incomplete or a stage reports a limitation. Stop cancels work cooperatively.</item>
+        <item>Open the tools button beside Open, then expand Navigate. Global search finds names, addresses or bytes. Go to address jumps to a hexadecimal address. References at current address lists incoming and outgoing references. Navigate forward moves forward in navigation history when available.</item>
+        <item>Expand Edit in Workspace tools. Edit current address changes supported annotations, types, code/data decisions or bytes. Undo edit and Redo edit move through session history. Assemble patch at current address previews and applies supported assembly. Edit local variables names or retypes verified local identities.</item>
+        <item>Expand Analyze in Workspace tools. Memory blocks shows mapped ranges and data byte order; Navigate to block opens a range. Data Type Manager edits type definitions. Function provenance explains discovery. C++ RTTI / vtables and DWARF / source information show recovered metadata. Interprocedural prototype constraints and Function ABI storage show call and storage evidence. Import external / split DWARF selects matching debug information.</item>
+        <item>Expand Automate &amp; debug. Lua script editor enters a script; Open Lua script imports one. External debugger connects to an existing RSP or DAP backend. Native plugins opens trusted and isolated plugin commands. Read-only scripts are the default; plugin privileges depend on the selected execution mode.</item>
+        <item>Expand Project &amp; files. Reanalyze reruns discovery. Export patched copy writes a new binary. Compare another binary / version tracking opens comparison tools. Back up complete project exports the input and Program; Restore project archive creates an independent project.</item>
+        <item>Open Workspace tools → Analyze → Data Type Manager. View definitions lists types; Add or replace definition saves a declaration; Remove definition deletes one. Exportable GNU C11 type header shows declarations. Import type / signature library reads a matching library; View imported signatures shows its contents.</item>
+        <item>Open Workspace tools → Project &amp; files → Compare another binary / version tracking. Open comparison binary creates a separate comparison Program; Function-level diff shows candidates. Confirm function pair records your choice; Confirmed pairs lists choices. Preview annotation transfer shows what can move; Apply transfer writes accepted annotations to the comparison Program. Save and Load confirmed pairs persist those decisions.</item>
+        <item>Open Workspace tools → Automate &amp; debug → External debugger. Connect debugger selects RSP or DAP; Status reports state; Attach LLDB DAP to PID attaches an existing process. Read registers and Read 256 bytes inspect data. Set / Remove mapped breakpoint, Step, Continue, Interrupt and Wait control execution. Threads lists process-qualified IDs such as p1.2 and p2.2 when supported; select a row to choose that exact process and thread. Switching processes clears the address mapping and register layout, which must be set again. Stack frames and Loaded modules inspect runtime state. Map current binary to runtime base establishes explicit address translation; Go to mapped PC follows it. Read RSP register layout obtains advertised register metadata; Clear address mapping and Disconnect clear session state.</item>
+        <item>Open Workspace tools → Automate &amp; debug → Native plugins. Load trusted .so plugin loads unrestricted native code; List commands lists its commands; Run plugin command executes one with optional API edits. Run isolated plugin command uses a separate isolated Android process on supported devices with read-only input and no current project edits.</item>
+        <item>Tap Open → Raw binary → AArch64. Enter the hexadecimal base and entry addresses, choose Big-endian data when appropriate, then tap Choose file. Mint remembers the selected mapping with the project. Other raw architectures currently support little-endian data.</item>
+    </string-array>
+    <string-array name="help_examples">
+        <item>"Open → choose file → Functions\n00001000  example    3 insn\nDisasm | IR | Pseudo-C | CFG"</item>
+        <item>"Functions\n00001000  add_numbers    3 insn\n00001020  check_value   7 insn"</item>
+        <item>"00001000  20 00 80 d2   mov x0, #1\n00001004  c0 03 5f d6   ret"</item>
+        <item>"block 0 [0x1000..0x1008)\n  0x1000: x0 = copy 1:8\n  0x1004: return x30"</item>
+        <item>"uint64_t example(void) {\n    return 1;\n}"</item>
+        <item>"[0x1000: compare]\n      /       \\\n [0x1010]  [0x1020]\n      \\       /\n       [return]"</item>
+        <item>"via x0 — 1 slots, 8 bytes\n  +0     8  #1"</item>
+        <item>"0x1020 → 0x1000  call\n0x1030 → 0x2000  read"</item>
+        <item>"00002000  Hello, world\n00002020  invalid input"</item>
+        <item>"Loaded ELF: AArch64\nAnalysis: 16 functions\nWarning: unsupported instruction"</item>
+        <item>"Workspace tools\n▾ Navigate\n  Global search\n  Go to address\n  References at current address\n  Navigate forward"</item>
+        <item>"Workspace tools → Edit\n  Edit current address\n  Undo edit / Redo edit\n  Assemble patch at current address\n  Edit local variables"</item>
+        <item>"Workspace tools → Analyze\n  Memory blocks\n  Data Type Manager\n  C++ RTTI / vtables\n  DWARF / source information\n  Function ABI storage"</item>
+        <item>"Workspace tools → Automate &amp; debug\n  Lua script editor\n  Open Lua script\n  External debugger\n  Native plugins"</item>
+        <item>"Workspace tools → Project &amp; files\n  Reanalyze\n  Export patched copy\n  Compare another binary\n  Back up / Restore project"</item>
+        <item>"Packet=struct{length:u32;flags:u32}\n\nstruct Packet {\n  uint32_t length;\n  uint32_t flags;\n};"</item>
+        <item>"Source function      Comparison\n0x1000 parse   →    0x2200 parse\nConfirm → Preview → Apply"</item>
+        <item>"Image base 0x1000 → runtime 0x70001000\nThreads: 1\nPC: 0x70001020"</item>
+        <item>"Native plugins\n  Load trusted .so plugin\n  List commands\n  Run plugin command\n  Run isolated plugin command"</item>
+        <item>"Raw memory mapping\nBase:  0x1000\nEntry: 0x1000\n[x] Big-endian data"</item>
+    </string-array>
+    <string-array name="help_explanations">
+        <item>The example is illustrative. The name, address and number of instructions depend on your binary.</item>
+        <item>Each row contains an entry address, a recovered or imported name, and the decoded instruction count.</item>
+        <item>Each line shows address, machine bytes, mnemonic and operands. Decoding is not a guarantee that the instruction has complete IR semantics.</item>
+        <item>block is a basic block; 0x1000 is an instruction address; x0 is a register; 1:8 is an eight-byte constant. This is a schematic example.</item>
+        <item>The header is an inferred signature and the body is an analysis result. It is not recovered original source or a guarantee of equivalent compilable C.</item>
+        <item>Boxes represent blocks and arrows represent possible flow. A missing indirect edge may mean the target was not proven.</item>
+        <item>x0 is the recovered base; +0 is the byte offset; 8 is the width; #1 is the number of observed static writes.</item>
+        <item>The first address is the reference source, the arrow points to the destination, and the last word describes its kind.</item>
+        <item>The address identifies the string location; the text is the decoded content when available.</item>
+        <item>These are examples of diagnostics. The actual messages depend on the file and analysis.</item>
+        <item>Each line is a separate tool; search and references return address results that can be opened.</item>
+        <item>Edits are stored in the Program overlay. Export patched copy creates a separate file; the original input is not modified.</item>
+        <item>These reports describe available evidence. Missing metadata or unsupported records are not silently reconstructed.</item>
+        <item>A debugger connection and a native plugin run only after an explicit user action.</item>
+        <item>Backups include the original input and research annotations. Choose a destination appropriate for their contents.</item>
+        <item>The first line is a type expression entered in Mint; the C declaration illustrates its layout. Supported explicit types are validated.</item>
+        <item>The pair and addresses are illustrative. Review matches and transfer preview before applying; unproven matches do not authorize transfer.</item>
+        <item>Map the same binary explicitly before image-address operations. Backend features differ; portable RSP stack unwinding is not available.</item>
+        <item>Trusted plugins can use the app permissions. Isolated commands have a separate restricted execution path and receive only selected inputs.</item>
+        <item>Base is where bytes are mapped; entry is the first instruction to analyze. The checkbox selects data byte order, while AArch64 instruction bytes remain little-endian.</item>
+    </string-array>
+    <string name="help_expanded">Expanded</string>
+    <string name="help_collapsed">Collapsed</string>
+</resources>

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material roles based on the mint-green launcher mark (#53DB9C). -->
+    <color name="mint_primary">#006D45</color>
+    <color name="mint_on_primary">#FFFFFF</color>
+    <color name="mint_primary_container">#9FF2C1</color>
+    <color name="mint_on_primary_container">#00210F</color>
+    <color name="mint_primary_inverse">#83D6A6</color>
+    <color name="mint_secondary">#4B6354</color>
+    <color name="mint_on_secondary">#FFFFFF</color>
+    <color name="mint_secondary_container">#CDE9D5</color>
+    <color name="mint_on_secondary_container">#082016</color>
+    <color name="mint_tertiary">#3C6371</color>
+    <color name="mint_on_tertiary">#FFFFFF</color>
+    <color name="mint_tertiary_container">#BFE9F7</color>
+    <color name="mint_on_tertiary_container">#001F28</color>
+    <color name="mint_surface">#F6FBF7</color>
+    <color name="mint_on_surface">#171D19</color>
+    <color name="mint_surface_variant">#DCE5DD</color>
+    <color name="mint_on_surface_variant">#404943</color>
+    <color name="mint_surface_lowest">#FFFFFF</color>
+    <color name="mint_surface_low">#F0F5F1</color>
+    <color name="mint_surface_container">#EAF0EB</color>
+    <color name="mint_surface_high">#E4EAE5</color>
+    <color name="mint_surface_highest">#DEE4DF</color>
+    <color name="mint_outline">#707A72</color>
+    <color name="mint_outline_variant">#BFC9C0</color>
+    <color name="mint_surface_bright">#F6FBF7</color>
+    <color name="mint_surface_dim">#D6DDD7</color>
+    <color name="mint_surface_inverse">#2B322D</color>
+    <color name="mint_on_surface_inverse">#EDF4EE</color>
+</resources>
