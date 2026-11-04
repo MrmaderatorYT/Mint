@@ -9,7 +9,8 @@
 /// absent or differently spelled, and pinning the field widths ourselves means
 /// a platform header change can never silently alter how we parse a file.
 ///
-/// These are the ELF64 little-endian forms. ELF32 disk records are decoded in
+/// These describe the ELF64 field layouts; elf_reader.h decodes either byte
+/// order explicitly. Little-endian ELF32 disk records are decoded in
 /// elf32_image.cpp into the same architecture-independent image model. The APK
 /// host ABI does not restrict the architecture of the binary being analyzed.
 namespace mint::elf {

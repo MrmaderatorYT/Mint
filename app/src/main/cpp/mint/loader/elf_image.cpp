@@ -1,4 +1,5 @@
 #include "mint/loader/elf_image.h"
+#include "mint/loader/elf_reader.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -48,6 +49,7 @@ void ElfImage::addWarning(std::string message) {
 
 Status ElfImage::load(ByteView file) {
     *this = ElfImage();
+    file=file.withByteOrder(ByteOrder::kLittle); // Container magic is a byte signature.
     originalFile_ = file;
 
     u32 magic = 0;
@@ -67,6 +69,10 @@ Status ElfImage::load(ByteView file) {
     u8 elfClass = 0;
     if (file.read(elf::kEiClass, &elfClass) && elfClass == 1) return loadElf32(file);
 
+    u8 order=0;file.read(elf::kEiData,&order);
+    if(order!=1 && order!=2)return Status::error(ErrorCode::kBadFormat,"invalid ELF data encoding");
+    file=file.withByteOrder(order==2?ByteOrder::kBig:ByteOrder::kLittle);
+    originalFile_=file;memory_.setByteOrder(file.byteOrder());
     Status status = parseHeader(file);
     if (!status.ok()) return status;
 
@@ -108,7 +114,7 @@ Status ElfImage::loadDebugObject(ByteView file) {
     Status status = load(file);
     if (status.ok()) return status;
     u32 magic = 0; u8 order = 0; file.read(0, &magic); file.read(5, &order);
-    if (magic != 0x464c457f || order != 1 || arch_ == Arch::kUnknown || sections_.empty() ||
+    if (magic != 0x464c457f || (order != 1 && order != 2) || arch_ == Arch::kUnknown || sections_.empty() ||
         (!findSection(".debug_info.dwo") && !findSection(".debug_info") && !findSection(".zdebug_info"))) return status;
     // A successful header/section parse with no PT_LOAD is expected for a DWO.
     // Other parse failures are not laundered into successful debug imports.
@@ -155,8 +161,12 @@ Arch ElfImage::architectureAt(Address address, Address functionEntry, Arch fallb
     return fallback == Arch::kUnknown ? architectureAt(address) : fallback;
 }
 
-Status ElfImage::loadRaw(ByteView file, Arch architecture, Address base, Address entry) {
+Status ElfImage::loadRaw(ByteView file, Arch architecture, Address base, Address entry, ByteOrder order) {
     *this = ElfImage();
+    if ((order != ByteOrder::kLittle && order != ByteOrder::kBig) || (order == ByteOrder::kBig && architecture != Arch::kAArch64))
+        return Status::error(ErrorCode::kUnsupported, "big-endian raw import requires AArch64");
+    file = file.withByteOrder(order);
+    memory_.setByteOrder(order);
     originalFile_ = file;
     ArchitectureDescription description;
     if (!architectureDescription(architecture, &description))
@@ -195,7 +205,7 @@ Status ElfImage::loadRaw(ByteView file, Arch architecture, Address base, Address
 
 Status ElfImage::parseHeader(ByteView file) {
     Ehdr header{};
-    if (!file.readPod(0, &header)) {
+    if (!readElfRecord(file, 0, &header)) {
         return Status::error(ErrorCode::kTruncated, "file smaller than an ELF header");
     }
     if (std::memcmp(header.ident, kMagic, sizeof(kMagic)) != 0) {
@@ -205,9 +215,8 @@ Status ElfImage::parseHeader(ByteView file) {
         return Status::error(ErrorCode::kUnsupported,
                              "32-bit ELF; this engine analyses 64-bit images only");
     }
-    if (header.ident[kEiData] != kElfData2Lsb) {
-        return Status::error(ErrorCode::kUnsupported, "big-endian ELF is not supported");
-    }
+    if (file.byteOrder()==ByteOrder::kBig && header.machine!=kEmAArch64)
+        return Status::error(ErrorCode::kUnsupported,"big-endian ELF64 currently requires AArch64");
 
     switch (header.machine) {
         case kEmAArch64: arch_ = Arch::kAArch64; break;
@@ -220,13 +229,24 @@ Status ElfImage::parseHeader(ByteView file) {
     }
 
     type_ = header.type;
+    elfFlags_ = header.flags;
     entry_ = header.entry;
     return Status::success();
 }
 
+std::string ElfImage::defaultCallingConvention() const {
+    if(format_==ImageFormat::kPe64 && arch_==Arch::kX86_64)return "windows64";
+    if((format_==ImageFormat::kElf32 || format_==ImageFormat::kElf64) && (arch_==Arch::kRiscV32 || arch_==Arch::kRiscV64)) {
+        std::string convention=arch_==Arch::kRiscV32?"riscv32":"riscv64";
+        if(elfFlags_&8)return convention+"e";
+        switch(elfFlags_&6){case 2:return convention+"f";case 4:return convention+"d";case 6:return convention+"q";default:return convention;}
+    }
+    return {};
+}
+
 void ElfImage::parseProgramHeaders(ByteView file) {
     Ehdr header{};
-    if (!file.readPod(0, &header)) return;
+    if (!readElfRecord(file, 0, &header)) return;
 
     if (header.phnum == 0 || header.phoff == 0) {
         addWarning("no program headers; falling back to section table for memory layout");
@@ -241,7 +261,7 @@ void ElfImage::parseProgramHeaders(ByteView file) {
     for (u64 i = 0; i < count; ++i) {
         const u64 offset = header.phoff + i * header.phentsize;
         Phdr segment{};
-        if (!file.readPod(offset, &segment)) {
+        if (!readElfRecord(file, offset, &segment)) {
             addWarning("program header table is truncated");
             break;
         }
@@ -265,7 +285,7 @@ void ElfImage::parseProgramHeaders(ByteView file) {
 
 void ElfImage::parseSectionHeaders(ByteView file) {
     Ehdr header{};
-    if (!file.readPod(0, &header)) return;
+    if (!readElfRecord(file, 0, &header)) return;
 
     if (header.shnum == 0 || header.shoff == 0) {
         addWarning("section table absent (stripped or deliberately removed)");
@@ -281,7 +301,7 @@ void ElfImage::parseSectionHeaders(ByteView file) {
     raw.reserve(static_cast<size_t>(count));
     for (u64 i = 0; i < count; ++i) {
         Shdr section{};
-        if (!file.readPod(header.shoff + i * header.shentsize, &section)) {
+        if (!readElfRecord(file, header.shoff + i * header.shentsize, &section)) {
             addWarning("section header table is truncated");
             break;
         }
@@ -346,12 +366,12 @@ ByteView ElfImage::findDynamicView(ByteView file) const {
     // Prefer PT_DYNAMIC over .dynamic: the segment is what the runtime linker
     // actually reads, so it is the copy a protector has to keep honest.
     Ehdr header{};
-    if (file.readPod(0, &header) && header.phnum != 0 &&
+    if (readElfRecord(file, 0, &header) && header.phnum != 0 &&
         header.phentsize >= sizeof(Phdr)) {
         const u64 count = std::min<u64>(header.phnum, kMaxSegments);
         for (u64 i = 0; i < count; ++i) {
             Phdr segment{};
-            if (!file.readPod(header.phoff + i * header.phentsize, &segment)) break;
+            if (!readElfRecord(file, header.phoff + i * header.phentsize, &segment)) break;
             if (segment.type != kPtDynamic) continue;
             ByteView view = file.subview(segment.offset, segment.filesz);
             if (!view.empty()) return view;
@@ -370,7 +390,7 @@ void ElfImage::readDynamicTable(ByteView file) {
     dynamicEntries_.reserve(static_cast<size_t>(std::min<u64>(entries, 4096)));
     for (u64 i = 0; i < entries; ++i) {
         Dyn entry{};
-        if (!dynamic.readPod(i * sizeof(Dyn), &entry)) break;
+        if (!readElfRecord(dynamic, i * sizeof(Dyn), &entry)) break;
         if (entry.tag == kDtNull) break;
         dynamicEntries_.push_back(entry);
         if (dynamicEntries_.size() >= 4096) {
@@ -573,7 +593,7 @@ void ElfImage::readSymbolTable(ByteView table, ByteView strings, bool fromDynsym
         if (symbols_.size() >= kMaxSymbols) break;
 
         Sym entry{};
-        if (!table.readPod(i * sizeof(Sym), &entry)) break;
+        if (!readElfRecord(table, i * sizeof(Sym), &entry)) break;
 
         ElfSymbol symbol;
         symbol.value = entry.value;
@@ -661,7 +681,7 @@ void ElfImage::readRelaArray(ByteView data, ElfRelocation::Source source) {
     for (u64 i = 0; i < count; ++i) {
         if (relocations_.size() >= kMaxRelocations) return;
         Rela entry{};
-        if (!data.readPod(i * sizeof(Rela), &entry)) return;
+        if (!readElfRecord(data, i * sizeof(Rela), &entry)) return;
 
         ElfRelocation reloc;
         reloc.offset = entry.offset;
@@ -679,7 +699,7 @@ void ElfImage::readRelArray(ByteView data, ElfRelocation::Source source) {
     for (u64 i = 0; i < count; ++i) {
         if (relocations_.size() >= kMaxRelocations) return;
         Rel entry{};
-        if (!data.readPod(i * sizeof(Rel), &entry)) return;
+        if (!readElfRecord(data, i * sizeof(Rel), &entry)) return;
 
         ElfRelocation reloc;
         reloc.offset = entry.offset;
@@ -810,7 +830,7 @@ void ElfImage::readRelrRelocations(ByteView data) {
 
     for (u64 i = 0; i < count; ++i) {
         u64 entry = 0;
-        if (!data.readPod(i * sizeof(u64), &entry)) return;
+        if (!readElfRecord(data, i * sizeof(u64), &entry)) return;
 
         if ((entry & 1) == 0) {
             where = entry;

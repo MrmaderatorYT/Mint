@@ -240,6 +240,9 @@ void setArithmeticFlags(IrBuilder& builder, MintOp operation,
                         const Varnode& left, const Varnode& right,
                         const Varnode& result) {
     setCommonFlags(builder, result);
+    const auto auxiliary=builder.binary(MintOp::kXor,builder.binary(MintOp::kXor,left,right),result);
+    builder.assign(flag(x86::kFlagAf),builder.resize(builder.binary(MintOp::kAnd,
+        builder.binary(MintOp::kShrU,auxiliary,Varnode::constant(4,1)),Varnode::constant(1,result.size)),1,false));
     if (operation == MintOp::kAdd) {
         builder.assign(flag(x86::kFlagCf),
                        builder.binary(MintOp::kCarryAdd, left, right));
@@ -257,6 +260,7 @@ void setLogicalFlags(IrBuilder& builder, const Varnode& result) {
     setCommonFlags(builder, result);
     builder.assign(flag(x86::kFlagCf), Varnode::constant(0, 1));
     builder.assign(flag(x86::kFlagOf), Varnode::constant(0, 1));
+    builder.emit(MintOp::kUndefined,flag(x86::kFlagAf));
 }
 
 bool isMoveInstruction(u16 id) {
@@ -456,8 +460,41 @@ void liftX86(const cs_insn& insn, IrBuilder& builder) {
         }
         return;
     }
-    // Other LOCK operations need an atomic read/modify/write opcode, not a
-    // nonatomic load followed by store. Keep them visible as unsupported.
+    if(locked && count>=1 && ops[0].type==X86_OP_MEM) {
+        const bool increment=insn.id==X86_INS_INC, decrement=insn.id==X86_INS_DEC, complement=insn.id==X86_INS_NOT;
+        const bool unary=increment||decrement||complement;
+        MintOp atomic=MintOp::kInvalid,operation=MintOp::kInvalid;
+        if(insn.id==X86_INS_ADD||increment){atomic=MintOp::kAtomicAdd;operation=MintOp::kAdd;}
+        if(insn.id==X86_INS_SUB||decrement){atomic=MintOp::kAtomicAdd;operation=MintOp::kSub;}
+        if(insn.id==X86_INS_AND){atomic=MintOp::kAtomicAnd;operation=MintOp::kAnd;}
+        if(insn.id==X86_INS_OR){atomic=MintOp::kAtomicOr;operation=MintOp::kOr;}
+        if(insn.id==X86_INS_XOR||complement){atomic=MintOp::kAtomicXor;operation=MintOp::kXor;}
+        const u8 width=ops[0].size;
+        if(atomic!=MintOp::kInvalid && (width==1||width==2||width==4||width==8) &&
+           ((unary&&count==1)||(!unary&&count==2&&(ops[1].type==X86_OP_REG||ops[1].type==X86_OP_IMM)))) {
+            const auto address=effectiveAddress(insn,ops[0],builder);
+            const u64 mask=width==8?~u64{0}:(u64{1}<<(width*8))-1;
+            auto source=unary?Varnode::constant(complement?mask:1,width):readOperand(insn,ops[1],builder).value;
+            if(!source.valid()){builder.emitIntrinsic(u16(insn.id));return;}
+            source=builder.resize(source,width,true);
+            const auto snapshot=builder.newTemp(width);builder.assign(snapshot,source);
+            const auto argument=operation==MintOp::kSub?builder.unary(MintOp::kNeg,snapshot,width):snapshot;
+            const auto previous=builder.newTemp(width);
+            builder.emit(atomic,previous,address,argument);
+            if(!complement) {
+                const auto result=builder.binary(operation,previous,snapshot);
+                if(increment||decrement) {
+                    const auto carry=builder.newTemp(1);builder.assign(carry,flag(x86::kFlagCf));
+                    setArithmeticFlags(builder,operation,previous,snapshot,result);
+                    builder.assign(flag(x86::kFlagCf),carry);
+                } else if(operation==MintOp::kAdd||operation==MintOp::kSub)setArithmeticFlags(builder,operation,previous,snapshot,result);
+                else setLogicalFlags(builder,result);
+            }
+            return;
+        }
+    }
+    // Remaining LOCK families (ADC/SBB, NEG, bit tests, wide CMPXCHG) need
+    // additional atomic semantics; never lower them into nonatomic stores.
     if(locked){builder.emitIntrinsic(u16(insn.id));return;}
     // String MOVSD shares its Capstone id with scalar SSE MOVSD. It updates
     // RSI/RDI according to DF and possibly repeats; ordinary move is unsound.

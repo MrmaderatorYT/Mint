@@ -9,7 +9,8 @@ namespace mint {
 Status decompileSsa(const SsaFunction& function, DecompileResult* result,
                     const SymbolNamer& names, const StringResolver& strings,
                     const StringResolver& offsetTable, const PrototypeResolver& prototypes,
-                    const TypeLayoutResolver& typeLayouts, const LocalResolver& locals) {
+                    const TypeLayoutResolver& typeLayouts, const LocalResolver& locals,
+                    const MemoryFunctionResolver& memoryFunctions) {
     if (!result) return Status::error(ErrorCode::kInternalError, "null decompile output");
     result->ssa = function;
     result->structure = structureControlFlow(result->ssa);
@@ -20,6 +21,7 @@ Status decompileSsa(const SsaFunction& function, DecompileResult* result,
     options.prototypes = prototypes;
     options.typeLayouts = typeLayouts;
     options.locals = locals;
+    options.memoryFunctions = memoryFunctions;
     result->cSource = emitC(result->ssa, result->structure, options);
     return Status::success();
 }
@@ -27,7 +29,8 @@ Status decompileSsa(const SsaFunction& function, DecompileResult* result,
 Status decompileIr(const IrFunction& input, DecompileResult* result,
                    const SymbolNamer& names, const StringResolver& strings,
                    const StringResolver& offsetTable, const PrototypeResolver& prototypes,
-                   const TypeLayoutResolver& typeLayouts, const LocalResolver& locals) {
+                   const TypeLayoutResolver& typeLayouts, const LocalResolver& locals,
+                   const MemoryFunctionResolver& memoryFunctions) {
     if (!result) return Status::error(ErrorCode::kInternalError, "null decompile output");
     IrFunction normalized = input;
     result->normalize = normalizeRegisterAccesses(&normalized);
@@ -37,7 +40,7 @@ Status decompileIr(const IrFunction& input, DecompileResult* result,
     result->ssaStats = {};
     status = buildSsa(normalized, &result->ssa, &result->ssaStats);
     if (!status.ok()) return status;
-    return decompileSsa(result->ssa, result, names, strings, offsetTable, prototypes, typeLayouts, locals);
+    return decompileSsa(result->ssa, result, names, strings, offsetTable, prototypes, typeLayouts, locals, memoryFunctions);
 }
 
 }  // namespace mint

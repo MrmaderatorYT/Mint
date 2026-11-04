@@ -15,6 +15,9 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Mint">
+        <service android:name=".plugin.SandboxPluginService"
+            android:exported="false" android:isolatedProcess="true"
+            android:process=":mint_plugin_sandbox" />
         <activity
             android:name=".ui.WorkspaceActivity"
             android:exported="true">

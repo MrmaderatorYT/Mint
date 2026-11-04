@@ -8,6 +8,7 @@ void InterpMemory::clear() { bytes_.clear(); }
 
 void InterpMemory::map(const MemoryMap& image) {
     clear();
+    byteOrder_=image.byteOrder();
     for (const MemorySegment& segment : image.segments()) {
         const u64 count = segment.data.size() < segment.size ? segment.data.size() : segment.size;
         for (u64 i = 0; i < count; ++i) {
@@ -29,8 +30,9 @@ bool InterpMemory::readByte(Address address, u8* value) const {
 void InterpMemory::write(Address address, const InterpValue& value, u8 width) {
     if(!width || width>16)return;
     for (u8 i = 0; i < width; ++i) {
+        const unsigned index=byteOrder_==ByteOrder::kBig?width-1-i:i;
         if(!value.concreteLike())bytes_.erase(address+i);
-        else writeByte(address + i, static_cast<u8>(i<8 ? value.bits >> (i * 8) : value.highBits>>((i-8)*8)));
+        else writeByte(address + i, static_cast<u8>(index<8 ? value.bits >> (index * 8) : value.highBits>>((index-8)*8)));
     }
 }
 
@@ -40,7 +42,8 @@ InterpValue InterpMemory::read(Address address, u8 width) const {
     for (u8 i = 0; i < width; ++i) {
         u8 byte = 0;
         if (!readByte(address + i, &byte)) return InterpValue::unknown(width);
-        if(i<8)bits |= static_cast<u64>(byte) << (i * 8);else high|=static_cast<u64>(byte)<<((i-8)*8);
+        const unsigned index=byteOrder_==ByteOrder::kBig?width-1-i:i;
+        if(index<8)bits |= static_cast<u64>(byte) << (index * 8);else high|=static_cast<u64>(byte)<<((index-8)*8);
     }
     return InterpValue::wide(bits,high,width);
 }

@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 #include "mint/debug/debugger.h"
+#include "mint/debug/rsp_modules.h"
 
 using namespace mint;
 namespace {
@@ -322,7 +323,54 @@ void tcpFaults(DebuggerBackend backend) {
     require(!status.ok() && status.code() == ErrorCode::kIoError && debuggerMonotonicMs() - start < 1000 && client.snapshot().state == DebuggerState::kDisconnected, "actual TCP refused connection stays disconnected and bounded");
 }
 }  // namespace
+void svr4Modules() {
+    const std::string xml="<?xml version='1.0'?><!DOCTYPE library-list-svr4 SYSTEM 'library-list-svr4.dtd'>"
+        "<library-list-svr4 version='1.0' main-lm='0x4000'>"
+        "<library name='/lib/a&amp;b.so' lm='0x5000' l_addr='0xFEDCBA9876543000' l_ld='0x6000' lmid='0x1'/>"
+        "<library name='/lib/a.so' lm='0x5000' l_addr='0' l_ld='0x7000' lmid='0x2'/></library-list-svr4>";
+    std::vector<DebuggerModule> modules;
+    okay(parseRspSvr4Modules(xml,&modules),"SVR4 XML parser");
+    require(modules.size()==2&&modules[0].name=="a&b.so"&&modules[0].hasSvr4&&modules[0].loadBias==0xFEDCBA9876543000ULL&&modules[0].start==kNoAddress&&modules[0].end==kNoAddress,"SVR4 displacement never becomes a fabricated mapped range");
+    require(modules[0].id!=modules[1].id&&modules[1].loadBias==0,"SVR4 namespace identity and zero displacement preserved");
+    const auto expected=modules[0].id;
+    for(const auto& hostile:std::vector<std::string>{
+        "<library-list-svr4 version='2.0'/>",
+        "<library-list-svr4 version='1.0'><library name='x' lm='0x1' l_addr='0xfffffffffffffffff' l_ld='0'/></library-list-svr4>",
+        "<library-list-svr4 version='1.0'><library name='x' lm='1' l_addr='0' l_ld='0'/><library name='y' lm='1' l_addr='0' l_ld='0'/></library-list-svr4>",
+        "<library-list-svr4 version='1.0'><library name='&untrusted;' lm='1' l_addr='0' l_ld='0'/></library-list-svr4>",
+        "<library-list-svr4 version='1.0'><library name='x' lm='1' lm='2' l_addr='0' l_ld='0'/></library-list-svr4>",
+        "<library-list-svr4 version='1.0'><library name='x' lm='1' l_addr='0'/></library-list-svr4>",
+        "<library-list-svr4 version='1.0'></unrelated>",
+        "<library-list-svr4 version='1.0'/><library-list-svr4 version='1.0'/>",
+        "<!DOCTYPE library-list-svr4 [<!ENTITY ex SYSTEM 'file:///private'>]><library-list-svr4 version='1.0'/>",
+        xml.substr(0,xml.size()-1),std::string(1024*1024+1,'x')}) {
+        require(!parseRspSvr4Modules(hostile,&modules).ok()&&modules.size()==2&&modules[0].id==expected,"hostile SVR4 XML rejected transactionally");
+    }
+    std::string excessive="<library-list-svr4 version='1.0'>";
+    for(unsigned i=0;i<4097;++i)excessive+="<library name='x' lm='"+std::to_string(i)+"' l_addr='0' l_ld='0'/>";
+    excessive+="</library-list-svr4>";
+    require(!parseRspSvr4Modules(excessive,&modules).ok(),"SVR4 module count bounded");
+    for(size_t fragment:{size_t{1},size_t{64}}) {
+        const auto handshake='+'+packet("PacketSize=4000;qXfer:libraries-svr4:read+")+'+'+packet("vCont;c;s")+'+'+packet("T05thread:2;");
+        auto input=wire(handshake+'+'+packet("m"+xml.substr(0,100))+'+'+packet("l"+xml.substr(100)),fragment);
+        DebuggerClient client;okay(connect(client,input,DebuggerBackend::kGdbRemote),"SVR4-capable RSP connection");
+        okay(client.modules(&modules),"paged RSP module inventory");
+        require(modules.size()==2&&input->output.find("qXfer:libraries-svr4:read::64,400")!=std::string::npos,"SVR4 paging uses actual byte offset");
+        Address runtime=0;require(!client.imageToRuntime(0x1000,&runtime).ok(),"module inventory does not silently configure static/runtime mapping");
+        auto unsupportedWire=wire(rspHandshake());DebuggerClient unsupportedClient;
+        okay(connect(unsupportedClient,unsupportedWire,DebuggerBackend::kGdbRemote),"RSP without SVR4 support");
+        const auto before=unsupportedWire->output.size();
+        require(!unsupportedClient.modules(&modules).ok()&&unsupportedWire->output.size()==before&&modules.size()==2,"unadvertised SVR4 capability sends no query and preserves output");
+        auto invalid=wire(handshake+'+'+packet("m"));DebuggerClient broken;
+        okay(connect(broken,invalid,DebuggerBackend::kGdbRemote),"invalid SVR4 peer connection");
+        require(!broken.modules(&modules).ok()&&invalid->closed&&modules.size()==2,"zero-progress RSP page disconnects without publishing partial inventory");
+    }
+    okay(parseRspSvr4Modules("<library-list-svr4 version='1.0'/>",&modules),"empty SVR4 inventory valid");
+    require(modules.empty(),"empty inventory replaces stale modules");
+}
+
 int main() {
+    svr4Modules();
     inputValidation();
     expandedWorkspace();
     for (size_t fragment : {size_t(1), size_t(2), size_t(3), size_t(64), size_t(4096)}) { rspWorkflow(fragment); dapWorkflow(fragment); }

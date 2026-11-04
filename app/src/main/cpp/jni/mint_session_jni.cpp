@@ -112,11 +112,12 @@ Java_com_ccs_mint_core_MintSession_nativeOpenPath(JNIEnv* env, jclass, jstring p
 
 JNIEXPORT jlong JNICALL
 Java_com_ccs_mint_core_MintSession_nativeOpenRaw(JNIEnv* env,jclass,jstring path,jstring architecture,jlong base,jlong entry) {
-    const auto name=mint::jni::fromJava(env,architecture);
+    auto name=mint::jni::fromJava(env,architecture);
+    const bool big=name=="aarch64:be";if(big)name="aarch64";
     auto arch=mint::Arch::kUnknown;
     for(const auto& description:mint::architectureDescriptions())
         if(description.id==name || mint::archName(description.architecture)==name || (name=="x86_64" && description.architecture==mint::Arch::kX86_64))arch=description.architecture;
-    auto* session=new Session();auto status=session->openRawPath(mint::jni::fromJava(env,path),arch,static_cast<Address>(base),static_cast<Address>(entry));
+    auto* session=new Session();auto status=session->openRawPath(mint::jni::fromJava(env,path),arch,static_cast<Address>(base),static_cast<Address>(entry),big?mint::ByteOrder::kBig:mint::ByteOrder::kLittle);
     if(!status.ok()){delete session;mint::jni::throwIoException(env,status.toString());return 0;}
     return reinterpret_cast<jlong>(session);
 }
@@ -615,6 +616,10 @@ Java_com_ccs_mint_core_MintSession_nativePower(JNIEnv* env,jclass,jlong handle,j
     const auto op=mint::jni::fromJava(env,operation),first=mint::jni::fromJava(env,text),second=mint::jni::fromJava(env,arguments);
     std::string output;mint::Status status=mint::Status::success();
     if(op=="plugin-load") {status=session->loadPlugin(first,flag);if(status.ok())output=session->pluginCommandsText();}
+    else if(op=="plugin-load-fd") {
+        if(address<0 || static_cast<unsigned long long>(address)>2147483647ull)status=mint::Status::error(mint::ErrorCode::kBadFormat,"invalid plugin descriptor");
+        else {status=session->loadPluginDescriptor(static_cast<int>(address),flag);if(status.ok())output=session->pluginCommandsText();}
+    }
     else if(op=="local-list")output=session->localVariablesText(static_cast<Address>(address));
     else if(op=="abi")output=session->abiText(static_cast<Address>(address));
     else if(op=="debug-import"){status=session->importExternalDebug(first,flag);if(status.ok())output=session->debugInfoText();}

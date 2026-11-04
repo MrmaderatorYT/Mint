@@ -193,6 +193,12 @@ Status executeIr(const IrFunction& function, InterpState* state,
     *result = {};
     if (function.blocks.empty()) return Status::error(ErrorCode::kBadFormat, "IR function has no blocks");
     if (state->arch() != function.arch) state->reset(function.arch);
+    state->memory().setByteOrder(function.byteOrder);
+    // The caller's explicit default-FP assumption applies at function entry.
+    // Known rounding modes (including those established by a preceding caller)
+    // take precedence, and CSR writes inside this function remain authoritative.
+    if (options.assumeDefaultFloatingPoint && (function.arch==Arch::kRiscV32 || function.arch==Arch::kRiscV64) &&
+        state->registerValue(riscv::kFrm,8).isUnknown()) state->setRegister(riscv::kFrm,0,8);
 
     u32 blockId = 0;
     for (const IrBlock& block : function.blocks) if (block.start == function.entry) { blockId = block.id; break; }
@@ -215,6 +221,7 @@ Status executeIr(const IrFunction& function, InterpState* state,
                 case MintOp::kStore:
                 case MintOp::kAtomicStore:
                     if (a.concreteLike()) state->memory().write(a.bits, b, insn.b.size);
+                    else state->memory().clear(); // Unknown address may alias any known byte.
                     break;
                 case MintOp::kNeg:
                     value = a.concreteLike() ? wideValue(Wide{0}-bits(a),insn.dest.size) : unknownLike(insn.dest);
@@ -237,10 +244,25 @@ Status executeIr(const IrFunction& function, InterpState* state,
                 case MintOp::kFloatAbs:case MintOp::kFloatNeg:case MintOp::kFloatCmp:case MintOp::kFloatEqual:case MintOp::kFloatLess:case MintOp::kFloatUnordered:
                 case MintOp::kFloatToInt:case MintOp::kFloatToIntU:case MintOp::kFloatConvert:
                     value=floating(insn.op,a,b,insn.dest.size,options.assumeDefaultFloatingPoint);break;
+                case MintOp::kFloatFma:
+                    if(a.concreteLike() && b.concreteLike() && c.concreteLike() && a.width==b.width && b.width==c.width &&
+                        (a.width==4 || a.width==8) && options.assumeDefaultFloatingPoint && std::fegetround()==FE_TONEAREST) {
+                        const auto x=floatingValue(a),y=floatingValue(b),z=floatingValue(c);
+                        if(!std::isnan(x)&&!std::isnan(y)&&!std::isnan(z)) {
+                            const auto answer=a.width==4 ? static_cast<long double>(std::fma(static_cast<float>(x),static_cast<float>(y),static_cast<float>(z))) :
+                                static_cast<long double>(std::fma(static_cast<double>(x),static_cast<double>(y),static_cast<double>(z)));
+                            if(!std::isnan(answer))value=floatingBits(answer,insn.dest.size);
+                        }
+                    }
+                    break;
                 case MintOp::kIntToFloat:case MintOp::kIntToFloatU:
                     if(a.concreteLike() && a.width<=8 && options.assumeDefaultFloatingPoint && std::fegetround()==FE_TONEAREST) {
                         const u64 mask=maskFor(a.width),raw=a.bits&mask;const u64 extended=(raw&(u64{1}<<(a.width*8-1)))?raw|~mask:raw;
-                        value=floatingBits(insn.op==MintOp::kIntToFloatU ? static_cast<long double>(raw) : static_cast<long double>(static_cast<i64>(extended)),insn.dest.size);
+                        // Convert directly at target precision. Going through
+                        // long double first double-rounds u64 -> float on hosts
+                        // whose long double is IEEE64 (including Apple arm64).
+                        if(insn.dest.size==4)value=floatingBits(insn.op==MintOp::kIntToFloatU ? static_cast<float>(raw) : static_cast<float>(static_cast<i64>(extended)),4);
+                        else if(insn.dest.size==8)value=floatingBits(insn.op==MintOp::kIntToFloatU ? static_cast<double>(raw) : static_cast<double>(static_cast<i64>(extended)),8);
                     }
                     break;
                 case MintOp::kVectorAdd:case MintOp::kVectorSub:case MintOp::kVectorMul:case MintOp::kVectorCmpEq:case MintOp::kVectorCmpGtS:
@@ -249,15 +271,33 @@ Status executeIr(const IrFunction& function, InterpState* state,
                 case MintOp::kVectorInsert:case MintOp::kVectorExtract:case MintOp::kVectorPermute:
                     value=vector(insn.op,a,b,c,insn.laneWidth,insn.dest.size);break;
                 case MintOp::kVectorLoad:value=a.concreteLike()?state->memory().read(a.bits,insn.dest.size):unknownLike(insn.dest);break;
-                case MintOp::kVectorStore:if(a.concreteLike())state->memory().write(a.bits,b,insn.b.size);break;
+                case MintOp::kVectorStore:if(a.concreteLike())state->memory().write(a.bits,b,insn.b.size);else state->memory().clear();break;
                 case MintOp::kMemoryFence:break;
                 case MintOp::kAtomicExchange:case MintOp::kAtomicAdd:case MintOp::kAtomicCompareExchange: {
-                    if(!a.concreteLike())break;
+                    if(!a.concreteLike()){state->memory().clear();break;}
                     const auto previous=state->memory().read(a.bits,insn.dest.size);value=previous;
                     if(insn.op==MintOp::kAtomicExchange)state->memory().write(a.bits,b,insn.dest.size);
                     else if(insn.op==MintOp::kAtomicAdd)state->memory().write(a.bits,binary(MintOp::kAdd,previous,b,insn.dest.size),insn.dest.size);
                     else if(previous.concreteLike()&&b.concreteLike()) {if(previous.bits==b.bits)state->memory().write(a.bits,c,insn.dest.size);}
                     else state->memory().write(a.bits,InterpValue::unknown(insn.dest.size),insn.dest.size);
+                    break;
+                }
+                case MintOp::kAtomicAnd:case MintOp::kAtomicOr:case MintOp::kAtomicXor:
+                case MintOp::kAtomicMinS:case MintOp::kAtomicMaxS:
+                case MintOp::kAtomicMinU:case MintOp::kAtomicMaxU: {
+                    if(!a.concreteLike()){state->memory().clear();break;}
+                    value=state->memory().read(a.bits,insn.dest.size);
+                    auto replacement=InterpValue::unknown(insn.dest.size);
+                    if(insn.op==MintOp::kAtomicAnd || insn.op==MintOp::kAtomicOr || insn.op==MintOp::kAtomicXor) {
+                        const auto operation=insn.op==MintOp::kAtomicAnd?MintOp::kAnd:insn.op==MintOp::kAtomicOr?MintOp::kOr:MintOp::kXor;
+                        replacement=binary(operation,value,b,insn.dest.size);
+                    } else if(value.concreteLike() && b.concreteLike()) {
+                        const bool signedValue=insn.op==MintOp::kAtomicMinS || insn.op==MintOp::kAtomicMaxS;
+                        const bool maximum=insn.op==MintOp::kAtomicMaxS || insn.op==MintOp::kAtomicMaxU;
+                        const auto less=binary(signedValue?MintOp::kLessS:MintOp::kLessU,value,b,1);
+                        replacement=(bool(less.bits)!=maximum)?value:b;
+                    }
+                    state->memory().write(a.bits,replacement,insn.dest.size);
                     break;
                 }
                 case MintOp::kAnd: case MintOp::kOr: case MintOp::kXor: case MintOp::kAdd: case MintOp::kSub:
@@ -330,6 +370,11 @@ Status executeIr(const IrFunction& function, InterpState* state,
                     if (options.stopOnCall) {
                         result->stoppedOnCall = true; result->stopReason = "call"; return Status::success();
                     }
+                    // Continuing past an opaque call is observation, not callee
+                    // execution. Its return registers, flags and aliased memory
+                    // cannot retain the concrete pre-call evidence.
+                    for(const auto& unit:abiCallerSavedRegisters(function.arch))state->write(unit,InterpValue::unknown(unit.size));
+                    state->memory().clear();
                     break;
                 }
                 case MintOp::kPopCount:
@@ -367,8 +412,10 @@ Status executeIr(const IrFunction& function, InterpState* state,
                     }
                     break;
                 case MintOp::kUndefined:
-                    result->stopReason = "undefined semantics";
-                    return Status::success();
+                    // An architecturally undefined result (typically a flag)
+                    // is unknown data, not a fault or a coverage gap.
+                    value=unknownLike(insn.dest);
+                    break;
                 default: break;
             }
             if (insn.dest.valid() && insn.dest.space != Space::kInvalid && insn.op != MintOp::kStore) state->write(insn.dest, value);

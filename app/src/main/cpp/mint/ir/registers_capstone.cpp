@@ -178,6 +178,7 @@ Varnode registerFromCapstone(Arch arch, unsigned capstoneReg) {
             return reg;
         }
         case Arch::kArm32:case Arch::kThumb:
+            if(capstoneReg==ARM_REG_FPSCR)return Varnode::reg(arm32::kFpscr,4);
             if(capstoneReg>=ARM_REG_R0 && capstoneReg<=ARM_REG_R12)return Varnode::reg(arm32::kRn(capstoneReg-ARM_REG_R0),4);
             if(capstoneReg==ARM_REG_SP)return Varnode::reg(arm32::kSp,4);
             if(capstoneReg==ARM_REG_LR)return Varnode::reg(arm32::kLr,4);

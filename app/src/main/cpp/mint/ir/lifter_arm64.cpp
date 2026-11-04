@@ -1165,8 +1165,16 @@ void Arm64Lifter::lift() {
     const bool release=atomic=="stlr"||atomic=="stlrb"||atomic=="stlrh";
     const bool exchange=atomic.rfind("swp",0)==0;
     const bool add=atomic.rfind("ldadd",0)==0;
+    MintOp rmw=MintOp::kInvalid;
+    if(atomic.rfind("ldclr",0)==0)rmw=MintOp::kAtomicAnd;
+    else if(atomic.rfind("ldset",0)==0)rmw=MintOp::kAtomicOr;
+    else if(atomic.rfind("ldeor",0)==0)rmw=MintOp::kAtomicXor;
+    else if(atomic.rfind("ldsmin",0)==0)rmw=MintOp::kAtomicMinS;
+    else if(atomic.rfind("ldsmax",0)==0)rmw=MintOp::kAtomicMaxS;
+    else if(atomic.rfind("ldumin",0)==0)rmw=MintOp::kAtomicMinU;
+    else if(atomic.rfind("ldumax",0)==0)rmw=MintOp::kAtomicMaxU;
     const bool compare=atomic.rfind("cas",0)==0 && atomic.rfind("casp",0)!=0;
-    if(acquire||release||exchange||add||compare) {
+    if(acquire||release||exchange||add||compare||rmw!=MintOp::kInvalid) {
         const unsigned mem=(acquire||release)?1:2;
         // Capstone marks CAS as writeback because Rs is read/write, not because
         // the memory base is updated. Atomic addressing has no post-index form.
@@ -1178,7 +1186,11 @@ void Arm64Lifter::lift() {
         const auto previous=b_.newTemp(width);
         if(acquire)b_.emit(MintOp::kAtomicLoad,previous,address);
         else if(compare)b_.emit(MintOp::kAtomicCompareExchange,previous,address,b_.resize(readReg(op(0).reg,width),width,false),b_.resize(readReg(op(1).reg,width),width,false));
-        else b_.emit(exchange?MintOp::kAtomicExchange:MintOp::kAtomicAdd,previous,address,b_.resize(readReg(op(0).reg,width),width,false));
+        else {
+            auto operand=b_.resize(readReg(op(0).reg,width),width,false);
+            if(rmw==MintOp::kAtomicAnd)operand=b_.unary(MintOp::kNot,operand,width); // LDCLR stores old & ~Rs.
+            b_.emit(rmw!=MintOp::kInvalid?rmw:exchange?MintOp::kAtomicExchange:MintOp::kAtomicAdd,previous,address,operand);
+        }
         writeReg(op(compare||acquire?0:1).reg,previous);return;
     }
 

@@ -41,8 +41,8 @@ Status Lifter::open(Arch arch) {
         case Arch::kX86_32:capstoneArch=CS_ARCH_X86;mode=CS_MODE_32;break;
         case Arch::kArm32:capstoneArch=CS_ARCH_ARM;mode=CS_MODE_ARM;break;
         case Arch::kThumb:capstoneArch=CS_ARCH_ARM;mode=CS_MODE_THUMB;break;
-        case Arch::kRiscV32:capstoneArch=CS_ARCH_RISCV;mode=static_cast<cs_mode>(CS_MODE_RISCV32|CS_MODE_RISCV_C);break;
-        case Arch::kRiscV64:capstoneArch=CS_ARCH_RISCV;mode=static_cast<cs_mode>(CS_MODE_RISCV64|CS_MODE_RISCV_C);break;
+        case Arch::kRiscV32:capstoneArch=CS_ARCH_RISCV;mode=static_cast<cs_mode>(CS_MODE_RISCV32|CS_MODE_RISCV_C|CS_MODE_RISCV_A|CS_MODE_RISCV_FD);break;
+        case Arch::kRiscV64:capstoneArch=CS_ARCH_RISCV;mode=static_cast<cs_mode>(CS_MODE_RISCV64|CS_MODE_RISCV_C|CS_MODE_RISCV_A|CS_MODE_RISCV_FD);break;
         default:
             return Status::error(ErrorCode::kUnsupported,
                                  "no lifter for this architecture");
@@ -155,6 +155,7 @@ Status Lifter::liftFunction(const Function& function, const MemoryMap& memory,
     out->entry = function.entry;
     out->name = function.name;
     out->arch = arch_;
+    out->byteOrder = memory.byteOrder();
 
     IrBuilder builder(out);
     thumbItRemaining_ = 0;

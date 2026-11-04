@@ -12,7 +12,7 @@
 
 namespace mint {
 namespace {
-bool memoryBarrier(MintOp op) {return op==MintOp::kCall||op==MintOp::kCallInd||op==MintOp::kIntrinsic||op==MintOp::kMemoryFence||op==MintOp::kAtomicLoad||op==MintOp::kAtomicStore||op==MintOp::kAtomicExchange||op==MintOp::kAtomicAdd||op==MintOp::kAtomicCompareExchange||op==MintOp::kVectorStore;}
+bool memoryBarrier(MintOp op) {return op==MintOp::kCall||op==MintOp::kCallInd||op==MintOp::kIntrinsic||op==MintOp::kMemoryFence||isAtomicMemory(op)||op==MintOp::kVectorStore;}
 
 constexpr size_t kMaxValues = 2000000;
 constexpr size_t kMaxInsns = 2000000;

@@ -73,6 +73,12 @@ public class ProjectArchiveTest {
         assertEquals(raw.architecture, result.metadata.raw.architecture); assertEquals(raw.baseAddress, result.metadata.raw.baseAddress);
         assertTrue(result.binary.getParentFile().getName().endsWith(raw.projectSuffix()));
     }
+    @Test public void bigEndianRawSurvivesBackup() throws Exception {
+        RawImportConfig raw = new RawImportConfig("aarch64:be", 0x1000, 0x1000);
+        ProjectArchive.Restored result = ProjectArchive.restore(new ByteArrayInputStream(archive(new ProjectArchive.Metadata("raw be", raw, 0, 0, 0))), restored.toFile(), null, null);
+        assertTrue(result.metadata.raw.bigEndian);
+        assertEquals(raw.projectSuffix(), result.metadata.raw.projectSuffix());
+    }
     @Test public void explicitMachOSliceSelectionSurvivesBackup()throws Exception {
         RawImportConfig slice=RawImportConfig.machOSlice("x86-64");ProjectArchive.Restored result=ProjectArchive.restore(new ByteArrayInputStream(archive(new ProjectArchive.Metadata("fat slice",slice,1,1,0))),restored.toFile(),null,null);
         assertTrue(result.metadata.raw.machOSlice);assertEquals("x86-64",result.metadata.raw.decoderId());assertTrue(result.binary.getParentFile().getName().endsWith("-macho-x86-64"));

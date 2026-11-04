@@ -99,7 +99,7 @@ ByteView MemoryMap::viewAt(Address addr, u64 maxLength) const {
     if (offset >= segment->data.size()) return {};
 
     const u64 available = segment->data.size() - offset;
-    return segment->data.subview(offset, std::min(available, maxLength));
+    return segment->data.subview(offset, std::min(available, maxLength)).withByteOrder(byteOrder_);
 }
 
 bool MemoryMap::read(Address addr, void* out, size_t length) const {

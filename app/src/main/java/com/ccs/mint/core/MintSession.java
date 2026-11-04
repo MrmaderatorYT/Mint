@@ -348,6 +348,8 @@ public final class MintSession implements Closeable {
     public String runScript(String source,boolean allowEdits) { checkOpen(); return nativeScript(handle,source,allowEdits); }
     public String assemble(long address,String source,boolean apply) { checkOpen(); return nativeAssemble(handle,address,source,apply); }
     public String loadPlugin(String path,boolean trustNativeCode) {checkOpen();return nativePower(handle,"plugin-load",path,"",0,0,trustNativeCode);}
+    /** Descriptor is borrowed. Call only in a verified isolated worker, or with explicit native-code trust. */
+    public String loadPluginDescriptor(int fd) {checkOpen();if(fd<0)throw new IllegalArgumentException("Invalid plugin descriptor");return nativePower(handle,"plugin-load-fd","","",fd,0,true);}
     public String pluginCommands() {checkOpen();return nativePower(handle,"plugin-list","","",0,0,false);}
     public String runPlugin(String command,String arguments,boolean allowEdits) {checkOpen();return nativePower(handle,"plugin-run",command,arguments,0,0,allowEdits);}
     public String connectDebugger(String host,int port,boolean dap,boolean allowRemote) {checkOpen();return nativePower(handle,"debug-connect",host,dap?"dap":"rsp",0,port,allowRemote);}

@@ -3,6 +3,8 @@
 #include <string>
 
 #include "mint/types/signature_library.h"
+#include "mint/analysis/abi_model.h"
+#include "mint/ir/registers.h"
 
 using namespace mint;
 namespace {
@@ -63,6 +65,18 @@ void parserTests(){
     success(bounded.deserialize(many),"exact definition count limit");require(bounded.definitions().size()==SignatureLibrary::kMaxDefinitions,"all bounded authored definitions parsed");
     rejected(&bounded,many+"one_more\tvoid(void)\n");
 }
+void riscvFloatTests(){
+    for(auto abi:{SignatureAbi::kRiscV32F,SignatureAbi::kRiscV64F,SignatureAbi::kRiscV32D,SignatureAbi::kRiscV64D}) {
+        const bool rv32=abi==SignatureAbi::kRiscV32F||abi==SignatureAbi::kRiscV32D;
+        abiTests(abi,rv32?Arch::kRiscV32:Arch::kRiscV64,rv32?ImageFormat::kElf32:ImageFormat::kElf64,8,rv32?4:8);
+        SignatureLibrary library(abi);success(library.define("float_identity","f32(f32 value)"),"RISC-V hard-float library definition");
+        SignatureLibrary restored;success(restored.deserialize(library.serialize()),"hard-float library restored");
+        const auto declaration=restored.prototypeFor("float_identity");require(declaration.callingConvention==signatureAbiName(abi),"hard-float convention survives standalone lookup and serialization");
+        AbiModel model;success(buildAbiModel(rv32?Arch::kRiscV32:Arch::kRiscV64,declaration,&model),"stored hard-float ABI model");
+        require(model.parameters[0].pieces[0].storage==Varnode::reg(riscv::kF0+80,8)&&model.result.pieces[0].nanBoxed,"library FP values use boxed eight-byte FPR units");
+        rejectedDefine(&restored,"wrong_abi","@riscv64 f32(f32 value)");
+    }
+}
 } // namespace
 int main(){
     abiTests(SignatureAbi::kAapcs64,Arch::kAArch64,ImageFormat::kElf64,8,8);
@@ -74,5 +88,5 @@ int main(){
     abiTests(SignatureAbi::kRiscV32,Arch::kRiscV32,ImageFormat::kElf32,8,4);
     abiTests(SignatureAbi::kRiscV64,Arch::kRiscV64,ImageFormat::kElf64,8,8);
     abiTests(SignatureAbi::kCdecl32,Arch::kX86_32,ImageFormat::kElf32,0,4);
-    parserTests();std::printf("signature library: %zu checks passed\n",checks);return 0;
+    parserTests();riscvFloatTests();std::printf("signature library: %zu checks passed\n",checks);return 0;
 }

@@ -45,11 +45,13 @@ public final class RawImportConfig {
     public final long baseAddress;
     public final long entryAddress;
     public final boolean machOSlice;
+    public final boolean bigEndian;
 
     public RawImportConfig(String architecture, long baseAddress, long entryAddress) {
         if (architecture == null) throw new IllegalArgumentException("Select a raw architecture");
         String normalized = architecture.trim().toLowerCase(Locale.ROOT);
         boolean slice=normalized.startsWith("macho:");if(slice)normalized=normalized.substring(6);
+        boolean big=normalized.endsWith(":be");if(big)normalized=normalized.substring(0,normalized.length()-3);
         Map<String, RawArchitecture> snapshot = registered;
         if (!snapshot.containsKey(normalized)) {
             if (normalized.equals("arm64")) normalized = "aarch64";
@@ -59,6 +61,7 @@ public final class RawImportConfig {
             if (normalized.equals("rv32")) normalized = "riscv32";
             if (normalized.equals("rv64")) normalized = "riscv64";
         }
+        if(big && (slice || !normalized.equals("aarch64")))throw new IllegalArgumentException("Big-endian raw imports require AArch64");
         RawArchitecture descriptor = snapshot.get(normalized);
         if (descriptor == null) throw new IllegalArgumentException("Raw decoder is not registered; explicitly reload its trusted plugin first");
         if(slice && (!normalized.equals("aarch64") && !normalized.equals("x86-64") && !normalized.equals("x86-32") && !normalized.equals("arm") || baseAddress!=0 || entryAddress!=0))throw new IllegalArgumentException("Mach-O slice selection requires a supported CPU and container-provided addresses");
@@ -71,12 +74,12 @@ public final class RawImportConfig {
             throw new IllegalArgumentException("Entry address must align to " + alignment + " bytes (ARM mappings also require an even base)");
         if(descriptor.pointerSize == 4 && (Long.compareUnsigned(baseAddress,0xffffffffL)>0 || Long.compareUnsigned(entryAddress,0xffffffffL)>0))
             throw new IllegalArgumentException("32-bit decoder requires 32-bit addresses");
-        this.architecture = (slice?"macho:":"")+normalized;this.machOSlice=slice;
+        this.architecture = (slice?"macho:":"")+normalized+(big?":be":"");this.machOSlice=slice;this.bigEndian=big;
         this.baseAddress = baseAddress;
         this.entryAddress = entryAddress;
     }
     public static RawImportConfig machOSlice(String architecture){return new RawImportConfig("macho:"+architecture,0,0);}
-    public String decoderId(){return machOSlice?architecture.substring(6):architecture;}
+    public String decoderId(){return machOSlice?architecture.substring(6):bigEndian?architecture.substring(0,architecture.length()-3):architecture;}
     public com.ccs.mint.core.MintSession open(String path)throws java.io.IOException {
         return machOSlice?com.ccs.mint.core.MintSession.openMachO(path,decoderId()):com.ccs.mint.core.MintSession.openRaw(path,architecture,baseAddress,entryAddress);
     }
@@ -109,7 +112,7 @@ public final class RawImportConfig {
 
     public String describe() {
         if(machOSlice)return "Mach-O slice "+decoderId()+"; addresses from container";
-        return "raw " + architecture + "; base 0x" + Long.toUnsignedString(baseAddress, 16) +
+        return "raw " + decoderId() + (bigEndian?" big-endian":" little-endian") + "; base 0x" + Long.toUnsignedString(baseAddress, 16) +
                 "; entry 0x" + Long.toUnsignedString(entryAddress, 16);
     }
 }

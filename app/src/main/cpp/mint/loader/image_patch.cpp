@@ -50,6 +50,7 @@ Status ElfImage::applyPatch(Address address, ByteView bytes) {
     }
     const Address segmentStart = segment->start;
     MemoryMap patched;
+    patched.setByteOrder(memory_.byteOrder());
     for (const MemorySegment& current : memory_.segments()) {
         const ByteView data = current.start == segmentStart
             ? ByteView(storage->data(), storage->size()) : current.data;

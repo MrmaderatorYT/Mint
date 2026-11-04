@@ -76,6 +76,7 @@ struct IrFunction {
     Address entry = 0;
     std::string name;
     Arch arch = Arch::kUnknown;
+    ByteOrder byteOrder = ByteOrder::kLittle; // Data accesses; instruction decoding is separate.
 
     std::vector<IrInsn> insns;
     std::vector<IrBlock> blocks;

@@ -28,7 +28,11 @@ struct DebuggerOptions {
     u32 timeoutMs = 3000; // Per operation, bounded 1..30000 ms.
     // Optional exact RSP 'g' layout supplied by the target owner. Without a
     // target XML/layout, registers are returned as one labeled raw register file.
+    // Entries are decoded in increasing register-number order, as in RSP 'g'.
     std::vector<DebuggerRegisterSpec> registerLayout;
+    // Explicit target-owner byte order. XML register names/sizes do not prove
+    // endianness; Session initializes this from its selected native image.
+    ByteOrder registerByteOrder = ByteOrder::kLittle;
 };
 struct DebuggerSnapshot {
     DebuggerBackend backend = DebuggerBackend::kGdbRemote;
@@ -41,7 +45,15 @@ struct DebuggerSnapshot {
 };
 struct DebuggerThread { u64 id = 0; std::string name; bool selected = false; };
 struct DebuggerFrame { u64 id = 0; Address pc = kNoAddress; std::string name, source; u64 line = 0; };
-struct DebuggerModule { std::string id, name, path; Address start = kNoAddress, end = kNoAddress; };
+struct DebuggerModule {
+    std::string id, name, path;
+    Address start = kNoAddress, end = kNoAddress;
+    // SVR4 l_addr is a displacement, not a mapped range or proven image base.
+    bool hasSvr4 = false;
+    Address linkMap = 0, loadBias = 0, dynamicAddress = 0, linkerNamespace = 0;
+    // Generic RSP library-list bases are load addresses, not ranges/slides.
+    std::vector<Address> segmentBases, sectionBases;
+};
 struct DebuggerImageMapping {
     Address imageStart = 0, runtimeStart = 0; u64 size = 0;
     std::string module; // Explicit module evidence/user selection, never a guessed slide.
@@ -80,7 +92,7 @@ public:
     Status threads(std::vector<DebuggerThread>* out);
     Status selectThread(u64 id);
     Status stackFrames(size_t maximum, std::vector<DebuggerFrame>* out);
-    Status modules(std::vector<DebuggerModule>* out); // DAP module inventory.
+    Status modules(std::vector<DebuggerModule>* out); // DAP or advertised generic/SVR4 RSP list.
     Status programCounter(Address* out);
     Status discoverRegisterLayout(); // Bounded RSP target.xml; no external entity expansion.
     Status setImageMappings(const std::vector<DebuggerImageMapping>& mappings);

@@ -237,7 +237,8 @@ std::string Session::decompiledCFor(Address address) {
         [this](Address base) { return offsetTableText(base); },
         [this](Address target) { return prototypeAt(target); },
         [this](const std::string& type,DataTypeLayout* layout) {return program_.types().resolve(type,layout);},
-        [this](Address entry) {return program_.locals(entry);});
+        [this](Address entry) {return program_.locals(entry);},
+        decompilerMemoryFunctions());
     if (!status.ok()) return "decompiler failed: " + status.toString();
     std::string userComment=program_.get(function->entry,"comment");
     if (!userComment.empty()) {
@@ -788,6 +789,7 @@ std::string Session::exportJsonText() {
                   kJsonSchema);
     out += line;
     out += jsonString(architectureName(image_.arch()));
+    out += ",\n  \"data_byte_order\": "+jsonString(image_.memory().byteOrder()==ByteOrder::kBig?"big":"little");
     out += ",\n  \"format\": "+jsonString(image_.formatName())+",\n  \"revision\": "+std::to_string(program_.revision());
     out += ",\n  \"functions\": [\n";
 

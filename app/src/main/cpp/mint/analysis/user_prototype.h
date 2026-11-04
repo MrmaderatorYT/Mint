@@ -2,6 +2,7 @@
 #include <string>
 #include <vector>
 #include "mint/base/status.h"
+#include "mint/base/types.h"
 namespace mint {
 struct UserParameter { std::string type, name; };
 struct UserPrototype {
@@ -10,6 +11,7 @@ struct UserPrototype {
     bool variadic = false;
     // Empty chooses the target's default; explicit @windows64 etc are persisted.
     std::string callingConvention;
+    ByteOrder byteOrder=ByteOrder::kLittle; // Target binding, not declaration text.
     bool valid() const { return !returnType.empty(); }
 };
 // Type-only declaration, optionally prefixed by @calling-convention. Layout and

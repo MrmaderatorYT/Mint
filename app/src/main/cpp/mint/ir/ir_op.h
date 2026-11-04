@@ -242,6 +242,15 @@ enum class MintOp : u8 {
     kAtomicAdd,
     /// Returns original memory; write c iff original memory equals b.
     kAtomicCompareExchange,
+    // Append-only: native extension opcode numbers remain stable.
+    kAtomicAnd,
+    kAtomicOr,
+    kAtomicXor,
+    kAtomicMinS,
+    kAtomicMaxS,
+    kAtomicMinU,
+    kAtomicMaxU,
+    kFloatFma, ///< IEEE fused a*b+c, one rounding at the declared precision.
 };
 
 /// Static facts about an opcode, for the printer, the verifier and the emulator.
@@ -267,5 +276,14 @@ inline bool isTerminator(MintOp op) { return opInfo(op).terminator; }
 /// True for ops whose dest is a 1-byte boolean, which is the set the condition
 /// recovery pass looks for.
 bool producesBoolean(MintOp op);
+
+inline bool isAtomicRmw(MintOp op) {
+    return op == MintOp::kAtomicExchange || op == MintOp::kAtomicAdd ||
+           op == MintOp::kAtomicCompareExchange ||
+           (op >= MintOp::kAtomicAnd && op <= MintOp::kAtomicMaxU);
+}
+inline bool isAtomicMemory(MintOp op) {
+    return op == MintOp::kAtomicLoad || op == MintOp::kAtomicStore || isAtomicRmw(op);
+}
 
 }  // namespace mint

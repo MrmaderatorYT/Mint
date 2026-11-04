@@ -153,8 +153,7 @@ bool targetInFunction(const IrFunction& function, Address target) {
 
 bool readUnsigned(const MemoryMap& memory, Address address, u32 width, u64* out) {
     *out = 0;
-    return width != 0 && width <= sizeof(*out) &&
-           memory.read(address, out, width);
+    return memory.readUnsigned(address,width,out);
 }
 
 i64 signExtend(u64 value, u32 width) {

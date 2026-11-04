@@ -488,11 +488,27 @@ Status CodeAnalyzer::reanalyzeChanged(const ElfImage& image, const Options& opti
         if (oldTargets != newTargets) return fallback("patched indirect targets changed");
     }
     prepared.code_.finalize();
+    bool localBranchesChanged = false;
     for (const Function& function : prepared.functions_) {
         for (Address address : function.instructions) {
             const InsnRecord* old = code_.find(address);
             const InsnRecord* replacement = prepared.code_.find(address);
-            if (old == nullptr || replacement == nullptr || !sameRecord(*old, *replacement, false)) return fallback("instruction size/flow/target changed");
+            if (old == nullptr || replacement == nullptr) return fallback("instruction membership changed");
+            if (!sameRecord(*old, *replacement, false)) {
+                // A local branch may change its destination while all owners
+                // retain exactly the same instruction membership. Calls,
+                // indirect flow, new roots and changed decoding still require
+                // discovery; do not reuse their old evidence.
+                const bool localBranch = old->address == replacement->address && old->size == replacement->size &&
+                    old->flow == replacement->flow && (old->flow == FlowKind::kJump || old->flow == FlowKind::kCondJump) &&
+                    std::find(function.instructions.begin(),function.instructions.end(),old->target)!=function.instructions.end() &&
+                    std::find(function.instructions.begin(),function.instructions.end(),replacement->target)!=function.instructions.end();
+                if (!localBranch) return fallback("instruction size/flow/nonlocal target changed");
+                const auto proof = indirectFlowReports_.find(function.entry);
+                if (function.indirectJumps || (proof != indirectFlowReports_.end() && !proof->second.sites.empty()))
+                    return fallback("local branch changes indirect-flow proof context");
+                localBranchesChanged = true;
+            }
         }
     }
 
@@ -530,21 +546,27 @@ Status CodeAnalyzer::reanalyzeChanged(const ElfImage& image, const Options& opti
     for (Function& function : prepared.functions_) {
         const auto replacement = replacements.find(function.entry);
         if (replacement != replacements.end()) {
-            // Address membership, instruction sizes and every flow target were
-            // proved unchanged, so global CodeMap indexes and existing CFGs stay
-            // valid. Only the instruction records/semantic lifting must change.
             const ControlFlowGraph cfg = function.cfg;
-            function = std::move(replacement->second); function.cfg = cfg;
+            function = std::move(replacement->second);
+            function.cfg = localBranchesChanged ? ControlFlowGraph::build(prepared.code_,function.instructions,function.entry,function.resolvedIndirectJumps) : cfg;
         }
         prepared.knownEntries_.insert(function.entry); prepared.analyzed_.insert(function.entry);
     }
     prepared.warnings_ = warnings_;
     prepared.stats_ = stats_;
+    if (localBranchesChanged) {
+        prepared.stats_.blocks = prepared.stats_.edges = 0;
+        for (const auto& function : prepared.functions_) {
+            prepared.stats_.blocks += function.cfg.size();
+            prepared.stats_.edges += function.cfg.edgeCount();
+        }
+    }
     prepared.hasState_ = true;
     prepared.buildIndexes();
     adoptState(std::move(prepared));
     result->used = true; result->functionsReanalyzed = affected.size();
     result->reason = affected.empty() ? "authoritative data-only patch with unchanged indirect-flow dependencies" :
+        localBranchesChanged ? "local branch patch with unchanged instruction membership and rebuilt CFGs" :
         "instruction-only patch with unchanged flow topology";
     if (options.progress) options.progress->store(100, std::memory_order_relaxed);
     return Status::success();

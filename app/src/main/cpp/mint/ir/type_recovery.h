@@ -6,6 +6,7 @@
 #include "mint/ssa/ssa_function.h"
 
 namespace mint {
+struct MemoryAnalysis;
 
 enum class RecoveredTypeKind : u8 {
     kUnknown,
@@ -50,5 +51,7 @@ struct TypeRecovery {
 /// from SSA operations: widths, booleans, pointer arithmetic and repeated loads
 /// from one base. It deliberately reports hypotheses, not source-level certainty.
 Status recoverTypes(const SsaFunction& function, TypeRecovery* out);
+// Reuses a successful sidecar for this exact, unchanged SSA function.
+Status recoverTypes(const SsaFunction& function,TypeRecovery* out,const MemoryAnalysis* memory);
 
 }  // namespace mint

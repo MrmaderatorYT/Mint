@@ -31,7 +31,7 @@ Status parseUserPrototype(const std::string& text,UserPrototype* result) {
     if(!declaration.empty()&&declaration[0]=='@') {
         auto end=declaration.find_first_of(" \t");if(end==std::string::npos)return bad();
         parsed.callingConvention=declaration.substr(1,end-1);
-        static const std::set<std::string> conventions={"aapcs64","sysv64","windows64","aapcs32","aapcs32-vfp","cdecl32","stdcall32","riscv32","riscv64","riscv32d","riscv64d"};
+        static const std::set<std::string> conventions={"aapcs64","sysv64","windows64","aapcs32","aapcs32-vfp","cdecl32","stdcall32","riscv32","riscv64","riscv32f","riscv64f","riscv32d","riscv64d"};
         if(!conventions.count(parsed.callingConvention))return bad();declaration=trim(declaration.substr(end));
     }
     auto open=declaration.find('('),close=declaration.find(')');

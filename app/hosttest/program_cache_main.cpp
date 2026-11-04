@@ -394,6 +394,41 @@ bool boundedSnapshotContracts(Arch architecture) {
     return true;
 }
 
+bool localBranchContract(Arch architecture) {
+    TemporaryDirectory temporary;
+    if(!check(temporary.valid(),"local branch temporary directory"))return false;
+    Fixture raw{architecture,{},0,"",0,""};
+    Address at;std::string patch;
+    if(architecture==Arch::kAArch64) {
+        raw.bytes.resize(20);
+        store<u32>(&raw.bytes,0,0x7100001f); // cmp w0,#0
+        store<u32>(&raw.bytes,4,0x54000040); // b.eq +8
+        store<u32>(&raw.bytes,8,0x11000400); // add w0,w0,#1
+        store<u32>(&raw.bytes,12,0x51000400); // sub w0,w0,#1
+        store<u32>(&raw.bytes,16,0xd65f03c0);
+        at=0x1004;patch="20 00 00 54"; // redirect to fallthrough, all instructions still reachable
+    } else {
+        raw.bytes={0x85,0xc0,0x74,0x04,0xff,0xc0,0xeb,0x00,0xff,0xc8,0xc3};
+        at=0x1003;patch="00";
+    }
+    const auto source=temporary.file("branch.bin"),project=temporary.file("branch.mint");
+    if(!check(writeBytes(source,raw.bytes),"write local branch fixture"))return false;
+    Session session;unsigned serial=0;
+    if(!open(&session,raw,source,project) ||
+       !success(session.editAnnotation(at,"patch",patch),"redirect local conditional branch") ||
+       !mode(session,"incremental","local branch patch avoids full discovery") ||
+       !equivalentFresh(session,raw,source,project,temporary,&serial,"local branch CFG rebuild vs full") ||
+       !success(session.undoEdit(false),"undo local branch") ||
+       !mode(session,"incremental","local branch undo incremental") ||
+       !equivalentFresh(session,raw,source,project,temporary,&serial,"local branch undo vs full") ||
+       !success(session.undoEdit(true),"redo local branch") ||
+       !mode(session,"incremental","local branch redo incremental") ||
+       !equivalentFresh(session,raw,source,project,temporary,&serial,"local branch redo vs full"))return false;
+    const auto expected=snapshot(session);Session reopened;
+    return open(&reopened,raw,source,project) && mode(reopened,"restored","local branch cache restored") &&
+           sameSnapshot(snapshot(reopened),expected,"local branch cache equivalence");
+}
+
 bool sharedOwnerContract(Arch architecture) {
     TemporaryDirectory temporary;
     if (!check(temporary.valid(), "create shared-owner fixture directory")) return false;
@@ -568,6 +603,8 @@ int main() {
     ok = boundedSnapshotContracts(Arch::kX86_64) && ok;
     ok = sharedOwnerContract(Arch::kAArch64) && ok;
     ok = sharedOwnerContract(Arch::kX86_64) && ok;
+    ok = localBranchContract(Arch::kAArch64) && ok;
+    ok = localBranchContract(Arch::kX86_64) && ok;
     ok = reusedSessionContract() && ok;
     ok = integration(Arch::kAArch64) && ok;
     ok = integration(Arch::kX86_64) && ok;

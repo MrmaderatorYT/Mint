@@ -108,6 +108,7 @@ struct SsaFunction {
     Address entry = 0;
     std::string name;
     Arch arch = Arch::kUnknown;
+    ByteOrder byteOrder = ByteOrder::kLittle;
 
     std::vector<SsaValue> values;
     std::vector<SsaInsn> insns;

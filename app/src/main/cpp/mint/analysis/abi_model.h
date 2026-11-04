@@ -15,6 +15,8 @@ struct AbiStoragePiece {
     u64 valueOffset=0;
     u8 width=0;
     bool floating=false;
+    bool nanBoxed=false; // Content bytes are 1-extended in the FP storage unit.
+    u8 registerShift=0; // Least-significant content bit within the storage unit.
 };
 struct AbiValue {
     std::string type;

@@ -102,6 +102,15 @@ private:
                 ++stats_.zeroingWrites;
                 return;
             }
+            // ARM S/D views (and aligned SIMD subfields elsewhere) preserve
+            // the other lanes of their 128-bit unit. Existing vector insert
+            // expresses that without manufacturing an impossible 128-bit
+            // constant mask or leaving an unnormalized overlapping register.
+            if(unit.size==16 && (field.size==1||field.size==2||field.size==4||field.size==8) && shift%(field.size*8)==0) {
+                IrInsn inserted;inserted.op=MintOp::kVectorInsert;inserted.dest=whole;inserted.a=whole;inserted.b=value;
+                inserted.c=Varnode::constant(shift/(field.size*8),1);inserted.laneWidth=field.size;inserted.address=address_;
+                out_.push_back(inserted);++stats_.opsAdded;++stats_.narrowWrites;return;
+            }
             ++stats_.unnormalized;
             emit(MintOp::kCopy, field, value);
             return;

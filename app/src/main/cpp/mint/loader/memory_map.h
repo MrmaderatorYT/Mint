@@ -41,6 +41,8 @@ struct MemorySegment {
 /// region we materialised ourselves.
 class MemoryMap {
 public:
+    ByteOrder byteOrder() const { return byteOrder_; }
+    void setByteOrder(ByteOrder order) { byteOrder_=order; }
     /// Segments must be added before any lookup. `name` is for display only.
     void addSegment(Address start, u64 size, ByteView data, u32 flags, std::string name);
 
@@ -71,10 +73,16 @@ public:
     /// Copies `length` bytes, zero-filling any part that is mapped but not
     /// file-backed. Fails only if the range is not mapped at all.
     bool read(Address addr, void* out, size_t length) const;
+    bool readUnsigned(Address addr,size_t width,u64* out) const {
+        u8 bytes[8];if(!out||!width||width>8||!read(addr,bytes,width))return false;
+        u64 value=0;for(size_t i=0;i<width;++i)value|=u64(bytes[i])<<((byteOrder_==ByteOrder::kBig?width-1-i:i)*8);
+        *out=value;return true;
+    }
 
     template <typename T>
     bool readInt(Address addr, T* out) const {
-        return read(addr, out, sizeof(T));
+        u8 bytes[sizeof(T)];
+        return read(addr,bytes,sizeof(T)) && ByteView(bytes,sizeof(T),byteOrder_).read(0,out);
     }
 
     /// A NUL-terminated string at `addr`, used for symbol names and for the
@@ -87,6 +95,7 @@ private:
     Address maxAddress_ = 0;
     bool hasOverlaps_ = false;
     bool finalized_ = false;
+    ByteOrder byteOrder_ = ByteOrder::kLittle;
 };
 
 }  // namespace mint

@@ -38,7 +38,7 @@ public:
 
     Status openPath(const std::string& path);
     Status openFd(int fd);
-    Status openRawPath(const std::string& path, Arch arch, Address base, Address entry);
+    Status openRawPath(const std::string& path, Arch arch, Address base, Address entry, ByteOrder order = ByteOrder::kLittle);
     Status openMachOPath(const std::string& path,Arch architecture);
 
     /// Runs loading and code discovery. Separate from open() because it is the
@@ -89,6 +89,7 @@ public:
     std::string nameAt(Address address) const;
     std::string displayNameAt(Address address) const;
     UserPrototype prototypeAt(Address address) const;
+    UserPrototype effectivePrototype(UserPrototype prototype) const;
     struct ListingRow { Address address = 0; u32 size = 1; FlowKind flow = FlowKind::kNormal; Address target = kNoAddress; std::string text, comment; };
     std::vector<ListingRow> programListing(Address start, size_t limit);
     std::string searchText(const std::string& query, size_t limit = 500);
@@ -100,6 +101,7 @@ public:
     Status runScript(const std::string& source,bool allowEdits,std::string* output);
     Status assembleAt(Address address,const std::string& source,bool apply,std::string* bytes);
     Status loadPlugin(const std::string& path,bool trustNativeCode) { return plugins_.load(path,trustNativeCode); }
+    Status loadPluginDescriptor(int fd,bool trustNativeCode) { return fd<0?Status::error(ErrorCode::kBadFormat,"invalid plugin descriptor"):plugins_.load("/proc/self/fd/"+std::to_string(fd),trustNativeCode,fd); }
     std::string pluginCommandsText() const { return plugins_.commandsText(); }
     Status runPlugin(const std::string& command,const std::string& arguments,bool allowEdits,std::string* output) { return plugins_.run(*this,command,arguments,allowEdits,output); }
     Status connectDebugger(const std::string& host,u32 port,bool dap,bool allowPlaintextRemote);
@@ -236,6 +238,7 @@ public:
     void requestCancel() { cancel_.store(true, std::memory_order_relaxed); }
 
 private:
+    MemoryFunctionResolver decompilerMemoryFunctions();
     void notifyPluginEvent(u32 kind,Address address,const std::string& detail);
     std::vector<std::string> pluginEventWarnings_;
     Status prepareLocalSsa(Address function,SsaFunction* output);

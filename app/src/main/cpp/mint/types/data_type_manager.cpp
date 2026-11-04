@@ -308,6 +308,8 @@ public:
                 if (!element.size || element.size > DataTypeManager::kMaxTypeBytes / n->count)
                     return bad("array element is void or array size exceeds 1 GiB");
                 out->kind = DataTypeKind::kArray;
+                out->elementType = canonical(n->child);
+                out->elementCount = n->count;
                 out->size = element.size * n->count;
                 out->alignment = element.alignment;
                 return Status::success();

@@ -13,6 +13,8 @@ namespace mint {
 /// concrete branch target.
 class InterpMemory {
 public:
+    ByteOrder byteOrder() const { return byteOrder_; }
+    void setByteOrder(ByteOrder order) { byteOrder_=order; }
     void clear();
     void map(const MemoryMap& image);
 
@@ -25,6 +27,7 @@ public:
 
 private:
     std::unordered_map<Address, u8> bytes_;
+    ByteOrder byteOrder_=ByteOrder::kLittle;
 };
 
 }  // namespace mint

@@ -10,6 +10,7 @@
 #include "mint/analysis/user_prototype.h"
 #include "mint/types/data_type_manager.h"
 #include "mint/analysis/local_variables.h"
+#include "mint/ir/memory_analysis.h"
 
 namespace mint {
 
@@ -42,13 +43,15 @@ Status decompileSsa(const SsaFunction& function, DecompileResult* result,
                     const StringResolver& offsetTable = {},
                     const PrototypeResolver& prototypes = {},
                     const TypeLayoutResolver& typeLayouts = {},
-                    const LocalResolver& locals = {});
+                    const LocalResolver& locals = {},
+                    const MemoryFunctionResolver& memoryFunctions = {});
 Status decompileIr(const IrFunction& input, DecompileResult* result,
                    const SymbolNamer& names = {},
                    const StringResolver& strings = {},
                    const StringResolver& offsetTable = {},
                    const PrototypeResolver& prototypes = {},
                    const TypeLayoutResolver& typeLayouts = {},
-                   const LocalResolver& locals = {});
+                   const LocalResolver& locals = {},
+                   const MemoryFunctionResolver& memoryFunctions = {});
 
 }  // namespace mint

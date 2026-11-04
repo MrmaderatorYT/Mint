@@ -1,10 +1,11 @@
 #include "mint/ir/type_recovery.h"
 
 #include "mint/ir/registers.h"
+#include "mint/ir/memory_analysis.h"
 #include "mint/plugin/architecture_bridge.h"
 
 #include <algorithm>
-#include <unordered_map>
+#include <map>
 
 namespace mint {
 namespace {
@@ -91,9 +92,55 @@ void markKind(RecoveredType* type, RecoveredTypeKind kind) {
     }
 }
 
+bool fieldBase(const SsaFunction& function,const std::vector<SsaId>& loadSources,const MemoryAnalysis* memory,SsaId address,SsaId* base,u64* offset) {
+    // Resolve register copies and constant arithmetic to one object identity.
+    // This is a local layout hypothesis; indexed accesses, casts, absolute
+    // addresses and negative frame offsets do not establish object fields.
+    __int128 displacement=0;
+    for(unsigned depth=0;depth<512 && valid(function,address);++depth) {
+        const auto& value=function.values[address];
+        if(address<loadSources.size() && valid(function,loadSources[address]) && function.values[loadSources[address]].storage.size==value.storage.size) {
+            address=loadSources[address];continue;
+        }
+        if(memory && address<memory->values.size()) {
+            const auto& fact=memory->values[address];
+            if(fact.kind==MemoryBaseKind::kAbsolute)return false;
+            if((fact.kind==MemoryBaseKind::kSymbolic||fact.kind==MemoryBaseKind::kEntryStack) && fact.base!=address && valid(function,fact.base)) {
+                displacement+=fact.offset;address=fact.base;continue;
+            }
+        }
+        if(value.storage.space==Space::kConstant)return false;
+        if(value.def!=SsaDef::kInsn || value.defIndex>=function.insns.size()) {
+            if(displacement<0 || displacement>1024*1024)return false;
+            *base=address;*offset=static_cast<u64>(displacement);return true;
+        }
+        const auto& insn=function.insns[value.defIndex];
+        if(insn.op==MintOp::kCopy && valid(function,insn.use[0]) &&
+            function.values[insn.use[0]].storage.size==value.storage.size) {address=insn.use[0];continue;}
+        if(insn.op==MintOp::kAdd || insn.op==MintOp::kSub) {
+            SsaId candidate=insn.use[0],constant=insn.use[1];
+            if(!valid(function,candidate)||!valid(function,constant))return false;
+            if(insn.op==MintOp::kAdd && function.values[candidate].storage.space==Space::kConstant)std::swap(candidate,constant);
+            const auto& literal=function.values[constant].storage;
+            if(literal.space!=Space::kConstant || literal.size>8 || !literal.size)return false;
+            const unsigned bits=literal.size*8;const u64 signBit=u64{1}<<(bits-1);
+            const __int128 amount=static_cast<__int128>(literal.offset)-((literal.offset&signBit)?(static_cast<__int128>(1)<<bits):0);
+            displacement+=insn.op==MintOp::kAdd?amount:-amount;
+            address=candidate;continue;
+        }
+        if(insn.op==MintOp::kZeroExt || insn.op==MintOp::kSignExt || insn.op==MintOp::kTrunc)return false;
+        if(displacement<0 || displacement>1024*1024)return false;
+        *base=address;*offset=static_cast<u64>(displacement);return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 Status recoverTypes(const SsaFunction& function, TypeRecovery* out) {
+    return recoverTypes(function,out,nullptr);
+}
+Status recoverTypes(const SsaFunction& function,TypeRecovery* out,const MemoryAnalysis* suppliedMemory) {
     if (out == nullptr) {
         return Status::error(ErrorCode::kInternalError, "no type recovery output");
     }
@@ -108,11 +155,29 @@ Status recoverTypes(const SsaFunction& function, TypeRecovery* out) {
         out->values[i].width = function.values[i].storage.size;
     }
 
-    std::unordered_map<SsaId, std::vector<std::pair<u64, SsaId>>> structAccesses;
+    // Memory evidence may identify a reloaded pointer with the exact SSA value
+    // stored on every incoming path. A call/alias/partial write or disagreeing
+    // store sources leaves this relation absent. Failure of the bounded memory
+    // sidecar costs precision, never the ordinary local type reconstruction.
+    std::vector<SsaId> loadSources(function.values.size(),kNoValue);
+    MemoryAnalysis preparedMemory;
+    const MemoryAnalysis* memory=suppliedMemory&&suppliedMemory->matches(function)?suppliedMemory:nullptr;
+    if(!memory && analyzeMemory(function,&preparedMemory).ok())memory=&preparedMemory;
+    if(memory && memory->values.size()==function.values.size() && memory->accessByInstruction.size()==function.insns.size())for(const auto& access:memory->accesses) {
+        if(access.store || access.instruction>=function.insns.size() || !valid(function,access.reachingValue))continue;
+        const auto& insn=function.insns[access.instruction];
+        if(insn.op==MintOp::kLoad && valid(function,insn.dest) && function.values[insn.dest].storage.size==function.values[access.reachingValue].storage.size)
+            loadSources[insn.dest]=access.reachingValue;
+    }
+
+    std::map<SsaId, std::vector<std::pair<u64, SsaId>>> structAccesses;
     for (u32 index = 0; index < function.insns.size(); ++index) {
         const SsaInsn& insn = function.insns[index];
-        if (insn.dest == kNoValue || insn.dest >= out->values.size()) continue;
-        RecoveredType& dest = out->values[insn.dest];
+        if (insn.dead) continue;
+        const bool hasDest=valid(function,insn.dest);
+        if (!hasDest && insn.op!=MintOp::kStore) continue;
+        RecoveredType ignored;
+        RecoveredType& dest = hasDest ? out->values[insn.dest] : ignored;
         switch (insn.op) {
             case MintOp::kEqual:
             case MintOp::kNotEqual:
@@ -136,6 +201,7 @@ Status recoverTypes(const SsaFunction& function, TypeRecovery* out) {
             case MintOp::kFloatSub:
             case MintOp::kFloatMul:
             case MintOp::kFloatDiv:
+            case MintOp::kFloatFma:
             case MintOp::kFloatSqrt:
             case MintOp::kFloatAbs:
             case MintOp::kFloatNeg:
@@ -190,17 +256,7 @@ Status recoverTypes(const SsaFunction& function, TypeRecovery* out) {
             case MintOp::kRemS:
                 markKind(&dest, RecoveredTypeKind::kSignedInteger);
                 break;
-            default:
-                if (insn.op == MintOp::kAdd || insn.op == MintOp::kSub) {
-                    for (unsigned slot = 0; slot < 2; ++slot) {
-                        const SsaId use = insn.use[slot];
-                        if (!valid(function, use)) continue;
-                        if (out->values[use].kind == RecoveredTypeKind::kPointer) {
-                            dest.kind = RecoveredTypeKind::kPointer;
-                        }
-                    }
-                }
-                break;
+            default: break;
         }
 
         if (isComparison(insn.op)) {
@@ -222,44 +278,10 @@ Status recoverTypes(const SsaFunction& function, TypeRecovery* out) {
             const SsaId accessed = insn.op == MintOp::kLoad ? insn.dest : insn.use[1];
             if (valid(function, insn.use[0]) && valid(function, accessed)) {
                 const SsaId address = insn.use[0];
-                const SsaValue& addressValue = function.values[address];
-                SsaId base = address;
+                SsaId base = kNoValue;
                 u64 offset = 0;
-                bool usable = true;
-                if (addressValue.def == SsaDef::kInsn &&
-                    addressValue.defIndex < function.insns.size()) {
-                    const SsaInsn& addressInsn = function.insns[addressValue.defIndex];
-                    // kAdd only. A subtraction from a base is a frame slot below a
-                    // pointer, not a field above one, and folding the two together
-                    // produced offsets with the wrong sign.
-                    if (addressInsn.op == MintOp::kAdd &&
-                        valid(function, addressInsn.use[0]) &&
-                        valid(function, addressInsn.use[1])) {
-                        SsaId candidate = addressInsn.use[0];
-                        SsaId constant = addressInsn.use[1];
-                        if (function.values[candidate].storage.space == Space::kConstant) {
-                            std::swap(candidate, constant);
-                        }
-                        if (function.values[constant].storage.space == Space::kConstant) {
-                            base = candidate;
-                            offset = function.values[constant].storage.offset;
-                        } else {
-                            // An index computed at run time: still a pointer, but
-                            // not a fixed field.
-                            usable = false;
-                            markKind(&out->values[address], RecoveredTypeKind::kPointer);
-                        }
-                    } else if (addressInsn.op == MintOp::kSub) {
-                        usable = false;
-                    }
-                }
-                // A constant base is an absolute address — a global, or a literal
-                // pool entry. Those are not one object with members, and grouping
-                // them would invent a structure spanning unrelated globals whose
-                // "fields" are whatever the linker happened to place nearby.
-                if (usable && function.values[base].storage.space == Space::kConstant) {
-                    usable = false;
-                }
+                const bool usable=fieldBase(function,loadSources,memory,address,&base,&offset);
+                markKind(&out->values[address], RecoveredTypeKind::kPointer);
                 if (usable) {
                     // A bare dereference is the field at offset zero. Leaving it out
                     // lost the first member of every structure whose head is read
@@ -271,23 +293,60 @@ Status recoverTypes(const SsaFunction& function, TypeRecovery* out) {
         }
     }
 
-    // Pointer facts can be one add away from the load that exposed them. A small
-    // fixed point is enough for the local arithmetic chains emitted by the lifter.
-    for (unsigned pass = 0; pass < 4; ++pass) {
-        bool changed = false;
-        for (const SsaInsn& insn : function.insns) {
-            if (insn.op != MintOp::kAdd && insn.op != MintOp::kSub) continue;
-            if (!valid(function, insn.dest)) continue;
-            for (unsigned slot = 0; slot < 2; ++slot) {
-                if (!valid(function, insn.use[slot])) continue;
-                if (out->values[insn.use[slot]].kind == RecoveredTypeKind::kPointer &&
-                    out->values[insn.dest].kind != RecoveredTypeKind::kPointer) {
-                    out->values[insn.dest].kind = RecoveredTypeKind::kPointer;
-                    changed = true;
-                }
+    // Propagate established evidence through a worklist rather than an arbitrary
+    // four scans. Constant offsets preserve pointers; pointer differences and
+    // arbitrary integer arithmetic do not. Phi results require agreement on every
+    // incoming edge, so one pointer branch cannot type an unrelated integer branch.
+    const u32 instructionCount=static_cast<u32>(function.insns.size());
+    const size_t nodeCount=function.insns.size()+function.phis.size();
+    std::vector<std::vector<u32>> users(function.values.size());
+    for(u32 n=0;n<instructionCount;++n)if(!function.insns[n].dead)
+        for(auto id:function.insns[n].use)if(valid(function,id))users[id].push_back(n);
+    for(u32 n=0;n<instructionCount;++n) {
+        const auto& insn=function.insns[n];
+        if(!insn.dead && valid(function,insn.dest) && valid(function,loadSources[insn.dest]))users[loadSources[insn.dest]].push_back(n);
+    }
+    for(u32 n=0;n<function.phis.size();++n)if(!function.phis[n].dead)
+        for(auto id:function.phis[n].args)if(valid(function,id))users[id].push_back(instructionCount+n);
+    std::vector<u32> queue;std::vector<bool> queued(nodeCount,true);
+    for(u32 n=0;n<nodeCount;++n)queue.push_back(n);
+    auto adopt=[&](SsaId id,RecoveredTypeKind kind) {
+        if(!valid(function,id) || kind==RecoveredTypeKind::kUnknown || function.values[id].storage.space==Space::kConstant)return;
+        auto& target=out->values[id];
+        if(target.kind==kind || target.kind!=RecoveredTypeKind::kUnknown)return;
+        target.kind=kind;
+        for(auto user:users[id])if(!queued[user]){queued[user]=true;queue.push_back(user);}
+    };
+    for(size_t cursor=0;cursor<queue.size();++cursor) {
+        const u32 node=queue[cursor];queued[node]=false;
+        if(node>=instructionCount) {
+            const auto& phi=function.phis[node-instructionCount];
+            if(phi.dead || phi.args.empty())continue;
+            auto kind=RecoveredTypeKind::kUnknown;bool consistent=true;
+            for(auto id:phi.args) {
+                if(!valid(function,id)){consistent=false;break;}
+                auto candidate=out->values[id].kind;
+                if(candidate==RecoveredTypeKind::kUnknown || (kind!=RecoveredTypeKind::kUnknown&&candidate!=kind)){consistent=false;break;}
+                kind=candidate;
             }
+            if(consistent)adopt(phi.dest,kind);
+            continue;
         }
-        if (!changed) break;
+        const auto& insn=function.insns[node];
+        if(insn.dead || !valid(function,insn.dest))continue;
+        if(insn.op==MintOp::kLoad && valid(function,loadSources[insn.dest])) {
+            const auto source=loadSources[insn.dest];
+            adopt(insn.dest,out->values[source].kind);
+            if(out->values[insn.dest].kind==RecoveredTypeKind::kPointer)adopt(source,RecoveredTypeKind::kPointer);
+        } else if(insn.op==MintOp::kCopy && valid(function,insn.use[0]) && out->values[insn.dest].width==out->values[insn.use[0]].width) {
+            adopt(insn.dest,out->values[insn.use[0]].kind);
+            if(out->values[insn.dest].kind==RecoveredTypeKind::kPointer)adopt(insn.use[0],RecoveredTypeKind::kPointer);
+        } else if((insn.op==MintOp::kAdd || insn.op==MintOp::kSub) && valid(function,insn.use[0]) && valid(function,insn.use[1])) {
+            auto base=insn.use[0],offset=insn.use[1];
+            if(insn.op==MintOp::kAdd && function.values[base].storage.space==Space::kConstant)std::swap(base,offset);
+            if(function.values[offset].storage.space==Space::kConstant && out->values[base].kind==RecoveredTypeKind::kPointer)
+                adopt(insn.dest,RecoveredTypeKind::kPointer);
+        }
     }
 
     for (auto& access : structAccesses) {

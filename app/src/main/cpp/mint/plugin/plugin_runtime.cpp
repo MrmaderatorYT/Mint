@@ -7,10 +7,43 @@
 #include <dlfcn.h>
 #include <map>
 #include <sys/stat.h>
+#ifdef __ANDROID__
+#include <android/dlext.h>
+#include <cerrno>
+#include <fcntl.h>
+#include <linux/memfd.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 namespace mint {
 namespace {
 constexpr size_t kMaxText=1024*1024;
+#ifdef __ANDROID__
+// Isolated Android processes may read a Binder-provided app-data FD but SELinux
+// forbids executable mappings of app_data_file. Copy code inside the isolated
+// worker into its own immutable anonymous file before asking the system linker.
+// No executable bytes are mapped or plugin constructors invoked in the parent.
+int sealedLibrary(int source, off_t size) {
+    const int target=static_cast<int>(syscall(__NR_memfd_create,"mint-plugin",MFD_CLOEXEC|MFD_ALLOW_SEALING));
+    if(target<0)return -1;
+    char buffer[65536];off_t offset=0;
+    while(offset<size) {
+        ssize_t count;
+        do {count=pread(source,buffer,std::min<off_t>(sizeof(buffer),size-offset),offset);}while(count<0&&errno==EINTR);
+        if(count<=0){close(target);return -1;}
+        ssize_t written=0;
+        while(written<count) {
+            ssize_t part;do {part=write(target,buffer+written,count-written);}while(part<0&&errno==EINTR);
+            if(part<=0){close(target);return -1;}written+=part;
+        }
+        offset+=count;
+    }
+    const int seals=F_SEAL_WRITE|F_SEAL_GROW|F_SEAL_SHRINK|F_SEAL_SEAL;
+    if(fcntl(target,F_ADD_SEALS,seals)!=0 || (fcntl(target,F_GET_SEALS)&seals)!=seals){close(target);return -1;}
+    return target;
+}
+#endif
 bool bounded(const char* text,size_t limit){return text && strnlen(text,limit+1)<=limit;}
 bool identifier(const char* text) {
     if(!bounded(text,64) || !*text)return false;
@@ -130,12 +163,23 @@ Status PluginManager::registerBuiltin(const MintPluginV1* descriptor) {
 }
 Status PluginManager::registerBuiltinArchitecture(const MintArchitecturePluginV1* descriptor) { return registerArchitecturePlugin(descriptor); }
 Status PluginManager::registerBuiltinExtension(const MintPluginExtensionV2* descriptor){std::map<std::string,Impl::Pass> passes;std::map<std::string,Impl::Observer> observers;std::map<std::string,std::string> plugins;try{auto status=impl_->prepareExtension(descriptor,&passes,&observers,&plugins);if(!status.ok())return status;}catch(...){return Status::error(ErrorCode::kInternalError,"plugin extension preparation allocation failed");}impl_->passes.swap(passes);impl_->observers.swap(observers);impl_->plugins.swap(plugins);return Status::success();}
-Status PluginManager::load(const std::string& path,bool trustNativeCode) {
+Status PluginManager::load(const std::string& path,bool trustNativeCode,int descriptor) {
     if(!trustNativeCode)return Status::error(ErrorCode::kUnsupported,"native plugins are unrestricted code; explicit trust acknowledgement is required");
     if(path.empty() || path[0]!='/' || path.size()>4096 || path.find('\0')!=std::string::npos)return Status::error(ErrorCode::kBadFormat,"plugin requires an explicit absolute library path");
-    struct stat info{};if(stat(path.c_str(),&info)!=0 || !S_ISREG(info.st_mode) || info.st_size<=0 || info.st_size>16*1024*1024)
+    struct stat info{};if((descriptor>=0?fstat(descriptor,&info):stat(path.c_str(),&info))!=0 || !S_ISREG(info.st_mode) || info.st_size<=0 || info.st_size>16*1024*1024)
         return Status::error(ErrorCode::kBadFormat,"plugin must be a regular library of at most16 MiB");
-    void* library=dlopen(path.c_str(),RTLD_NOW|RTLD_LOCAL);
+    void* library=nullptr;
+    if(descriptor>=0) {
+#ifdef __ANDROID__
+        const int code=sealedLibrary(descriptor,info.st_size);
+        if(code<0)return Status::error(ErrorCode::kUnsupported,"cannot create immutable isolated plugin image");
+        android_dlextinfo options{};options.flags=ANDROID_DLEXT_USE_LIBRARY_FD;options.library_fd=code;
+        library=android_dlopen_ext(path.c_str(),RTLD_NOW|RTLD_LOCAL,&options);
+        close(code);
+#else
+        return Status::error(ErrorCode::kUnsupported,"descriptor plugin loading requires Android");
+#endif
+    } else library=dlopen(path.c_str(),RTLD_NOW|RTLD_LOCAL);
     if(!library){const char* failure=dlerror();return Status::error(ErrorCode::kUnsupported,failure?failure:"cannot load plugin for this host ABI");}
     const auto entry=reinterpret_cast<MintPluginEntryV1>(dlsym(library,"mint_plugin_v1"));
     const auto architectureEntry=reinterpret_cast<MintArchitecturePluginEntryV1>(dlsym(library,"mint_architecture_plugin_v1"));

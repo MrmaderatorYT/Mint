@@ -148,7 +148,7 @@ Status Disassembler::open(Arch arch) {
         case Arch::kRiscV64:
             csArch = CS_ARCH_RISCV;
             csMode = static_cast<cs_mode>((arch == Arch::kRiscV32 ? CS_MODE_RISCV32 : CS_MODE_RISCV64) |
-                                         CS_MODE_RISCV_C | CS_MODE_LITTLE_ENDIAN);
+                                         CS_MODE_RISCV_C | CS_MODE_RISCV_A | CS_MODE_RISCV_FD | CS_MODE_LITTLE_ENDIAN);
             break;
         default:
             return Status::error(ErrorCode::kUnsupported,

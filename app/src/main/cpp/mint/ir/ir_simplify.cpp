@@ -128,11 +128,19 @@ Status simplifyIr(IrFunction* function, IrSimplifyStats* stats) {
     const bool hasNativeReturn = !nativeResults.empty() &&
         std::any_of(function->insns.begin(), function->insns.end(),
                     [](const IrInsn& insn) { return insn.op == MintOp::kReturn; });
+    // Machine calls do not enumerate every physical input register as an IR
+    // operand. A verified callee body, prototype or ABI reconstruction may
+    // observe those registers later. Keep their definitions until those hidden
+    // uses can be represented explicitly; a plain operand may-use scan cannot
+    // prove such writes dead, even if a register is overwritten after the call.
+    const bool hasCall = std::any_of(function->insns.begin(), function->insns.end(),
+        [](const IrInsn& insn) { return insn.op == MintOp::kCall || insn.op == MintOp::kCallInd; });
     std::vector<u8> removed(function->insns.size(), 0);
     for (size_t i = 0; i < function->insns.size(); ++i) {
         IrInsn& insn = function->insns[i];
         if (!insn.dest.valid() || hasSideEffect(insn.op)) continue;
-        bool used=hasNativeReturn && std::any_of(nativeResults.begin(),nativeResults.end(),[&](const auto& result){return insn.dest.overlaps(result);});
+        bool used=(hasCall && insn.dest.isRegister()) ||
+            (hasNativeReturn && std::any_of(nativeResults.begin(),nativeResults.end(),[&](const auto& result){return insn.dest.overlaps(result);}));
         for (size_t j = 0; j < function->insns.size() && !used; ++j) {
             if (i == j) continue;
             for (unsigned slot = 0; slot < 3; ++slot) {

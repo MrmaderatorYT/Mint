@@ -8,7 +8,7 @@
 #include "mint/loader/elf_image.h"
 
 namespace mint {
-enum class SignatureAbi : u8 { kUnknown, kAapcs64, kSysV64, kAapcs32, kRiscV32, kRiscV64, kCdecl32, kWindows64, kStdcall32 };
+enum class SignatureAbi : u8 { kUnknown, kAapcs64, kSysV64, kAapcs32, kRiscV32, kRiscV64, kCdecl32, kWindows64, kStdcall32, kRiscV32F, kRiscV64F, kRiscV32D, kRiscV64D };
 const char* signatureAbiName(SignatureAbi abi);
 struct SignatureDefinition { std::string symbol, declaration; UserPrototype prototype; };
 
@@ -29,7 +29,7 @@ public:
     SignatureAbi abi() const { return abi_; }
     u8 pointerSize() const;
     Status validateFor(Arch architecture, ImageFormat format) const;
-    Status validateFor(const ElfImage& image) const { return validateFor(image.arch(), image.format()); }
+    Status validateFor(const ElfImage& image) const;
     Status define(const std::string& linkageSymbol, const std::string& declaration);
     Status erase(const std::string& linkageSymbol);
     UserPrototype prototypeFor(const std::string& linkageSymbol) const;

@@ -17,6 +17,14 @@ public final class RawImportConfigTest {
         assertEquals("aarch64",config.architecture);assertEquals(0x1000,config.baseAddress);assertEquals(0x1004,config.entryAddress);
         assertEquals("x86-64",new RawImportConfig("x86_64",0,0).architecture);
     }
+    @Test public void bigEndianRawHasDistinctPersistentIdentity() {
+        RawImportConfig big=new RawImportConfig("aarch64:be",0x1000,0x1000);
+        RawImportConfig little=new RawImportConfig("aarch64",0x1000,0x1000);
+        assertTrue(big.bigEndian);assertEquals("aarch64",big.decoderId());
+        assertNotEquals(little.projectSuffix(),big.projectSuffix());
+        assertEquals(big.projectSuffix(),new RawImportConfig(big.architecture,0x1000,0x1000).projectSuffix());
+    }
+    @Test(expected=IllegalArgumentException.class) public void bigEndianRejectsOtherArchitectures() {new RawImportConfig("x86-64:be",0,0);}
     @Test public void unsignedAddressesAndZeroAreValid() {
         RawImportConfig high=RawImportConfig.fromHex("amd64","8000000000000000","fffffffffffffffe");
         assertEquals(Long.MIN_VALUE,high.baseAddress);assertEquals(-2,high.entryAddress);

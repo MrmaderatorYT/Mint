@@ -19,9 +19,10 @@ void require(bool condition, const std::string& message) {
     ++checks;
     if (!condition) { std::cerr << "FAIL: " << message << '\n'; std::exit(1); }
 }
+ByteOrder fixtureOrder=ByteOrder::kLittle;
 struct Bytes : std::vector<u8> {
-    void integer(u64 value, unsigned width) { for (unsigned i = 0; i < width; ++i) push_back(static_cast<u8>(value >> (i * 8))); }
-    void patch(size_t offset, u64 value, unsigned width) { for (unsigned i = 0; i < width; ++i) at(offset + i) = static_cast<u8>(value >> (i * 8)); }
+    void integer(u64 value, unsigned width) { for (unsigned i = 0; i < width; ++i) push_back(static_cast<u8>(value >> ((fixtureOrder==ByteOrder::kBig?width-1-i:i) * 8))); }
+    void patch(size_t offset, u64 value, unsigned width) { for (unsigned i = 0; i < width; ++i) at(offset + i) = static_cast<u8>(value >> ((fixtureOrder==ByteOrder::kBig?width-1-i:i) * 8)); }
     void uleb(u64 value) { do { u8 byte = static_cast<u8>(value & 0x7f); value >>= 7; push_back(byte | (value ? 0x80 : 0)); } while (value); }
     void sleb(i64 value) {
         bool more = true;
@@ -33,7 +34,7 @@ struct Bytes : std::vector<u8> {
     }
     void string(const std::string& value) { insert(end(), value.begin(), value.end()); push_back(0); }
     void expression(const Bytes& value) { uleb(value.size()); insert(end(), value.begin(), value.end()); }
-    ByteView view() const { return ByteView(data(), size()); }
+    ByteView view() const { return ByteView(data(), size(),fixtureOrder); }
 };
 Bytes expression(u8 op, i64 offset) { Bytes bytes; bytes.push_back(op); bytes.sleb(offset); return bytes; }
 void abbrev(Bytes& bytes, u64 code, u64 tag, bool children, std::initializer_list<std::pair<u64, u64>> attrs) {
@@ -329,8 +330,76 @@ void real(const std::string& path) {
 }
 }  // namespace
 
+void gnuSplitMatrix() {
+    for(auto order:{ByteOrder::kLittle,ByteOrder::kBig})for(unsigned offsets:{4u,8u})for(unsigned addresses:{4u,8u}) {
+        fixtureOrder=order;Fixture f;
+        abbrev(f.abbrevBytes,1,0x11,true,{});
+        abbrev(f.abbrevBytes,2,0x24,false,{{3,8},{0x0b,0x0b},{0x3e,0x0b}});
+        abbrev(f.abbrevBytes,3,0x2e,true,{{3,0x1f02},{0x11,0x1f01},{0x12,6},{0x49,0x10}});
+        abbrev(f.abbrevBytes,4,5,false,{{3,0x1f02},{0x49,0x10},{2,0x17}});
+        abbrev(f.abbrevBytes,5,0x34,false,{{3,0x1f02},{0x49,0x10},{2,0x0a}});f.abbrevBytes.push_back(0);
+        for(const auto* text:{"gnu_entry","gnu_arg","gnu_global"}){f.stringOffsets.integer(f.strings.size(),offsets);f.strings.string(text);}
+        f.addresses.integer(0x3000,addresses);f.addresses.integer(0x5000,addresses);
+        if(offsets==8){f.info.integer(0xffffffffu,4);f.info.integer(0,8);}else f.info.integer(0,4);
+        f.info.integer(4,2);f.info.integer(0,offsets);f.info.push_back(addresses);f.info.uleb(1);
+        const auto typeOffset=f.info.size();f.info.uleb(2);f.info.string("GNUInt");f.info.push_back(4);f.info.push_back(5);
+        f.info.uleb(3);f.info.uleb(0);f.info.uleb(0);f.info.integer(0x20,4);f.info.integer(typeOffset,offsets);
+        f.info.uleb(4);f.info.uleb(1);f.info.integer(typeOffset,offsets);f.info.integer(0,offsets);f.info.push_back(0);
+        f.info.uleb(5);f.info.uleb(2);f.info.integer(typeOffset,offsets);f.info.push_back(2);f.info.push_back(0xfb);f.info.push_back(1);f.info.push_back(0);
+        f.info.patch(offsets==8?4:0,f.info.size()-(offsets==8?12:4),offsets);
+        f.locations.push_back(3);f.locations.uleb(0);f.locations.integer(0x20,4);f.locations.integer(1,2);f.locations.push_back(0x50);f.locations.push_back(0);
+        auto sections=f.sections();sections.split=true;sections.splitAddressesBase=0;
+        DwarfReport report;require(readDwarf(sections,&report).ok(),"GNU split4 endian/offset/address matrix");
+        require(function(report,"gnu_entry",0x3000).prototype=="int32_t(int32_t gnu_arg)","headerless GNU strings/addresses resolve exact prototype");
+        const auto& arg=variable(report,"gnu_arg");require(arg.locations.size()==1&&arg.locations[0].range.low==0x3000&&arg.locations[0].range.high==0x3020&&arg.locations[0].location.reg==0,"GNU fixed32 range length/fixed16 expression length");
+        require(variable(report,"gnu_global").location.kind==DwarfLocation::Kind::kAddress&&variable(report,"gnu_global").location.address==0x5000,"GNU addr_index resolves global storage");
+        for(size_t length=0;length<f.locations.size();++length){auto truncated=sections;truncated.locations=sections.locations.subview(0,length);DwarfReport sentinel;sentinel.units=99;require(!readDwarf(truncated,&sentinel).ok()&&sentinel.units==99,"GNU location-list truncation never publishes partial report");}
+    }
+    fixtureOrder=ByteOrder::kLittle;
+}
+
+void versionWidthMatrix() {
+    for(auto order:{ByteOrder::kLittle,ByteOrder::kBig})for(unsigned version:{2u,3u,4u,5u})
+    for(unsigned offsets:{4u,8u})for(unsigned addresses:{4u,8u}) {
+        fixtureOrder=order;Fixture f;
+        abbrev(f.abbrevBytes,1,0x11,true,{{0x11,1}});
+        abbrev(f.abbrevBytes,2,0x24,false,{{3,8},{0x0b,0x0b},{0x3e,0x0b}});
+        abbrev(f.abbrevBytes,3,0x2e,false,{{3,8},{0x11,1},{0x12,version<4?1u:6u},{0x49,0x10}});
+        abbrev(f.abbrevBytes,4,0x34,false,{{3,8},{0x49,0x10},{2,0x0a}});
+        abbrev(f.abbrevBytes,5,0x04,true,{{3,8},{0x0b,0x0b}});
+        abbrev(f.abbrevBytes,6,0x28,false,{{3,8},{0x1c,0x0d}});
+        f.abbrevBytes.push_back(0);
+        if(offsets==8){f.info.integer(0xffffffffu,4);f.info.integer(0,8);}else f.info.integer(0,4);
+        f.info.integer(version,2);
+        if(version==5){f.info.push_back(1);f.info.push_back(addresses);f.info.integer(0,offsets);}
+        else {f.info.integer(0,offsets);f.info.push_back(addresses);}
+        f.info.uleb(1);f.info.integer(0x1000,addresses);
+        const auto typeOffset=f.info.size();f.info.uleb(2);f.info.string("MatrixInt");f.info.push_back(4);f.info.push_back(5);
+        f.info.uleb(3);f.info.string("matrix_entry");f.info.integer(0x1000,addresses);f.info.integer(version<4?0x1020:0x20,version<4?addresses:4);
+        // DWARF2 ref_addr uses address width, later versions use offset width.
+        f.info.integer(typeOffset,version==2?addresses:offsets);
+        f.info.uleb(4);f.info.string("matrix_global");f.info.integer(typeOffset,version==2?addresses:offsets);
+        f.info.push_back(addresses+1);f.info.push_back(3);f.info.integer(0x4000,addresses);
+        f.info.uleb(5);f.info.string("LegacyEnum");f.info.push_back(4);
+        f.info.uleb(6);f.info.string("Negative");const auto negativeOffset=f.info.size();f.info.sleb(-1);f.info.uleb(6);f.info.string("Positive");f.info.sleb(2);f.info.push_back(0);f.info.push_back(0);
+        const auto header=offsets==8?12:4;f.info.patch(offsets==8?4:0,f.info.size()-header,offsets);
+        DwarfReport report;const auto status=readDwarf(f.sections(),&report);
+        require(status.ok(),"DWARF2--5/endian/address/offset matrix: "+status.message());
+        const auto& fn=function(report,"matrix_entry",0x1000);
+        require(report.byteOrder==order&&report.versions==std::vector<u16>{u16(version)}&&report.offsetSizes==std::vector<u8>{u8(offsets)},"matrix reports actual format metadata");
+        require(report.addressSize==addresses&&report.units==1&&fn.ranges.size()==1&&fn.ranges[0].high==0x1020&&fn.prototype=="int32_t(void)","version-dependent high_pc/ref_addr retain exact type and range");
+        require(variable(report,"matrix_global").location.address==0x4000,"matrix fixed-width DW_OP_addr");
+        require(type(report,"LegacyEnum").declaration=="LegacyEnum=enum:i32{Negative=-1;Positive=2}","legacy enum signed storage follows negative enumerator and exact extent");
+        auto ambiguous=f;ambiguous.info.at(negativeOffset)=1;DwarfReport uncertain;
+        require(readDwarf(ambiguous.sections(),&uncertain).ok()&&uncertain.partial&&std::none_of(uncertain.types.begin(),uncertain.types.end(),[](const auto& value){return value.name=="LegacyEnum"&&!value.declaration.empty();}),"legacy positive-only ambiguous enum never invents signedness");
+        for(size_t length=0;length<f.info.size();++length){auto sections=f.sections();sections.info=sections.info.subview(0,length);DwarfReport sentinel;sentinel.units=99;const auto bad=readDwarf(sections,&sentinel);require(bad.ok()||sentinel.units==99,"matrix truncation is transactional");}
+    }
+    fixtureOrder=ByteOrder::kLittle;
+    std::cout << "DWARF version/endian/width matrix: " << checks << " checks passed\n";
+}
+
 int main(int argc, char** argv) {
     if (argc == 2 && std::string(argv[1]) == "--emit-fixture") { std::cout << kRealFixture; return 0; }
     if (argc == 3 && std::string(argv[1]) == "--real") { real(argv[2]); return 0; }
-    require(argc == 1, "usage: mint_dwarf_test [--emit-fixture | --real ELF]"); synthetic();
+    require(argc == 1, "usage: mint_dwarf_test [--emit-fixture | --real ELF]"); synthetic();fixtureOrder=ByteOrder::kBig;synthetic();gnuSplitMatrix();versionWidthMatrix();
 }

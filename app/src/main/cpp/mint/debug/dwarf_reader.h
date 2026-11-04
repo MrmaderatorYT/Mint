@@ -58,6 +58,9 @@ struct DwarfReport {
     std::string format = "DWARF";
     size_t units = 0, dies = 0;
     u8 addressSize = 0;
+    ByteOrder byteOrder=ByteOrder::kLittle;
+    std::vector<u16> versions;
+    std::vector<u8> offsetSizes;
     std::vector<DwarfFunction> functions;
     std::vector<DwarfType> types;
     std::vector<DwarfVariable> variables;
@@ -78,7 +81,7 @@ struct DwarfSections {
     std::map<u64, u64> splitAddressBases;
 };
 
-// Bounded little-endian DWARF 2--5 reader, including zlib-compressed sections
+// Bounded little/big-endian DWARF 2--5 reader (DWARF32/64 offsets), including zlib-compressed sections
 // and explicitly identity-bound external/split objects. Source/typed-storage
 // metadata and symbolic/composite locations are decoded without evaluating a
 // runtime register file, CFA, memory load or historical entry value. Unhandled

@@ -37,6 +37,9 @@ struct DataTypeLayout {
     bool packed = false;
     std::vector<DataTypeField> fields;
     std::vector<DataTypeEnumerator> enumerators;
+    // Preserve array identity through typedef aliases for ABI flattening.
+    std::string elementType;
+    u64 elementCount = 0;
 };
 
 struct DataTypeDefinition {

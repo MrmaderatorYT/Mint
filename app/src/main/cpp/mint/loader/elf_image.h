@@ -128,7 +128,7 @@ public:
     /// Explicit slice selection for a universal Mach-O. Normal load chooses the
     /// first supported slice in table order, recorded in warnings.
     Status loadMachOSlice(ByteView file, Arch architecture);
-    Status loadRaw(ByteView file, Arch architecture, Address base, Address entry);
+    Status loadRaw(ByteView file, Arch architecture, Address base, Address entry, ByteOrder order = ByteOrder::kLittle);
 
     ImageFormat format() const { return format_; }
     const char* formatName() const;
@@ -148,6 +148,10 @@ public:
     bool loaded() const { return loaded_; }
 
     Arch arch() const { return arch_; }
+    u32 elfFlags() const { return elfFlags_; }
+    // Container-proven convention; empty when no platform override is known.
+    // Unimplemented RISC-V E/Q modes stay explicit, never silently become soft.
+    std::string defaultCallingConvention() const;
     u16 objectType() const { return type_; }
     Address entryPoint() const { return entry_; }
     const std::string& soname() const { return soname_; }
@@ -273,6 +277,7 @@ private:
     /// Sorted ARM mapping/function mode changes: true is Thumb, false is ARM.
     std::vector<std::pair<Address, bool>> armModes_;
     u16 type_ = 0;
+    u32 elfFlags_ = 0;
     Address entry_ = 0;
     bool stripped_ = true;
     std::string soname_;

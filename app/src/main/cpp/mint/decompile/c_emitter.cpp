@@ -24,6 +24,27 @@ namespace mint {
 namespace {
 
 std::string blockLabel(u32 id) { return "block_" + std::to_string(id); }
+std::string abiStorageBits(const AbiStoragePiece& piece,const std::string& value) {
+    if(piece.registerShift)return "op_abi_register_piece("+value+", "+std::to_string(piece.width)+", "+std::to_string(piece.registerShift)+")";
+    return piece.nanBoxed ? "(0xffffffff00000000ULL | ((uint64_t)("+value+") & 0xffffffffULL))" : value;
+}
+std::string abiContentBits(const AbiStoragePiece& piece,const std::string& value) {
+    if(!piece.registerShift)return value;
+    return "(((uint64_t)("+value+") >> "+std::to_string(piece.registerShift)+") & ((1ULL << "+std::to_string(piece.width*8)+") - 1))";
+}
+bool riscvNarrowInteger(Arch arch,const AbiStoragePiece& piece,const DataTypeLayout& layout) {
+    return (arch==Arch::kRiscV32||arch==Arch::kRiscV64) && piece.storage.valid() && !piece.floating &&
+        !layout.isFloating && (layout.kind==DataTypeKind::kPrimitive||layout.kind==DataTypeKind::kEnum) && layout.size<piece.storage.size;
+}
+std::string abiScalarBits(Arch arch,const AbiStoragePiece& piece,const DataTypeLayout& layout,const std::string& value) {
+    if(riscvNarrowInteger(arch,piece,layout)) {
+        // psABI integer scalars first widen according to their type to 32 bits,
+        // then sign-extend to XLEN. RV64 uint32_t therefore sign-extends too.
+        const bool sign=layout.isSigned || layout.size==4;
+        return "(uint"+std::to_string(piece.storage.size*8)+"_t)("+(sign?"int":"uint")+std::to_string(layout.size*8)+"_t)("+value+")";
+    }
+    return abiStorageBits(piece,value);
+}
 
 /// A symbol name is not necessarily a C identifier — compiler-generated names such
 /// as `__cxx_global_array_dtor.80` carry a dot — so anything outside the identifier
@@ -149,7 +170,7 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
     ExprBuilder expr(function);
     StackAnalysis stack;
     MemoryAnalysis memory;
-    const auto memoryStatus=analyzeMemory(function,&memory);
+    const auto memoryStatus=analyzeMemory(function,&memory,options.memoryFunctions);
     const Status stackStatus = options.recoverStackVariables
         ? analyzeStackMemory(function, &stack) : Status::success();
 
@@ -165,7 +186,7 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
         : Status::error(ErrorCode::kUnsupported, "AST structuring disabled");
 
     TypeRecovery types;
-    recoverTypes(function, &types);
+    recoverTypes(function, &types, memoryStatus.ok()?&memory:nullptr);
     auto kindOf = [&](SsaId id) {
         return id < types.values.size() ? types.values[id].kind : RecoveredTypeKind::kUnknown;
     };
@@ -190,7 +211,8 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
     }
 
     std::unordered_set<SsaId> parameters;
-    const UserPrototype userPrototype = options.prototypes ? options.prototypes(function.entry) : UserPrototype{};
+    UserPrototype userPrototype = options.prototypes ? options.prototypes(function.entry) : UserPrototype{};
+    userPrototype.byteOrder=function.byteOrder;
     AbiModel functionAbi;
     const Status abiStatus=userPrototype.valid() ? buildAbiModel(function.arch,userPrototype,&functionAbi,options.typeLayouts) : Status::error(ErrorCode::kNotFound,"no authoritative ABI");
     DataTypeManager builtinLayouts(function.arch==Arch::kArm32||function.arch==Arch::kThumb||function.arch==Arch::kX86_32||function.arch==Arch::kRiscV32?4:8);
@@ -215,8 +237,9 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
             DataTypeLayout parameterLayout;const bool knownLayout=declaredLayout(parameter.type,&parameterLayout).ok();
             const bool semanticFloat=knownLayout&&parameterLayout.isFloating,semanticAggregate=knownLayout&&compositeLayout(parameterLayout);
             for(const auto& piece:abiValue.pieces) {
-                const bool simple=abiValue.pieces.size()==1 && !abiValue.indirect && !piece.floating && !semanticFloat && !semanticAggregate && abiValue.size<=piece.storage.size;
-                const std::string component=abiValue.indirect ? "op_abi_indirect_copy_address("+parameter.name+")" : semanticFloat&&abiValue.pieces.size()==1 ? "op_abi_fp_bits("+parameter.name+", "+std::to_string(piece.width)+")" : "op_abi_piece("+parameter.name+", "+std::to_string(piece.valueOffset)+", "+std::to_string(piece.width)+")";
+                const bool simple=abiValue.pieces.size()==1 && !abiValue.indirect && !piece.floating && !semanticFloat && !semanticAggregate && abiValue.size<=piece.storage.size && !(knownLayout&&riscvNarrowInteger(function.arch,piece,parameterLayout));
+                const std::string rawComponent=abiValue.indirect ? "op_abi_indirect_copy_address("+parameter.name+")" : semanticFloat&&abiValue.pieces.size()==1 ? "op_abi_fp_bits("+parameter.name+", "+std::to_string(piece.width)+")" : !semanticFloat&&!semanticAggregate&&abiValue.pieces.size()==1 ? parameter.name : std::string(function.byteOrder==ByteOrder::kBig?"op_abi_piece_be(":"op_abi_piece(")+parameter.name+", "+std::to_string(piece.valueOffset)+", "+std::to_string(piece.width)+")";
+                const std::string component=knownLayout?abiScalarBits(function.arch,piece,parameterLayout,rawComponent):abiStorageBits(piece,rawComponent);
                 if(!piece.storage.valid()) {
                     bool readonly=stack.barriers==0 && stack.unknownWrites==0 && !stack.escapedStackAddress;
                     for(const auto& access:stack.accesses)if(access.store && stack.slots[access.slot].offset==piece.stackOffset)readonly=false;
@@ -317,7 +340,7 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
             else out<<"/* Authoritative ABI cannot be mapped: "<<abiStatus.message()<<". Storage kept explicit, no positional register guess. */\n";
         }
         if(staleLocalEdits)out<<"/* "<<staleLocalEdits<<" saved local edits do not match the current analysis; retained in project, not applied. */\n";
-        if(memoryStatus.ok())out<<"/* General memory: "<<memory.exactDependencies<<" exact store/load dependencies; "<<memory.callBarriers<<" alias barriers; "<<memory.unresolvedAccesses<<" unresolved accesses. */\n";
+        if(memoryStatus.ok())out<<"/* General memory: "<<memory.exactDependencies<<" exact store/load dependencies; "<<memory.callBarriers<<" alias barriers; "<<memory.unresolvedAccesses<<" unresolved accesses; "<<memory.readOnlyCalls<<" proven read-only calls; "<<memory.selectiveCalls<<" selective write calls. */\n";
         else out<<"/* General memory evidence unavailable; explicit loads/stores retained. */\n";
         out << "/* loops: " << structure.loops.size() << ", switch-like blocks: "
             << structure.switchBlocks.size() << " */\n";
@@ -685,14 +708,14 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
 
             switch (insn.op) {
                 case MintOp::kReturn: {
-                    if(userPrototype.valid() && abiStatus.ok() && (functionAbi.result.indirect || functionAbi.result.pieces.size()>1)) {
-                        out<<"    return "<<(functionFloatingResult?"op_abi_unpack_":"op_abi_aggregate_result_")<<identifier(userPrototype.returnType)<<"(";
+                    if(userPrototype.valid() && abiStatus.ok() && (functionAbi.result.indirect || functionAbi.result.pieces.size()>1 || compositeLayout(functionResultLayout))) {
+                        out<<"    return "<<(functionFloatingResult?"op_abi_unpack_":"op_abi_aggregate_result_")<<(function.byteOrder==ByteOrder::kBig?"be_":"")<<identifier(userPrototype.returnType)<<"(";
                         bool first=true;
                         for(const auto& piece:functionAbi.result.pieces) {
                             SsaId id=kNoValue;
                             if(piece.storage==result)for(const auto& returned:function.returnValues)if(returned.first==index)id=returned.second;
                             for(const auto& returned:function.abiReturnValues)if(returned.instruction==index && returned.storage==piece.storage)id=returned.value;
-                            if(!first)out<<", ";first=false;out<<(id==kNoValue ? "op_undefined()" : expr.value(id));
+                            if(!first)out<<", ";first=false;out<<abiContentBits(piece,id==kNoValue ? "op_undefined()" : expr.value(id));
                         }
                         if(functionAbi.result.indirect)out<<"op_abi_hidden_result_pointer()";
                         out<<");\n";continue;
@@ -752,6 +775,24 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
                     if(insn.dest!=kNoValue && function.values[insn.dest].uses)out << "      " << expr.name(insn.dest) << " = atomic_expected_" << index << ";\n";
                     out << "    }\n";continue;
                 }
+                case MintOp::kAtomicMinS:case MintOp::kAtomicMaxS:
+                case MintOp::kAtomicMinU:case MintOp::kAtomicMaxU: {
+                    const auto width=unsigned(widthOf(insn.dest))*8;
+                    const auto type="uint"+std::to_string(width)+"_t";
+                    const bool signedValue=insn.op==MintOp::kAtomicMinS || insn.op==MintOp::kAtomicMaxS;
+                    const bool maximum=insn.op==MintOp::kAtomicMaxS || insn.op==MintOp::kAtomicMaxU;
+                    const auto compareType=(signedValue?"int":"uint")+std::to_string(width)+"_t";
+                    const auto suffix=std::to_string(index);
+                    const auto pointer="atomic_pointer_"+suffix, old="atomic_old_"+suffix, operand="atomic_operand_"+suffix, next="atomic_next_"+suffix;
+                    out << "    { " << type << " *" << pointer << " = (" << type << "*)(uintptr_t)(" << expr.value(insn.use[0]) << ");\n";
+                    out << "      " << type << " " << operand << " = " << expr.value(insn.use[1]) << ";\n";
+                    out << "      " << type << " " << old << " = __atomic_load_n(" << pointer << ", __ATOMIC_SEQ_CST), " << next << ";\n";
+                    out << "      do { " << next << " = ((" << compareType << ")" << old << (maximum?" > ":" < ") << "(" << compareType << ")" << operand << ") ? " << old << " : " << operand << ";\n";
+                    out << "      } while (!__atomic_compare_exchange_n(" << pointer << ", &" << old << ", " << next << ", 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));\n";
+                    if(insn.dest!=kNoValue && function.values[insn.dest].uses)out << "      " << expr.name(insn.dest) << " = " << old << ";\n";
+                    out << "    }\n";continue;
+                }
+                case MintOp::kAtomicAnd:case MintOp::kAtomicOr:case MintOp::kAtomicXor:
                 case MintOp::kAtomicLoad:case MintOp::kAtomicExchange:case MintOp::kAtomicAdd:
                     if(insn.dest==kNoValue || !function.values[insn.dest].uses){out<<"    "<<expr.instruction(insn)<<";\n";continue;}
                     break;
@@ -784,6 +825,7 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
                     if (options.prototypes && insn.op==MintOp::kCall && insn.use[0]<function.values.size() && function.values[insn.use[0]].storage.isConstant())
                         calleePrototype=options.prototypes(function.values[insn.use[0]].storage.offset);
                     AbiModel calleeAbi;
+                    calleePrototype.byteOrder=function.byteOrder;
                     const auto calleeStatus=calleePrototype.valid() ? buildAbiModel(function.arch,calleePrototype,&calleeAbi,options.typeLayouts) : Status::error(ErrorCode::kNotFound,"unknown callee ABI");
                     size_t argumentIndex=0;
                     if(calleeStatus.ok()) {
@@ -802,17 +844,22 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
                                     const auto sp=reaching.at(block.id,index,Varnode::reg(spOffset,calleeAbi.pointerWidth));
                                     const i64 callSkew=function.arch==Arch::kX86_64 ? 8 : function.arch==Arch::kX86_32 ? 4 : 0;
                                     const auto displacement=piece.stackOffset-callSkew;
-                                    if(sp!=kNoValue)value="*(uint"+std::to_string(unsigned(piece.width)*8)+"_t*)((uintptr_t)"+expr.value(sp)+(displacement<0 ? " - " : " + ")+std::to_string(displacement<0 ? -displacement : displacement)+")";
+                                    if(sp!=kNoValue) {
+                                        const auto address="((uintptr_t)"+expr.value(sp)+(displacement<0 ? " - " : " + ")+std::to_string(displacement<0 ? -displacement : displacement)+")";
+                                        if(function.byteOrder==ByteOrder::kBig || (piece.width!=1&&piece.width!=2&&piece.width!=4&&piece.width!=8))
+                                            value=std::string(function.byteOrder==ByteOrder::kBig?"op_abi_stack_load_be(":"op_abi_stack_load(")+address+", "+std::to_string(piece.width)+")";
+                                        else value="*(uint"+std::to_string(unsigned(piece.width)*8)+"_t*)"+address;
+                                    }
                                     else value="op_abi_stack_argument("+std::to_string(displacement)+", "+std::to_string(piece.width)+")";
                                 }
-                                pieces.push_back(value);
+                                pieces.push_back(abiContentBits(piece,value));
                             }
                             const auto type=localCType(calleePrototype.parameters[i].type);
                             DataTypeLayout argumentLayout;const bool known=declaredLayout(calleePrototype.parameters[i].type,&argumentLayout).ok();
                             if(argument.indirect && pieces.size()==1)arguments+="*("+type+"*)(uintptr_t)("+pieces[0]+")";
                             else if(pieces.size()==1 && known && argumentLayout.isFloating)arguments+="op_abi_float_argument("+pieces[0]+", "+std::to_string(argumentLayout.size)+")";
                             else if(pieces.size()==1 && !(known&&compositeLayout(argumentLayout)))arguments+="("+type+")("+pieces[0]+")";
-                            else {arguments+="op_abi_unpack_"+identifier(type)+"(";for(size_t p=0;p<pieces.size();++p){if(p)arguments+=", ";arguments+=pieces[p];}arguments+=")";}
+                            else {arguments+="op_abi_unpack_"+std::string(function.byteOrder==ByteOrder::kBig?"be_":"")+identifier(type)+"(";for(size_t p=0;p<pieces.size();++p){if(p)arguments+=", ";arguments+=pieces[p];}arguments+=")";}
                         }
                     } else if(!calleePrototype.valid())for (const Varnode& reg : argumentRegisters(function.arch)) {
                         if (calleePrototype.valid() && argumentIndex>=calleePrototype.parameters.size()) break;
@@ -897,14 +944,15 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
                         out<<"    "<<localCType(calleePrototype.returnType)<<" "<<captured<<" = "<<site<<";\n";
                         for(const auto& piece:calleeAbi.result.pieces)for(SsaId clobber:insn.clobbers) {
                             if(clobber>=function.values.size() || function.values[clobber].storage!=piece.storage || !function.values[clobber].uses)continue;
-                            out<<"    "<<expr.name(clobber)<<" = op_abi_extract("<<captured<<", "<<piece.valueOffset<<", "<<unsigned(piece.width)<<");\n";
+                            out<<"    "<<expr.name(clobber)<<" = "<<abiStorageBits(piece,std::string(function.byteOrder==ByteOrder::kBig?"op_abi_extract_be(":"op_abi_extract(")+captured+", "+std::to_string(piece.valueOffset)+", "+std::to_string(piece.width)+")")<<";\n";
                             assignedResults.insert(clobber);
                         }
                         // Indirect result writes are represented by the typed
                         // call. No hidden-pointer register return is fabricated.
                     } else if (wantsResult && !(calleePrototype.valid() && calleePrototype.returnType=="void")) {
                         const bool floating=calleeStatus.ok() && calleeAbi.result.pieces.size()==1 && knownReturnLayout && calleeReturnLayout.isFloating;
-                        out << "    " << expr.name(produced) << " = " << (floating ? "op_abi_result_bits("+site+", "+std::to_string(calleeAbi.result.pieces[0].width)+")" : site) << ";\n";
+                        const std::string rawResult=floating ? "op_abi_result_bits("+site+", "+std::to_string(calleeAbi.result.pieces[0].width)+")" : site;
+                        out << "    " << expr.name(produced) << " = " << (calleeStatus.ok()&&calleeAbi.result.pieces.size()==1&&knownReturnLayout ? abiScalarBits(function.arch,calleeAbi.result.pieces[0],calleeReturnLayout,rawResult) : rawResult) << ";\n";
                         assignedResults.insert(produced);
                     } else {
                         out << "    " << site << ";\n";

@@ -95,7 +95,7 @@ void command(Session& session,const std::string& line,bool allowEdits=false) {
 }
 }
 int main(int argc,char** argv) {
-    if(argc<2){std::cerr<<"mint_headless INPUT [--project PROGRAM] [--raw ARCH BASE ENTRY | --macho ARCH] [--script FILE] [--lua FILE] [--allow-edits] [--plugin PATH --trust-native] [COMMAND...]\n"
+    if(argc<2){std::cerr<<"mint_headless INPUT [--project PROGRAM] [--raw ARCH BASE ENTRY [--raw-endian little|big] | --macho ARCH] [--script FILE] [--lua FILE] [--allow-edits] [--plugin PATH --trust-native] [COMMAND...]\n"
         "Read: summary functions listing decompile ir cfg refs provenance search types types-c prototypes abi locals signatures cxx dwarf source json diff\n"
         "Program: type erase-type import-library import-debug local local-clear edit undo redo reanalyze asm-preview asm export-patched\n"
         "Tracking: compare-open compare-project compare-confirm compare-save compare-load compare-diff compare-preview compare-apply\n"
@@ -103,7 +103,7 @@ int main(int argc,char** argv) {
         "Lua: text-only, bounded and read-only unless --allow-edits. Native plugins are unrestricted trusted code, not sandboxed. Debugger sockets require explicit numeric endpoints.\n"
         "DSL scripts: one command per line, # comments, fail-fast. Explicit Program-edit commands require a writable project; earlier committed edits remain undoable. Transfer requires --allow-edits.\n";return 2;}
     try {
-        std::string project,script,lua,rawName;std::vector<std::string> plugins;bool allowEdits=false,trustNative=false,macho=false;Arch arch=Arch::kUnknown;Address base=0,entry=0;int i=2;
+        std::string project,script,lua,rawName;std::vector<std::string> plugins;bool allowEdits=false,trustNative=false,macho=false;ByteOrder rawOrder=ByteOrder::kLittle;bool rawOrderSet=false;Arch arch=Arch::kUnknown;Address base=0,entry=0;int i=2;
         while(i<argc && std::string(argv[i]).rfind("--",0)==0) {
             std::string option=argv[i++];
             if((option=="--project" || option=="--script") && i<argc){(option=="--project"?project:script)=argv[i++];}
@@ -112,6 +112,7 @@ int main(int argc,char** argv) {
             else if(option=="--plugin" && i<argc)plugins.push_back(argv[i++]);
             else if(option=="--trust-native")trustNative=true;
             else if(option=="--macho" && i<argc){rawName=argv[i++];macho=true;}
+            else if(option=="--raw-endian" && i<argc) {const std::string value=argv[i++];if(value!="big" && value!="little")throw std::runtime_error("raw endian must be little or big");rawOrder=value=="big"?ByteOrder::kBig:ByteOrder::kLittle;rawOrderSet=true;}
             else if(option=="--raw" && i+2<argc) {
                 rawName=argv[i++];
                 base=address(argv[i++]);entry=address(argv[i++]);
@@ -125,7 +126,8 @@ int main(int argc,char** argv) {
             for(const auto& description:architectureDescriptions())if(description.id==rawName || archName(description.architecture)==rawName)arch=description.architecture;
             if(arch==Arch::kUnknown)throw std::runtime_error("unknown raw architecture (see mint.architectures() in Lua; load its explicitly trusted decoder first)");
         }
-        checked(rawName.empty()?session.openPath(argv[1]):macho?session.openMachOPath(argv[1],arch):session.openRawPath(argv[1],arch,base,entry));
+        if(rawOrderSet && (rawName.empty() || macho))throw std::runtime_error("--raw-endian requires --raw");
+        checked(rawName.empty()?session.openPath(argv[1]):macho?session.openMachOPath(argv[1],arch):session.openRawPath(argv[1],arch,base,entry,rawOrder));
         if(!project.empty())checked(session.attachProject(project));checked(session.analyze());
         if(!lua.empty()) {
             std::ifstream file(lua,std::ios::binary);if(!file)throw std::runtime_error("cannot read Lua script");

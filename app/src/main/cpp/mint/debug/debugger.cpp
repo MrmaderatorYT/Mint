@@ -1,4 +1,6 @@
 #include "mint/debug/debugger.h"
+#include "mint/debug/rsp_modules.h"
+#include "mint/debug/rsp_target_description.h"
 
 #include <algorithm>
 #include <array>
@@ -209,6 +211,7 @@ struct DebuggerClient::Impl {
     std::unique_ptr<DebuggerTransport> transport;
     std::array<u8, 4096> buffer{}; size_t cursor = 0, end = 0;
     bool noAck = false, vContinue = false, vStep = false, initialized = false, configurationDone = false, instructionStep = false, attached = false;
+    bool svr4Libraries = false, genericLibraries = false;
     size_t packetSize = kMaxRsp; u32 seq = 0, incomingSeq = 0; u64 stoppedEpoch = 0;
     std::map<u32, std::string> requests;
     std::map<u32, Json> responses;
@@ -367,13 +370,15 @@ Status DebuggerClient::connectTcp(const DebuggerEndpoint& endpoint, DebuggerBack
 }
 Status DebuggerClient::connect(std::unique_ptr<DebuggerTransport> transport, DebuggerBackend backend, const DebuggerOptions& options) {
     if (!transport) return bad("null transport");
-    if ((backend != DebuggerBackend::kGdbRemote && backend != DebuggerBackend::kLldbDap) || !options.timeoutMs || options.timeoutMs > 30000 || options.registerLayout.size() > 1024) { transport->close(); return bad("invalid backend/options"); }
+    if ((backend != DebuggerBackend::kGdbRemote && backend != DebuggerBackend::kLldbDap) || !options.timeoutMs || options.timeoutMs > 30000 || options.registerLayout.size() > 1024 ||
+        (options.registerByteOrder!=ByteOrder::kLittle&&options.registerByteOrder!=ByteOrder::kBig)) { transport->close(); return bad("invalid backend/options"); }
     size_t bytes = 0; std::set<std::string> names; std::set<u32> numbers;
     for (const auto& reg : options.registerLayout) {
         if (reg.name.empty() || reg.name.size() > 128 || !utf8(reg.name) || !reg.bits || reg.bits % 8 || reg.bits > 4096 || !names.insert(reg.name).second || !numbers.insert(reg.number).second || reg.bits / 8 > kMaxRsp / 2 - bytes) { transport->close(); return bad("invalid exact RSP register layout"); }
         bytes += reg.bits / 8;
     }
     std::unique_ptr<Impl> candidate(new Impl); candidate->transport = std::move(transport); candidate->options = options; candidate->state.backend = backend; candidate->state.state = DebuggerState::kConnected;
+    std::sort(candidate->options.registerLayout.begin(), candidate->options.registerLayout.end(), [](const auto& a, const auto& b) { return a.number < b.number; });
     const auto limit = candidate->deadline(); Status status;
     if (backend == DebuggerBackend::kGdbRemote) {
         std::string features; status = candidate->rsp("qSupported:swbreak+;vContSupported+", &features, limit); if (!status.ok()) return status;
@@ -381,6 +386,8 @@ Status DebuggerClient::connect(std::unique_ptr<DebuggerTransport> transport, Deb
         for (size_t start = 0; start < features.size();) { const auto finish = features.find(';', start); const auto item = features.substr(start, finish == std::string::npos ? finish : finish - start);
             if (item.compare(0, 11, "PacketSize=") == 0) { u64 value = 0; if (!integer(item.substr(11), 16, &value) || value < 64) return candidate->fail(bad("invalid GDB PacketSize")); candidate->packetSize = static_cast<size_t>(std::min<u64>(value, kMaxRsp)); }
             if (item == "QStartNoAckMode+") noAck = true;
+            if (item == "qXfer:libraries-svr4:read+") candidate->svr4Libraries = true;
+            if (item == "qXfer:libraries:read+") candidate->genericLibraries = true;
             if (finish == std::string::npos) break; start = finish + 1;
         }
         if (noAck) { std::string reply; status = candidate->rsp("QStartNoAckMode", &reply, limit); if (!status.ok()) return status; if (reply == "OK") candidate->noAck = true; else if (!reply.empty()) return candidate->fail(bad("invalid no-ack negotiation reply")); }
@@ -483,7 +490,25 @@ Status DebuggerClient::stackFrames(size_t maximum,std::vector<DebuggerFrame>* ou
     if(p.state.state!=DebuggerState::kStopped||p.stoppedEpoch!=epoch)return unsupported("Target changed during stack read");*out=std::move(candidate);return Status::success();
 }
 Status DebuggerClient::modules(std::vector<DebuggerModule>* out){
-    auto& p=*impl_;if(!out)return bad("missing module output");auto status=p.stopped();if(!status.ok())return status;if(p.state.backend!=DebuggerBackend::kLldbDap)return unsupported("RSP module inventory is target-specific; configure explicit image mappings or use DAP modules");
+    auto& p=*impl_;if(!out)return bad("missing module output");auto status=p.stopped();if(!status.ok())return status;
+    if(p.state.backend==DebuggerBackend::kGdbRemote) {
+        if(!p.svr4Libraries&&!p.genericLibraries)return unsupported("RSP server did not advertise library inventory; use explicit mappings or DAP modules");
+        const auto limit=p.deadline(),epoch=p.stoppedEpoch;std::string xml,reply;bool complete=false;
+        for(size_t page=0;page<1024;++page) {
+            status=p.rsp(std::string(p.svr4Libraries?"qXfer:libraries-svr4:read::":"qXfer:libraries:read::")+hex(xml.size())+",400",&reply,limit);
+            if(!status.ok())return status;
+            if(reply.empty())return unsupported("RSP server does not provide advertised library inventory");
+            if((reply[0]!='m'&&reply[0]!='l')||reply.size()-1>1024||reply.size()-1>1024*1024-xml.size()||(reply[0]=='m'&&reply.size()==1))return p.fail(bad("invalid/oversized RSP library page"));
+            xml+=reply.substr(1);if(reply[0]=='l'){complete=true;break;}
+        }
+        if(!complete)return p.fail(bad("RSP library page limit exceeded"));
+        std::vector<DebuggerModule> candidate;
+        if(!utf8(xml))return p.fail(bad("RSP library XML is not UTF-8"));
+        status=p.svr4Libraries?parseRspSvr4Modules(xml,&candidate):parseRspModules(xml,&candidate);if(!status.ok())return p.fail(status);
+        for(auto& module:candidate){module.name=safeText(module.name);module.path=safeText(module.path);}
+        if(p.state.state!=DebuggerState::kStopped||p.stoppedEpoch!=epoch)return unsupported("Target changed during module inventory");
+        *out=std::move(candidate);return Status::success();
+    }
     const auto epoch=p.stoppedEpoch;Json body;status=p.dap("modules","{\"startModule\":0,\"moduleCount\":4096}",&body,p.deadline());if(!status.ok())return status;const auto* values=body.get("modules");if(!values||values->kind!=Json::Array||values->array.size()>4096)return p.fail(bad("invalid DAP module inventory"));std::vector<DebuggerModule> candidate;
     for(const auto& value:values->array){DebuggerModule module;const auto* id=value.get("id");if(!id||(id->kind!=Json::Number&&id->kind!=Json::String))return p.fail(bad("invalid DAP module ID"));module.id=safeText(id->text);module.name=safeText(value.string("name"));module.path=safeText(value.string("path"));const auto range=value.string("addressRange");if(!range.empty()){const auto dash=range.find('-');if(dash==std::string::npos||!addressValue(range.substr(0,dash),&module.start)||!addressValue(range.substr(dash+1),&module.end)||module.end<module.start)return p.fail(bad("invalid DAP module address range"));}candidate.push_back(std::move(module));}
     if(p.state.state!=DebuggerState::kStopped||p.stoppedEpoch!=epoch)return unsupported("Target changed during module inventory");*out=std::move(candidate);return Status::success();
@@ -491,26 +516,28 @@ Status DebuggerClient::modules(std::vector<DebuggerModule>* out){
 Status DebuggerClient::programCounter(Address* out){
     if(!out)return bad("missing PC output");if(impl_->state.backend==DebuggerBackend::kLldbDap){std::vector<DebuggerFrame> frames;auto status=stackFrames(1,&frames);if(!status.ok())return status;if(frames.empty()||frames[0].pc==kNoAddress)return unsupported("DAP adapter did not report an instruction address");*out=frames[0].pc;return Status::success();}
     std::vector<DebuggerRegister> registers;auto status=readRegisters(&registers);if(!status.ok())return status;
-    for(const auto& reg:registers)if(reg.name=="pc"||reg.name=="rip"||reg.name=="eip"){if(!reg.available||reg.bytes.empty()||reg.bytes.size()>8)return unsupported("PC unavailable or wider than supported address width");Address pc=0;for(size_t i=0;i<reg.bytes.size();++i)pc|=Address(reg.bytes[i])<<(8*i);*out=pc;return Status::success();}return unsupported("RSP PC needs an exact little-endian target register layout");
+    for(const auto& reg:registers)if(reg.name=="pc"||reg.name=="rip"||reg.name=="eip"){if(!reg.available||reg.bytes.empty()||reg.bytes.size()>8)return unsupported("PC unavailable or wider than supported address width");Address pc=0;for(size_t i=0;i<reg.bytes.size();++i)pc|=Address(reg.bytes[i])<<(8*(impl_->options.registerByteOrder==ByteOrder::kBig?reg.bytes.size()-1-i:i));*out=pc;return Status::success();}return unsupported("RSP PC needs an exact target register layout and byte order");
 }
 Status DebuggerClient::discoverRegisterLayout(){
-    auto& p=*impl_;auto status=p.stopped();if(!status.ok())return status;if(p.state.backend!=DebuggerBackend::kGdbRemote)return unsupported("RSP target XML only");const auto limit=p.deadline();std::string xml,reply;size_t totalXml=0;std::set<std::string> visited;
-    std::function<Status(const std::string&,unsigned,std::string*)> fetch=[&](const std::string& file,unsigned depth,std::string* output)->Status{
-        if(depth>8||visited.size()>=16||!visited.insert(file).second||file.empty()||file.size()>128||file[0]=='/'||file.find("..")!=std::string::npos||file.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/")!=std::string::npos)return unsupported("Target XML include path/cycle/depth budget exceeded");std::string document;
-        for(size_t page=0;page<64;++page){auto fetched=p.rsp("qXfer:features:read:"+file+":"+hex(document.size())+",400",&reply,limit);if(!fetched.ok())return fetched;if(reply.empty())return unsupported("Server does not expose requested target feature XML");if((reply[0]!='m'&&reply[0]!='l')||reply.size()==1||reply.size()-1>65536-totalXml)return p.fail(bad("invalid/oversized RSP target XML"));document+=reply.substr(1);totalXml+=reply.size()-1;if(reply[0]=='l')break;if(page==63)return unsupported("Target XML page budget exceeded");}
-        // This is a tag reader, not an entity-capable XML engine. DTD hints are
-        // inert; entity declarations/references are explicitly refused.
-        if(document.find("<!ENTITY")!=std::string::npos||document.find('&')!=std::string::npos)return unsupported("Target XML entity expansion is unsupported");
-        for(size_t at=0;(at=document.find("<xi:include",at))!=std::string::npos;){const auto end=document.find('>',at),href=document.find("href",at);if(end==std::string::npos||href==std::string::npos||href>end)return p.fail(bad("malformed target XML include"));size_t cursor=href+4;while(cursor<end&&std::isspace(static_cast<unsigned char>(document[cursor])))++cursor;if(cursor==end||document[cursor++]!='=')return p.fail(bad("malformed target XML include href"));while(cursor<end&&std::isspace(static_cast<unsigned char>(document[cursor])))++cursor;if(cursor==end||(document[cursor]!='\''&&document[cursor]!='\"'))return p.fail(bad("target XML href must be quoted"));const char marker=document[cursor++];const auto finish=document.find(marker,cursor);if(finish==std::string::npos||finish>end)return p.fail(bad("unterminated target XML href"));std::string included;auto fetched=fetch(document.substr(cursor,finish-cursor),depth+1,&included);if(!fetched.ok())return fetched;document.replace(at,end-at+1,included);at+=included.size();}
-        *output=std::move(document);return Status::success();
+    auto& p=*impl_;auto status=p.stopped();if(!status.ok())return status;
+    if(p.state.backend!=DebuggerBackend::kGdbRemote)return unsupported("RSP target XML only");
+    const auto limit=p.deadline(),epoch=p.stoppedEpoch;size_t totalXml=0;
+    const RspTargetXmlFetcher fetch=[&](const std::string& file,std::string* document)->Status{
+        std::string candidate,reply;
+        for(size_t page=0;page<64;++page){
+            auto fetched=p.rsp("qXfer:features:read:"+file+":"+hex(candidate.size())+",400",&reply,limit);
+            if(!fetched.ok())return fetched;
+            if(reply.empty())return unsupported("Server does not expose requested target feature XML");
+            if((reply[0]!='m'&&reply[0]!='l')||(reply[0]=='m'&&reply.size()==1)||reply.size()-1>1024||reply.size()-1>65536-totalXml)return p.fail(bad("invalid/oversized RSP target XML"));
+            candidate+=reply.substr(1);totalXml+=reply.size()-1;
+            if(reply[0]=='l'){*document=std::move(candidate);return Status::success();}
+        }
+        return p.fail(bad("Target XML page budget exceeded"));
     };
-    status=fetch("target.xml",0,&xml);if(!status.ok())return status;
-    std::vector<DebuggerRegisterSpec> layout;std::set<u32> numbers;std::set<std::string> names;u64 next=0;size_t bytes=0;
-    for(size_t at=0;(at=xml.find("<reg",at))!=std::string::npos;){if(at+4<xml.size()&&xml[at+4]!=' '&&xml[at+4]!='\t'&&xml[at+4]!='\r'&&xml[at+4]!='\n'){at+=4;continue;}const auto end=xml.find('>',at);if(end==std::string::npos)return p.fail(bad("unterminated XML register tag"));std::map<std::string,std::string> attrs;size_t cursor=at+4;while(cursor<end){while(cursor<end&&(std::isspace(static_cast<unsigned char>(xml[cursor]))||xml[cursor]=='/'))++cursor;if(cursor==end)break;const auto start=cursor;while(cursor<end&&(std::isalnum(static_cast<unsigned char>(xml[cursor]))||xml[cursor]=='_'||xml[cursor]=='-'))++cursor;const auto key=xml.substr(start,cursor-start);while(cursor<end&&std::isspace(static_cast<unsigned char>(xml[cursor])))++cursor;if(key.empty()||cursor==end||xml[cursor++]!='=')return p.fail(bad("invalid XML register attribute"));while(cursor<end&&std::isspace(static_cast<unsigned char>(xml[cursor])))++cursor;if(cursor==end||(xml[cursor]!='\''&&xml[cursor]!='\"'))return p.fail(bad("XML attribute must be quoted"));const char quoteChar=xml[cursor++];const auto finish=xml.find(quoteChar,cursor);if(finish==std::string::npos||finish>end||!attrs.emplace(key,xml.substr(cursor,finish-cursor)).second)return p.fail(bad("invalid duplicate XML attribute"));cursor=finish+1;}
-        u64 bits=0,id=next;if(!integer(attrs["bitsize"],10,&bits)||!bits||bits%8||bits>4096||(!attrs["regnum"].empty()&&!integer(attrs["regnum"],10,&id))||id>UINT_MAX||attrs["name"].empty()||attrs["name"].size()>128||!names.insert(attrs["name"]).second||!numbers.insert(static_cast<u32>(id)).second||layout.size()>=1024||bits/8>kMaxRsp/2-bytes)return p.fail(bad("invalid XML register metadata"));
-        // The g-packet is register-number order. Gaps are not guessed.
-        if(id!=layout.size())return unsupported("Non-contiguous XML register numbers need an explicit exact packet layout");layout.push_back({attrs["name"],static_cast<u32>(id),static_cast<u32>(bits)});bytes+=bits/8;next=id+1;at=end+1;
-    }if(layout.empty())return unsupported("Target XML contains no flattened register definitions");p.options.registerLayout=std::move(layout);return Status::success();
+    std::vector<DebuggerRegisterSpec> layout;status=readRspTargetDescription(fetch,&layout);
+    if(!status.ok())return status.code()==ErrorCode::kBadFormat?p.fail(status):status;
+    if(p.state.state!=DebuggerState::kStopped||p.stoppedEpoch!=epoch)return unsupported("Target changed during target XML read");
+    p.options.registerLayout=std::move(layout);return Status::success();
 }
 Status DebuggerClient::setImageMappings(const std::vector<DebuggerImageMapping>& mappings){
     if(mappings.size()>4096)return bad("image mapping limit exceeded");for(size_t i=0;i<mappings.size();++i){const auto& a=mappings[i];if(!a.size||a.imageStart>kNoAddress-a.size||a.runtimeStart>kNoAddress-a.size||a.module.size()>4096)return bad("invalid image mapping extent");for(size_t j=0;j<i;++j){const auto& b=mappings[j];if((a.imageStart<b.imageStart+b.size&&b.imageStart<a.imageStart+a.size)||(a.runtimeStart<b.runtimeStart+b.size&&b.runtimeStart<a.runtimeStart+a.size))return bad("ambiguous overlapping image mapping");}}impl_->mappings=mappings;return Status::success();

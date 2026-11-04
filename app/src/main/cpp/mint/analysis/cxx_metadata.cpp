@@ -1,5 +1,6 @@
 #include "mint/analysis/cxx_metadata.h"
 #include "mint/analysis/exception_metadata.h"
+#include "mint/analysis/cxx_msvc_metadata.h"
 
 #include <algorithm>
 #include <map>
@@ -232,6 +233,7 @@ private:
 }  // namespace
 
 CxxMetadataReport inspectCxxMetadata(const ElfImage& image, size_t limit) {
+    if(image.format()==ImageFormat::kPe64)return inspectMicrosoftCxxMetadata(image,limit);
     CxxMetadataReport report;
     if (image.format() != ImageFormat::kElf64 && image.format() != ImageFormat::kElf32 && image.format() != ImageFormat::kMachO64) {
         report.notes.push_back("Itanium metadata decoding requires a supported little-endian ELF/Mach-O image; Microsoft RTTI is a different ABI.");
@@ -294,7 +296,7 @@ CxxMetadataReport inspectCxxMetadata(const ElfImage& image, size_t limit) {
 std::string cxxMetadataText(const ElfImage& image, size_t limit) {
     const auto report = inspectCxxMetadata(image, limit);
     std::ostringstream out;
-    out << "C++ metadata (symbol/relocation-backed Itanium ABI)\n";
+    out << (image.format()==ImageFormat::kPe64?"C++ metadata (export/COL-backed Microsoft ABI)\n":"C++ metadata (symbol/relocation-backed Itanium ABI)\n");
     for (const auto& r : report.records) {
         out << "\n0x" << std::hex << r.address << std::dec << " " << kindName(r.kind) << " " << r.display
             << (r.defined ? "" : " [import]") << (r.complete ? " [decoded]" : " [partial]") << '\n';
@@ -307,8 +309,12 @@ std::string cxxMetadataText(const ElfImage& image, size_t limit) {
             if (slot.target != kNoAddress) out << " -> 0x" << slot.target;
             out << std::dec << " " << slot.symbol << (slot.executable ? " [code]" : " [relocation]") << '\n';
         }
-        for (const auto& base : r.bases)
-            out << "  base: " << base.name << " offset=" << base.offset << (base.isVirtual ? " [virtual; offset is vtable displacement]" : "") << (base.isPublic ? " [public]" : " [non-public]") << '\n';
+        for (const auto& base : r.bases) {
+            out << "  base: " << base.name << " offset=" << base.offset;
+            if(base.usesPmd)out<<" PMD("<<base.offset<<", "<<base.vbptrOffset<<", "<<base.vbtableOffset<<")"<<(base.isVirtual?" [virtual; runtime vbtable required]":"");
+            else if(base.isVirtual)out<<" [virtual; offset is vtable displacement]";
+            out<<(base.isPublic?" [public]":" [non-public]")<<(base.ambiguous?" [ambiguous]":"")<<'\n';
+        }
         for (size_t index = 1; index < r.addressPoints.size(); ++index) {
             const auto& point = r.addressPoints[index];
             out << "  secondary address-point=0x" << std::hex << point.addressPoint << std::dec << " offset-to-top=" << point.offsetToTop << " methods=" << point.slots.size() << '\n';
@@ -323,6 +329,7 @@ std::string cxxMetadataText(const ElfImage& image, size_t limit) {
         for (const auto& base : klass.bases) {
             out << "  " << base.name << (base.isVirtual ? " virtual" : " nonvirtual") << " base";
             if (!base.isVirtual || base.virtualOffsetResolved) out << " object-offset=" << base.objectOffset;
+            else if(base.usesPmd)out << " PMD=("<<base.offset<<", "<<base.vbptrOffset<<", "<<base.vbtableOffset<<") [runtime object required]";
             else out << " vtable-displacement=" << base.offset << " [unresolved object offset]";
             out << '\n';
         }

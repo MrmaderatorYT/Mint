@@ -55,7 +55,7 @@ struct Cursor {
     bool integer(unsigned bytes, u64* value) {
         if (bytes > 8 || pos > end || bytes > end - pos) return false;
         *value = 0;
-        for (unsigned i = 0; i < bytes; ++i) *value |= u64(view.data()[pos++]) << (i * 8);
+        for (unsigned i = 0; i < bytes; ++i) *value |= u64(view.data()[pos++]) << ((view.byteOrder()==ByteOrder::kBig?bytes-1-i:i) * 8);
         return true;
     }
     bool byte(u8* value) { u64 n = 0; if (!integer(1, &n)) return false; *value = static_cast<u8>(n); return true; }
@@ -140,7 +140,7 @@ struct Contribution {
 class Reader {
 public:
     Reader(const DwarfSections& sections, DwarfReport* report) : s_(sections), report_(*report) {}
-    Status run();
+    Status run(bool identitiesOnly=false);
 private:
     void warn(const std::string& message) {
         report_.partial = true;
@@ -356,6 +356,7 @@ Status Reader::parseUnits() {
             if (units_[unitIndex].root == kNoParent) return malformed("compilation unit has no root DIE");
             Unit& saved = units_[unitIndex];
             number(saved.root, kStrBase, &saved.stringsBase); number(saved.root, kAddrBase, &saved.addressesBase);
+            if(saved.addressesBase==kNoAddress)number(saved.root,0x2133,&saved.addressesBase); // DW_AT_GNU_addr_base.
             number(saved.root, kRngBase, &saved.rangesBase); number(saved.root, kLocBase, &saved.locationsBase);
             if (!saved.splitId) number(saved.root, 0x2131, &saved.splitId); // GNU DW_AT_dwo_id.
             if (saved.splitId) { report_.splitIds.push_back(saved.splitId); report_.splitAddressBases[saved.splitId] = saved.addressesBase; }
@@ -364,7 +365,12 @@ Status Reader::parseUnits() {
                 if (!add(saved.start, saved.typeOffset, &target) || target >= saved.end || !byOffset_.count(target) || !typeSignatures_.emplace(saved.signature, target).second) return malformed("invalid/duplicate DWARF type-unit signature");
             }
             if (s_.split) {
-                if (saved.stringsBase == kNoAddress) saved.stringsBase = saved.version == 5 ? 8 : 0;
+                if (saved.stringsBase == kNoAddress) saved.stringsBase = saved.version == 5 ? (saved.offsetSize==8?16:8) : 0;
+                if(saved.version==5) {
+                    const u64 base=saved.offsetSize==8?20:12;
+                    if(saved.locationsBase==kNoAddress && !s_.locationLists.empty())saved.locationsBase=base;
+                    if(saved.rangesBase==kNoAddress && !s_.rangeLists.empty())saved.rangesBase=base;
+                }
                 if (saved.addressesBase == kNoAddress) {
                     const auto found = s_.splitAddressBases.find(saved.splitId);
                     saved.addressesBase = found != s_.splitAddressBases.end() ? found->second : s_.splitAddressesBase;
@@ -415,9 +421,10 @@ std::string Reader::string(size_t die, u64 name) {
     if (unit.stringsBase == kNoAddress || value->value > (~u64(0) - unit.stringsBase) / unit.offsetSize)
         { warn("Indexed strings have no valid DW_AT_str_offsets_base."); return {}; }
     offset = unit.stringsBase + value->value * unit.offsetSize;
-    const auto* table = contribution(0, unit, unit.stringsBase);
-    if (!table || value->value >= table->entries) { warn("Indexed string refers outside its DWARF5 contribution."); return {}; }
-    Cursor offsets(s_.stringOffsets, offset); offsets.end = table->end;
+    const bool gnu=unit.version<5 && value->form==0x1f02 && s_.split;
+    const auto* table = gnu ? nullptr : contribution(0, unit, unit.stringsBase);
+    if (!gnu && (!table || value->value >= table->entries)) { warn("Indexed string refers outside its DWARF5 contribution."); return {}; }
+    Cursor offsets(s_.stringOffsets, offset);if(table)offsets.end = table->end;
     if (!offsets.integer(unit.offsetSize, &stringOffset)) { warn("Indexed string offset is out of bounds."); return {}; }
     Cursor strings(s_.strings, stringOffset); std::string result;
     if (!strings.string(&result) || !textBudget(result.size())) { warn("Indexed string is out of bounds or exceeds budget."); return {}; }
@@ -425,6 +432,10 @@ std::string Reader::string(size_t die, u64 name) {
 }
 bool Reader::indexedAddress(const Unit& unit, u64 index, Address* out) {
     if (unit.addressesBase == kNoAddress || index > (~u64(0) - unit.addressesBase) / unit.addressSize) return false;
+    if(unit.version<5 && s_.split) {
+        Cursor cursor(s_.addresses,unit.addressesBase+index*unit.addressSize);
+        return cursor.integer(unit.addressSize,out);
+    }
     const auto* table = contribution(1, unit, unit.addressesBase);
     if (!table || index >= table->entries) return false;
     Cursor cursor(s_.addresses, unit.addressesBase + index * unit.addressSize); cursor.end = table->end;
@@ -579,6 +590,11 @@ DwarfLocation Reader::expression(ByteView bytes, const Unit& unit) {
                 if (unit.addressSize == 4) value = static_cast<u32>(value);
                 term.numeric = true; term.number = value; term.text = "0x" + hex(value);
                 term.location.kind = DwarfLocation::Kind::kAddress; term.location.address = value; stack.push_back(std::move(term));
+            } else if(op==0xa1||op==0xa2||op==0xfb||op==0xfc) {
+                u64 index=0;valid=cursor.uleb(&index)&&indexedAddress(unit,index,&value);
+                term.numeric=true;term.number=value;term.text="0x"+hex(value);
+                term.location.kind=(op==0xa2||op==0xfc)?DwarfLocation::Kind::kValue:DwarfLocation::Kind::kAddress;
+                term.location.address=value;stack.push_back(std::move(term));
             } else if ((op >= 0x50 && op <= 0x6f) || op == 0x90) {
                 value = op - 0x50; if (op == 0x90) valid = cursor.uleb(&value) && value <= 65535;
                 term.text = "reg(" + std::to_string(value) + ')'; term.location.kind = DwarfLocation::Kind::kRegister; term.location.reg = static_cast<u32>(value);
@@ -679,9 +695,9 @@ DwarfLocation Reader::expression(ByteView bytes, const Unit& unit) {
     } else if (op == 0x92) {
         valid = cursor.uleb(&value) && value <= 65535 && cursor.sleb(&offset);
         result.kind = DwarfLocation::Kind::kRegisterOffset; result.reg = static_cast<u32>(value); result.offset = offset;
-    } else if (op == 0xa1) {
+    } else if (op == 0xa1 || op==0xa2 || op==0xfb || op==0xfc) {
         valid = cursor.uleb(&value) && indexedAddress(unit, value, &result.address);
-        result.kind = DwarfLocation::Kind::kAddress;
+        result.kind = (op==0xa2||op==0xfc)?DwarfLocation::Kind::kValue:DwarfLocation::Kind::kAddress;
     } else if (op == 0x9c) {
         // CFA is not an absolute SP offset without the unwind program. Preserve
         // this symbolic distinction instead of claiming a concrete stack slot.
@@ -747,7 +763,7 @@ Status Reader::locations(size_t die, DwarfVariable* out) {
         if (++locationOperations_ > 200000) return tooLarge();
         u64 begin = 0, end = 0, length = 0;
         bool isDefault = false;
-        if (unit.version < 5) {
+        if (unit.version < 5 && !s_.split) {
             if (!cursor.integer(unit.addressSize, &begin) || !cursor.integer(unit.addressSize, &end)) return malformed("truncated debug_loc");
             if (!begin && !end) return Status::success();
             const u64 sentinel = unit.addressSize == 8 ? ~u64(0) : 0xffffffffU;
@@ -760,7 +776,9 @@ Status Reader::locations(size_t die, DwarfVariable* out) {
             if (kind == 6) { if (!cursor.integer(unit.addressSize, &base)) return malformed("truncated location base"); continue; }
             if (kind == 2 || kind == 3) {
                 u64 first = 0, second = 0;
-                if (!cursor.uleb(&first) || !cursor.uleb(&second) || !indexedAddress(unit, first, &begin)) return malformed("invalid indexed location range");
+                const bool decodedFirst=cursor.uleb(&first);
+                const bool decodedSecond=unit.version<5&&kind==3?cursor.integer(4,&second):cursor.uleb(&second);
+                if (!decodedFirst || !decodedSecond || !indexedAddress(unit, first, &begin)) return malformed("invalid indexed location range");
                 if (kind == 2 ? !indexedAddress(unit, second, &end) : !add(begin, second, &end)) return malformed("invalid location range end");
             } else if (kind == 4) {
                 if (!cursor.uleb(&begin) || !cursor.uleb(&end) || !add(base, begin, &begin) || !add(base, end, &end)) return malformed("invalid offset location range");
@@ -770,7 +788,7 @@ Status Reader::locations(size_t die, DwarfVariable* out) {
             } else if (kind == 8) {
                 if (!cursor.integer(unit.addressSize, &begin) || !cursor.uleb(&length) || !add(begin, length, &end)) return malformed("invalid start/length location range");
             } else { warn("Unknown location-list entry opcode; remaining list omitted."); return Status::success(); }
-            if (!cursor.uleb(&length)) return malformed("truncated location expression length");
+            if (unit.version<5 ? !cursor.integer(2,&length) : !cursor.uleb(&length)) return malformed("truncated location expression length");
         }
         if (!isDefault && end < begin) return malformed("reversed location-list range");
         ByteView bytes;
@@ -922,6 +940,18 @@ Reader::TypeInfo Reader::type(size_t die, unsigned depth, bool behindPointer) {
         if (referencedType(die) == kNoParent) {
             base.body = primitiveType(die, statedSize); base.expression = base.body; base.size = statedSize;
             base.alignment = static_cast<u32>(std::max<u64>(1, statedSize)); base.valid = !base.body.empty();
+            // Older producers omit both DW_AT_type and DW_AT_encoding. A
+            // negative enumerator proves signed storage only when every value
+            // fits the stated extent. Positive-only ambiguous cases stay unknown.
+            if(!base.valid && hasSize && (statedSize==1||statedSize==2||statedSize==4||statedSize==8)) {
+                bool negative=false,fit=true;size_t count=0;
+                for(auto child:node.children)if(dies_[child].tag==0x28) {
+                    i64 value=0;if(!signedNumber(child,kConstValue,&value)){fit=false;break;}
+                    negative|=value<0;++count;
+                    if(statedSize<8){const i64 limit=i64{1}<<(statedSize*8-1);fit&=value>=-limit&&value<limit;}
+                }
+                if(count&&negative&&fit){base.body=base.expression="i"+std::to_string(statedSize*8);base.valid=true;}
+            }
         }
         info.valid = base.valid && base.size && (base.body.size() && (base.body[0] == 'i' || base.body[0] == 'u'));
         info.size = base.size; info.alignment = base.alignment; info.body = "enum:" + base.expression + '{';
@@ -1103,6 +1133,12 @@ Status Reader::lineTable(const Unit& unit, u64 offset) {
 
 Status Reader::buildReport() {
     report_.units = units_.size(); report_.dies = dies_.size();
+    report_.byteOrder=s_.info.byteOrder();
+    for(const auto& unit:units_) {
+        if(std::find(report_.versions.begin(),report_.versions.end(),unit.version)==report_.versions.end())report_.versions.push_back(unit.version);
+        if(std::find(report_.offsetSizes.begin(),report_.offsetSizes.end(),unit.offsetSize)==report_.offsetSizes.end())report_.offsetSizes.push_back(unit.offsetSize);
+    }
+    std::sort(report_.versions.begin(),report_.versions.end());std::sort(report_.offsetSizes.begin(),report_.offsetSizes.end());
     if (!units_.empty()) report_.addressSize = units_.front().addressSize;
     std::set<std::string> names;
     for (size_t i = 0; i < dies_.size(); ++i) if (typeTag(dies_[i].tag)) {
@@ -1202,12 +1238,13 @@ Status Reader::buildReport() {
     return Status::success();
 }
 
-Status Reader::run() {
+Status Reader::run(bool identitiesOnly) {
     for (const auto section : {s_.info, s_.abbrev, s_.strings, s_.line, s_.lineStrings, s_.stringOffsets, s_.addresses, s_.ranges, s_.rangeLists, s_.locations, s_.locationLists})
         if (section.size() > kMaxSection) return tooLarge();
     if (s_.info.empty()) return Status::error(ErrorCode::kNotFound, "DWARF .debug_info is absent");
     if (s_.abbrev.empty()) return malformed(".debug_abbrev is absent");
     auto status = parseUnits(); if (!status.ok()) return status;
+    if(identitiesOnly)return Status::success(); // Resolve address-dependent metadata only after identity binding.
     return buildReport();
 }
 
@@ -1242,7 +1279,7 @@ Status dwarfSections(const ElfImage& image, OwnedDwarfSections* out) {
         if (!gnu && !(section->flags & 0x800)) { *result = bytes; return Status::success(); }
         u64 length = 0, offset = 0;
         if (gnu) {
-            u32 marker = 0; if (!bytes.read(0, &marker) || marker != 0x42494c5a || !bytes.covers(4, 8)) return malformed("invalid GNU ZLIB section header");
+            u32 marker = 0; if (!bytes.withByteOrder(ByteOrder::kLittle).read(0, &marker) || marker != 0x42494c5a || !bytes.covers(4, 8)) return malformed("invalid GNU ZLIB section header");
             for (size_t i = 4; i < 12; ++i) length = (length << 8) | bytes.data()[i];
             offset = 12;
         } else {
@@ -1262,7 +1299,7 @@ Status dwarfSections(const ElfImage& image, OwnedDwarfSections* out) {
         inflateEnd(&stream);
         if (!valid) return malformed("invalid/truncated/trailing compressed DWARF stream");
         out->total += length; auto inserted = out->storage.emplace(name, std::move(decoded));
-        *result = ByteView(inserted.first->second.data(), inserted.first->second.size()); return Status::success();
+        *result = ByteView(inserted.first->second.data(), inserted.first->second.size(),bytes.byteOrder()); return Status::success();
     };
     for (auto pair : {std::pair<const char*, ByteView*>{".debug_info", &out->sections.info}, {".debug_abbrev", &out->sections.abbrev},
         {".debug_str", &out->sections.strings}, {".debug_line", &out->sections.line}, {".debug_line_str", &out->sections.lineStrings},
@@ -1294,7 +1331,7 @@ Status readDwarf(const ElfImage& image, DwarfReport* out) {
 
 Status readDwarf(const ElfImage& image, const ElfImage& externalDebug, DwarfReport* out, bool allowUnverified) {
     if (!out) return malformed("null report output");
-    if (image.arch() != externalDebug.arch() || image.pointerSize() != externalDebug.pointerSize()) return malformed("external debug object has different target architecture");
+    if (image.arch() != externalDebug.arch() || image.pointerSize() != externalDebug.pointerSize() || image.memory().byteOrder()!=externalDebug.memory().byteOrder()) return malformed("external debug object has different target architecture");
     OwnedDwarfSections primary, external;
     Status status = dwarfSections(image, &primary); if (!status.ok()) return status;
     status = dwarfSections(externalDebug, &external); if (!status.ok()) return status;
@@ -1314,19 +1351,21 @@ Status readDwarf(const ElfImage& image, const ElfImage& externalDebug, DwarfRepo
         if (firstId != secondId) return malformed("external debug object build-ID mismatch");
         verified = true; evidence = "ELF build-ID";
     }
+    DwarfReport skeletonReport;
     if (external.sections.split) {
-        DwarfReport skeletonReport; status = readDwarf(primary.sections, &skeletonReport); if (!status.ok()) return status;
-        DwarfReport dwoReport; status = readDwarf(external.sections, &dwoReport); if (!status.ok()) return status;
+        status = readDwarf(primary.sections, &skeletonReport); if (!status.ok()) return status;
+        DwarfReport dwoReport; status = Reader(external.sections,&dwoReport).run(true); if (!status.ok()) return status;
         const auto skeleton = skeletonReport.splitIds, dwo = dwoReport.splitIds;
         if (skeleton.empty() || skeleton != dwo) return malformed("split DWARF unit identity mismatch or unavailable");
         // Skeleton owns .debug_addr and its base. Split-unit DIEs own the rest.
         external.sections.addresses = primary.sections.addresses;
         external.sections.splitAddressBases = skeletonReport.splitAddressBases;
-        verified = true; evidence = "DWARF5 skeleton/split unit ID";
+        verified = true; evidence = "DWARF skeleton/split unit ID";
     }
     if (!verified && !allowUnverified) return malformed("external debug object has no matching debuglink, build-ID or split-unit identity; explicit unverified acknowledgement required");
     DwarfReport candidate; status = readDwarf(external.sections, &candidate);
     if (!status.ok()) return status;
+    if(external.sections.split && candidate.sources.empty())candidate.sources=std::move(skeletonReport.sources);
     candidate.warnings.push_back(verified ? "External debug object explicitly selected and verified by " + evidence + "; no filesystem path was followed automatically." :
         "UNVERIFIED external debug object: explicit user acknowledgement; no target identity is available and metadata must not be treated as proven.");
     if (!verified) candidate.partial = true;
@@ -1336,6 +1375,11 @@ Status readDwarf(const ElfImage& image, const ElfImage& externalDebug, DwarfRepo
 std::string dwarfReportText(const DwarfReport& report) {
     std::ostringstream out;
     out << report.format << ' ' << report.units << " units / " << report.dies << (report.format == "DWARF" ? " DIEs" : " records") << (report.partial ? " [partial]" : "") << '\n';
+    if(report.format=="DWARF") {
+        out << "Data byte order: " << (report.byteOrder==ByteOrder::kBig?"big-endian":"little-endian") << "; versions:";
+        for(auto version:report.versions)out << ' ' << version;
+        out << "; offset formats:";for(auto width:report.offsetSizes)out << " DWARF" << unsigned(width)*8;out << '\n';
+    }
     for (const auto& function : report.functions) {
         out << "\nfunction " << function.name;
         if (function.entry != kNoAddress) out << " @ 0x" << std::hex << function.entry << std::dec;

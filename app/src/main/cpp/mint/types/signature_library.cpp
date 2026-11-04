@@ -9,9 +9,12 @@ namespace {
 Status bad(const std::string& message) { return Status::error(ErrorCode::kBadFormat, "signature library: " + message); }
 SignatureAbi parseAbi(const std::string& name) {
     for (SignatureAbi abi : {SignatureAbi::kAapcs64, SignatureAbi::kSysV64, SignatureAbi::kAapcs32,
-         SignatureAbi::kRiscV32, SignatureAbi::kRiscV64, SignatureAbi::kCdecl32,SignatureAbi::kWindows64,SignatureAbi::kStdcall32}) if (name == signatureAbiName(abi)) return abi;
+         SignatureAbi::kRiscV32, SignatureAbi::kRiscV64, SignatureAbi::kCdecl32,SignatureAbi::kWindows64,SignatureAbi::kStdcall32,
+         SignatureAbi::kRiscV32F,SignatureAbi::kRiscV64F,SignatureAbi::kRiscV32D,SignatureAbi::kRiscV64D}) if (name == signatureAbiName(abi)) return abi;
     return SignatureAbi::kUnknown;
 }
+bool rv32(SignatureAbi abi){return abi==SignatureAbi::kRiscV32||abi==SignatureAbi::kRiscV32F||abi==SignatureAbi::kRiscV32D;}
+bool rv64(SignatureAbi abi){return abi==SignatureAbi::kRiscV64||abi==SignatureAbi::kRiscV64F||abi==SignatureAbi::kRiscV64D;}
 size_t parameterSlots(SignatureAbi abi) {
     switch (abi) {
         case SignatureAbi::kAapcs64: case SignatureAbi::kRiscV32: case SignatureAbi::kRiscV64:return 8;
@@ -56,11 +59,10 @@ Status prototype(SignatureAbi abi,const std::string& text,UserPrototype* output,
     for(unsigned char byte:text)if(byte<0x20 || byte>=0x7f)return bad("prototype must be single-line ASCII");
     UserPrototype parsed;const Status status=parseUserPrototype(trim(text),&parsed);
     if(!status.ok() || !parsed.valid())return bad("invalid type-only scalar prototype; no floats/aggregates/varargs/storage directives");
-    const u8 width=(abi==SignatureAbi::kAapcs32 || abi==SignatureAbi::kRiscV32 || abi==SignatureAbi::kCdecl32||abi==SignatureAbi::kStdcall32)?4:8;
     parsed.returnType=canonicalType(parsed.returnType);
     if(!parsed.callingConvention.empty() && parsed.callingConvention!=signatureAbiName(abi))return bad("per-definition ABI conflicts with library ABI");
     const auto convention=signatureAbiName(abi);
-    const Arch architecture=abi==SignatureAbi::kAapcs64?Arch::kAArch64:abi==SignatureAbi::kSysV64||abi==SignatureAbi::kWindows64?Arch::kX86_64:abi==SignatureAbi::kAapcs32?Arch::kArm32:abi==SignatureAbi::kRiscV32?Arch::kRiscV32:abi==SignatureAbi::kRiscV64?Arch::kRiscV64:Arch::kX86_32;
+    const Arch architecture=abi==SignatureAbi::kAapcs64?Arch::kAArch64:abi==SignatureAbi::kSysV64||abi==SignatureAbi::kWindows64?Arch::kX86_64:abi==SignatureAbi::kAapcs32?Arch::kArm32:rv32(abi)?Arch::kRiscV32:rv64(abi)?Arch::kRiscV64:Arch::kX86_32;
     for(auto& parameter:parsed.parameters) {
         parameter.type=canonicalType(parameter.type);
     }
@@ -69,7 +71,7 @@ Status prototype(SignatureAbi abi,const std::string& text,UserPrototype* output,
     if(!modeledStatus.ok())return bad(modeledStatus.message());
     // Preserve historical implicit defaults for existing ELF declarations;
     // Windows/stdcall must retain their explicit convention when returned alone.
-    if(abi==SignatureAbi::kWindows64 || abi==SignatureAbi::kStdcall32)parsed.callingConvention=convention;
+    if(abi==SignatureAbi::kWindows64 || abi==SignatureAbi::kStdcall32 || (rv32(abi)&&abi!=SignatureAbi::kRiscV32) || (rv64(abi)&&abi!=SignatureAbi::kRiscV64))parsed.callingConvention=convention;
     std::ostringstream rendered;rendered<<parsed.returnType<<'(';
     if(parsed.parameters.empty())rendered<<"void";
     for(size_t i=0;i<parsed.parameters.size();++i){if(i)rendered<<", ";rendered<<parsed.parameters[i].type<<' '<<parsed.parameters[i].name;}
@@ -84,12 +86,14 @@ const char* signatureAbiName(SignatureAbi abi) {
         case SignatureAbi::kAapcs32:return "aapcs32";case SignatureAbi::kRiscV32:return "riscv32";
         case SignatureAbi::kRiscV64:return "riscv64";case SignatureAbi::kCdecl32:return "cdecl32";
         case SignatureAbi::kWindows64:return "windows64";case SignatureAbi::kStdcall32:return "stdcall32";
+        case SignatureAbi::kRiscV32F:return "riscv32f";case SignatureAbi::kRiscV64F:return "riscv64f";
+        case SignatureAbi::kRiscV32D:return "riscv32d";case SignatureAbi::kRiscV64D:return "riscv64d";
         default:return "unknown";
     }
 }
 u8 SignatureLibrary::pointerSize() const {
     if(abi_==SignatureAbi::kUnknown || parseAbi(signatureAbiName(abi_))!=abi_)return 0;
-    return abi_==SignatureAbi::kAapcs32 || abi_==SignatureAbi::kRiscV32 || abi_==SignatureAbi::kCdecl32||abi_==SignatureAbi::kStdcall32?4:8;
+    return abi_==SignatureAbi::kAapcs32 || rv32(abi_) || abi_==SignatureAbi::kCdecl32||abi_==SignatureAbi::kStdcall32?4:8;
 }
 Status SignatureLibrary::validateFor(Arch architecture,ImageFormat format) const {
     if(!pointerSize())return bad("library has no supported ABI");
@@ -99,14 +103,20 @@ Status SignatureLibrary::validateFor(Arch architecture,ImageFormat format) const
         (abi_==SignatureAbi::kSysV64 && architecture==Arch::kX86_64) ||
         (abi_==SignatureAbi::kWindows64 && architecture==Arch::kX86_64) ||
         (abi_==SignatureAbi::kAapcs32 && (architecture==Arch::kArm32 || architecture==Arch::kThumb)) ||
-        (abi_==SignatureAbi::kRiscV32 && architecture==Arch::kRiscV32) ||
-        (abi_==SignatureAbi::kRiscV64 && architecture==Arch::kRiscV64) ||
+        (rv32(abi_) && architecture==Arch::kRiscV32) ||
+        (rv64(abi_) && architecture==Arch::kRiscV64) ||
         ((abi_==SignatureAbi::kCdecl32||abi_==SignatureAbi::kStdcall32) && architecture==Arch::kX86_32);
     if(!matching)return bad("ABI does not match the target architecture/mode");
     if(format==ImageFormat::kElf64 && pointerSize()!=8)return bad("ABI pointer width does not match the 64-bit native container");
     if(format==ImageFormat::kElf32 && pointerSize()!=4)return bad("ABI pointer width does not match the 32-bit native container");
     if(format!=ImageFormat::kElf64 && format!=ImageFormat::kElf32 && format!=ImageFormat::kMachO64 && format!=ImageFormat::kRaw&&format!=ImageFormat::kPe64)return bad("unknown native container");
     if(format==ImageFormat::kMachO64 && abi_!=SignatureAbi::kAapcs64 && abi_!=SignatureAbi::kSysV64 && abi_!=SignatureAbi::kAapcs32 && abi_!=SignatureAbi::kCdecl32)return bad("ABI is unsupported for this native container");
+    return Status::success();
+}
+Status SignatureLibrary::validateFor(const ElfImage& image) const {
+    auto status=validateFor(image.arch(),image.format());if(!status.ok())return status;
+    if((rv32(abi_)||rv64(abi_)) && (image.format()==ImageFormat::kElf32||image.format()==ImageFormat::kElf64) &&
+        image.defaultCallingConvention()!=signatureAbiName(abi_))return bad("library calling convention conflicts with RISC-V ELF ABI flags");
     return Status::success();
 }
 Status SignatureLibrary::define(const std::string& symbol,const std::string& declaration) {

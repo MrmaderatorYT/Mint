@@ -38,10 +38,10 @@ u64 Session::dataSize(Address address,const std::string& type,const DataTypeMana
     if(type=="cstring")return cstringSize(image_.memory(),address);
     DataTypeLayout layout;return types.resolve(type,&layout).ok()?layout.size:0;
 }
-Status Session::openRawPath(const std::string& path,Arch arch,Address base,Address entry) {
+Status Session::openRawPath(const std::string& path,Arch arch,Address base,Address entry,ByteOrder order) {
     beginOpen();
     auto status=file_.open(path);if(!status.ok())return status;
-    status=image_.loadRaw(file_.view(),arch,base,entry);if(!status.ok())return status;
+    status=image_.loadRaw(file_.view(),arch,base,entry,order);if(!status.ok())return status;
     status=renderer_.open(arch);if(!status.ok())return status;
     if(lifter_.ready() && lifter_.arch()!=arch)lifter_.open(arch);
     loadDebugInfo();
@@ -68,6 +68,7 @@ Status Session::attachProject(const std::string& path) {
             std::to_string(description.maxInstructionSize)+"/"+std::to_string(description.instructionAlignment)+"/"+
             std::to_string(description.elfMachine)+"/"+std::to_string(description.elfClass);
     }
+    if(image_.format()==ImageFormat::kRaw && image_.memory().byteOrder()==ByteOrder::kBig)architecture+=":be";
     const auto source=std::string(image_.formatName())+":"+architecture+":"+hex(image_.entryPoint())+":"+hex(image_.imageBase())+":"+hex(fingerprint);
     Program candidate(image_.pointerSize());auto status=candidate.setImportedTypes(importedDebugTypes());if(!status.ok())return status;
     status=candidate.open(path,source);if(!status.ok())return status;
@@ -177,9 +178,9 @@ Status Session::editAnnotation(Address address, const std::string& kind, const s
     }
     if (kind == "prototype" && !value.empty()) {
         UserPrototype prototype; auto status=parseUserPrototype(value,&prototype); if (!status.ok()) return status;
+        prototype=effectivePrototype(std::move(prototype));
         if (!analyzer_.functionAt(address)) return Status::error(ErrorCode::kNotFound,"prototype requires a function entry");
         const auto mode=image_.architectureAt(address);
-        if(prototype.callingConvention.empty() && image_.format()==ImageFormat::kPe64 && mode==Arch::kX86_64)prototype.callingConvention="windows64";
         AbiModel model;status=buildAbiModel(mode,prototype,&model,[this](const std::string& type,DataTypeLayout* layout){return program_.types().resolve(type,layout);});
         if(!status.ok())return status;
     }
@@ -248,6 +249,7 @@ std::string Session::nameAt(Address address) const {
 std::string Session::displayNameAt(Address address) const { return demangleSymbol(nameAt(address)); }
 std::string Session::memoryBlocksText() const {
     std::string out="Format: "+std::string(image_.formatName())+" | "+architectureName(image_.arch())+" | revision "+std::to_string(program_.revision())+"\n";
+    out+="Data byte order: "+std::string(image_.memory().byteOrder()==ByteOrder::kBig?"big-endian":"little-endian")+"\n";
     out+=analysisStatusText();
     for(const auto& block:program_.memory().segments()) {
         out+=hex(block.start)+"\t"+block.name+" [0x"+hex(block.start)+", 0x"+hex(block.end())+") ";
@@ -297,9 +299,14 @@ Status Session::exportPatchedCopy(const std::string& path) const {
     if(!ok){::unlink(path.c_str());return Status::error(ErrorCode::kIoError,"patched export failed; incomplete new file removed");}
     return Status::success();
 }
+UserPrototype Session::effectivePrototype(UserPrototype prototype) const {
+    prototype.byteOrder=image_.memory().byteOrder();
+    if(prototype.valid() && prototype.callingConvention.empty())prototype.callingConvention=image_.defaultCallingConvention();
+    return prototype;
+}
 UserPrototype Session::prototypeAt(Address address) const {
     UserPrototype result;const auto user=program_.get(address,"prototype");
-    auto effective=[&](UserPrototype candidate){if(candidate.valid() && candidate.callingConvention.empty() && image_.format()==ImageFormat::kPe64 && image_.architectureAt(address)==Arch::kX86_64)candidate.callingConvention="windows64";return candidate;};
+    auto effective=[&](UserPrototype candidate){return effectivePrototype(std::move(candidate));};
     if(!user.empty()){parseUserPrototype(user,&result);return effective(result);}
     for(const auto& function:debugInfo_.functions)if(function.entry==address && !function.prototype.empty()) {
         const auto mode=image_.architectureAt(address);
@@ -342,7 +349,7 @@ std::vector<Session::ListingRow> Session::programListing(Address start, size_t l
                     } else row.text = "cstring (unterminated; byte shown)";
                 }
                 if (row.text.empty()) {
-                    u64 value = 0; memory.read(cursor,&value,std::min<u32>(row.size,8));
+                    u64 value = 0; memory.readUnsigned(cursor,std::min<u32>(row.size,8),&value);
                     row.text = (type.empty() ? "db" : type) + " 0x" + hex(value);
                 }
                 DataTypeLayout layout;

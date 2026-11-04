@@ -16,7 +16,7 @@ public:
 private:
     const cs_insn& i_; const cs_arm& d_; IrBuilder& b_; bool thumb_;
     const cs_arm_op& op(unsigned index) const { return d_.operands[index]; }
-    Varnode imm(i64 value, u8 width = 4) const { return Varnode::constant(static_cast<u64>(value) & ((u64{1} << (width * 8)) - 1), width); }
+    Varnode imm(i64 value, u8 width = 4) const { return Varnode::constant(static_cast<u64>(value) & (width==8?~u64{0}:(u64{1} << (width * 8)) - 1), width); }
     Varnode flag(u64 offset) const { return Varnode::reg(offset, 1); }
     Varnode negateBool(const Varnode& value) { return b_.binary(MintOp::kEqual, value, imm(0,1)); }
     void fail() { b_.emitIntrinsic(static_cast<u16>(i_.id)); }
@@ -115,7 +115,259 @@ private:
     void logical(MintOp operation, bool compare = false, bool invert = false);
     void memory(bool load, u8 size, bool signedValue = false);
     void multiple(bool load, bool pushPop = false);
+    void floating();
+    bool neon();
+    Varnode fpReg(unsigned reg) const {
+        const auto value=registerFromCapstone(Arch::kArm32,reg);
+        return value.valid() && value.offset>=arm32::kV0 && value.offset+value.size<=arm32::kFileSize && (value.size==4||value.size==8) ? value : Varnode::invalid();
+    }
+    void fpMemory(bool load);
+    void fpMultiple(bool load,bool decrement);
 };
+
+bool Arm32Lifter::neon() {
+    auto view=[&](unsigned n){
+        if(n>=d_.op_count || op(n).type!=ARM_OP_REG)return Varnode::invalid();
+        const auto value=registerFromCapstone(Arch::kArm32,op(n).reg);
+        return value.valid() && value.offset>=arm32::kV0 && (value.size==8||value.size==16) && value.offset+value.size<=arm32::kFileSize ? value : Varnode::invalid();
+    };
+    const auto destination=view(0);if(!destination.valid())return false;
+    const bool bitSelect=i_.id==ARM_INS_VBSL||i_.id==ARM_INS_VBIT||i_.id==ARM_INS_VBIF;
+    const bool integer=d_.vector_data>=ARM_VECTORDATA_I8&&d_.vector_data<=ARM_VECTORDATA_U64;
+    const bool untyped=d_.vector_data==ARM_VECTORDATA_INVALID&&(i_.id==ARM_INS_VDUP||i_.id==ARM_INS_VEXT||i_.id==ARM_INS_VREV16||i_.id==ARM_INS_VREV32||i_.id==ARM_INS_VREV64||i_.id==ARM_INS_VTST);
+    if(!integer&&!untyped&&!bitSelect)return false;
+    for(unsigned n=0;n<d_.op_count;++n)if(op(n).vector_index>=0 || op(n).neon_lane>=0 || op(n).shift.type!=ARM_SFT_INVALID){fail();return true;}
+    auto source=[&](unsigned n){const auto value=view(n);return value.valid()&&value.size==destination.size?value:Varnode::invalid();};
+    auto bad=[&](){fail();return true;};
+    if(bitSelect) {
+        const auto left=source(1),right=source(2);if(d_.op_count!=3||!left.valid()||!right.valid())return bad();
+        const auto mask=i_.id==ARM_INS_VBSL?destination:right;
+        const auto yes=left,no=i_.id==ARM_INS_VBSL?right:destination;
+        const auto bits=i_.id==ARM_INS_VBIF?b_.unary(MintOp::kNot,mask,mask.size):mask;
+        b_.assign(destination,b_.binary(MintOp::kOr,b_.binary(MintOp::kAnd,bits,yes),b_.binary(MintOp::kAnd,b_.unary(MintOp::kNot,bits,bits.size),no)));return true;
+    }
+    u8 lane=0;
+    if(integer)lane=u8(1u<<((static_cast<unsigned>(d_.vector_data)-ARM_VECTORDATA_I8)%4));
+    else if(d_.vector_size==8||d_.vector_size==16||d_.vector_size==32||d_.vector_size==64)lane=u8(d_.vector_size/8);
+    if(!lane)return bad();
+    const bool signedData=d_.vector_data>=ARM_VECTORDATA_S8&&d_.vector_data<=ARM_VECTORDATA_S64;
+    const bool unsignedData=d_.vector_data>=ARM_VECTORDATA_U8&&d_.vector_data<=ARM_VECTORDATA_U64;
+    auto full=[&](const Varnode& value){return b_.resize(value,16,false);};
+    auto zero=[&](){return b_.resize(imm(0,8),16,false);};
+    auto write=[&](const Varnode& value){b_.assign(destination,b_.resize(value,destination.size,false));};
+    auto vector=[&](MintOp op,const Varnode& a,const Varnode& c){return b_.vector(op,lane,a,c);};
+    if(i_.id==ARM_INS_VDUP) {
+        if(d_.op_count!=2||op(1).type!=ARM_OP_REG||!scalarReg(op(1).reg)||op(1).reg==ARM_REG_PC||op(1).reg==ARM_REG_SP||lane>4)return bad();
+        write(b_.vector(MintOp::kVectorSplat,lane,b_.resize(readReg(op(1).reg),lane,false)));return true;
+    }
+    const auto rawLeft=source(1);if(!rawLeft.valid())return bad();const auto left=full(rawLeft);
+    if(i_.id==ARM_INS_VREV16||i_.id==ARM_INS_VREV32||i_.id==ARM_INS_VREV64) {
+        const unsigned group=i_.id==ARM_INS_VREV16?2:i_.id==ARM_INS_VREV32?4:8;
+        if(d_.op_count!=2 || lane>=group)return bad();
+        auto output=zero();for(unsigned n=0;n<destination.size/lane;++n){
+            const auto element=b_.vector(MintOp::kVectorExtract,lane,left,imm(n^(group/lane-1),1),{},lane);
+            output=b_.vector(MintOp::kVectorInsert,lane,output,element,imm(n,1));}
+        write(output);return true;
+    }
+    if(i_.id==ARM_INS_VEXT) {
+        const auto rawRight=source(2);
+        // Capstone chooses the widest equivalent VEXT element suffix and scales
+        // its immediate accordingly (for example, .8 #4 becomes .32 #1).
+        if(d_.op_count!=4||!rawRight.valid()||op(3).type!=ARM_OP_IMM||op(3).imm<0||u64(op(3).imm)*lane>=destination.size)return bad();
+        const unsigned offset=unsigned(op(3).imm)*lane;
+        const auto right=full(rawRight);auto output=zero();
+        for(unsigned n=0;n<destination.size;++n){const unsigned index=n+offset;
+            const auto element=b_.vector(MintOp::kVectorExtract,1,index<destination.size?left:right,imm(index%destination.size,1),{},1);
+            output=b_.vector(MintOp::kVectorInsert,1,output,element,imm(n,1));}
+        write(output);return true;
+    }
+    if(i_.id==ARM_INS_VABS||i_.id==ARM_INS_VNEG) {
+        if(d_.op_count!=2||!signedData||lane>4)return bad();
+        const auto negative=vector(MintOp::kVectorSub,zero(),left);
+        if(i_.id==ARM_INS_VNEG)write(negative);
+        else write(b_.vector(MintOp::kVectorSelect,lane,left,negative,vector(MintOp::kVectorCmpGtS,zero(),left)));
+        return true;
+    }
+    if(i_.id==ARM_INS_VSHL||i_.id==ARM_INS_VSHR||i_.id==ARM_INS_VSRA) {
+        if(d_.op_count!=3)return bad();
+        const bool accumulate=i_.id==ARM_INS_VSRA;
+        if(op(2).type==ARM_OP_IMM){
+            const auto amount=op(2).imm;const bool shiftLeft=i_.id==ARM_INS_VSHL;
+            if(amount<0 || (shiftLeft?amount>=lane*8:amount<1||amount>lane*8) || (!shiftLeft&&!signedData&&!unsignedData))return bad();
+            auto value=b_.vector(shiftLeft?MintOp::kVectorShl:signedData?MintOp::kVectorShrS:MintOp::kVectorShrU,lane,left,imm(amount,1));
+            if(accumulate)value=vector(MintOp::kVectorAdd,full(destination),value);write(value);return true;
+        }
+        const auto rawCounts=source(2);
+        if(i_.id!=ARM_INS_VSHL||!rawCounts.valid()||(!signedData&&!unsignedData))return bad();
+        const auto counts=full(rawCounts);auto output=zero();
+        for(unsigned n=0;n<destination.size/lane;++n){
+            const auto element=b_.vector(MintOp::kVectorExtract,lane,left,imm(n,1),{},lane);
+            const auto rawCount=b_.vector(MintOp::kVectorExtract,lane,counts,imm(n,1),{},lane);
+            const auto count=b_.resize(rawCount,1,false),negative=b_.binary(MintOp::kLessS,count,imm(0,1));
+            const auto magnitude=select(negative,b_.unary(MintOp::kNeg,count,1),count);
+            const auto large=b_.binary(MintOp::kLessEqU,imm(lane*8,1),magnitude);
+            const auto shiftedLeft=select(large,imm(0,lane),b_.binary(MintOp::kShl,element,magnitude));
+            const auto fill=signedData?b_.binary(MintOp::kShrS,element,imm(lane*8-1,1)):imm(0,lane);
+            const auto shiftedRight=select(large,fill,b_.binary(signedData?MintOp::kShrS:MintOp::kShrU,element,magnitude));
+            output=b_.vector(MintOp::kVectorInsert,lane,output,select(negative,shiftedRight,shiftedLeft),imm(n,1));
+        }
+        write(output);return true;
+    }
+    const bool compare=i_.id==ARM_INS_VCEQ||i_.id==ARM_INS_VCGT||i_.id==ARM_INS_VCGE||i_.id==ARM_INS_VCLT||i_.id==ARM_INS_VCLE||i_.id==ARM_INS_VTST;
+    auto rawRight=source(2);Varnode right;
+    if(d_.op_count==3&&rawRight.valid())right=full(rawRight);
+    else if(d_.op_count==3&&compare&&op(2).type==ARM_OP_IMM&&op(2).imm==0&&(i_.id==ARM_INS_VCEQ||signedData))right=zero();
+    else return bad();
+    if(compare){
+        if(lane>4)return bad();
+        if(i_.id==ARM_INS_VCEQ)write(vector(MintOp::kVectorCmpEq,left,right));
+        else if(i_.id==ARM_INS_VTST)write(b_.unary(MintOp::kNot,vector(MintOp::kVectorCmpEq,b_.binary(MintOp::kAnd,left,right),zero()),16));
+        else {
+            if(!signedData&&!unsignedData)return bad();
+            const bool reverse=i_.id==ARM_INS_VCLT||i_.id==ARM_INS_VCGE;
+            const auto a=reverse?right:left,c=reverse?left:right;
+            auto value=signedData?vector(MintOp::kVectorCmpGtS,a,c):b_.unary(MintOp::kNot,vector(MintOp::kVectorCmpEq,vector(MintOp::kVectorMinU,a,c),a),16);
+            if(i_.id==ARM_INS_VCGE||i_.id==ARM_INS_VCLE)value=b_.unary(MintOp::kNot,value,16);write(value);
+        }
+        return true;
+    }
+    MintOp operation=MintOp::kInvalid;
+    switch(i_.id){case ARM_INS_VADD:operation=MintOp::kVectorAdd;break;case ARM_INS_VSUB:operation=MintOp::kVectorSub;break;
+        case ARM_INS_VMUL:if(lane<=4)operation=MintOp::kVectorMul;break;
+        case ARM_INS_VMIN:if(lane<=4&&(signedData||unsignedData))operation=signedData?MintOp::kVectorMinS:MintOp::kVectorMinU;break;
+        case ARM_INS_VMAX:if(lane<=4&&(signedData||unsignedData))operation=signedData?MintOp::kVectorMaxS:MintOp::kVectorMaxU;break;
+        default:break;}
+    if(operation!=MintOp::kInvalid){write(vector(operation,left,right));return true;}
+    if((i_.id==ARM_INS_VMLA||i_.id==ARM_INS_VMLS)&&lane<=4){write(vector(i_.id==ARM_INS_VMLA?MintOp::kVectorAdd:MintOp::kVectorSub,full(destination),vector(MintOp::kVectorMul,left,right)));return true;}
+    return bad();
+}
+
+void Arm32Lifter::fpMemory(bool load) {
+    if(d_.op_count!=2 || op(0).type!=ARM_OP_REG || op(1).type!=ARM_OP_MEM || i_.detail->writeback || d_.post_index)return fail();
+    const auto data=fpReg(op(0).reg);const auto& memory=op(1).mem;
+    if(!data.valid() || !scalarReg(memory.base) || memory.index!=ARM_REG_INVALID || (!load&&memory.base==ARM_REG_PC))return fail();
+    auto base=readReg(memory.base);
+    if(memory.base==ARM_REG_PC)base=imm(static_cast<u32>((i_.address+(thumb_?4:8))&~Address{3}));
+    const auto displacement=op(1).subtracted && memory.disp>0 ? -memory.disp : memory.disp;
+    const auto address=b_.binary(MintOp::kAdd,base,imm(displacement));
+    if(load)b_.emit(MintOp::kLoad,data,address);else b_.emit(MintOp::kStore,{},address,data);
+}
+
+void Arm32Lifter::fpMultiple(bool load,bool decrement) {
+    const bool pushPop=i_.alias_id==ARM_INS_ALIAS_VPUSH||i_.alias_id==ARM_INS_ALIAS_VPOP;
+    const bool hiddenBase=pushPop && d_.op_count && op(0).type==ARM_OP_REG && !scalarReg(op(0).reg);
+    const unsigned first=hiddenBase?0:1,baseReg=hiddenBase?ARM_REG_SP:op(0).reg;
+    if(d_.op_count<=first || (!hiddenBase&&(op(0).type!=ARM_OP_REG || !scalarReg(baseReg) || baseReg==ARM_REG_PC)))return fail();
+    std::vector<Varnode> registers;
+    for(unsigned n=first;n<d_.op_count;++n) {
+        if(op(n).type!=ARM_OP_REG)return fail();const auto reg=fpReg(op(n).reg);
+        if(!reg.valid() || (!registers.empty()&&(reg.size!=registers[0].size || reg.offset!=registers.back().offset+reg.size)))return fail();
+        registers.push_back(reg);
+    }
+    const u64 bytes=registers.size()*registers[0].size;
+    const auto base=b_.unary(MintOp::kCopy,readReg(baseReg),4);
+    for(size_t n=0;n<registers.size();++n) {
+        const auto address=b_.binary(MintOp::kAdd,base,imm((decrement?-static_cast<i64>(bytes):0)+static_cast<i64>(n*registers[0].size)));
+        if(load)b_.emit(MintOp::kLoad,registers[n],address);else b_.emit(MintOp::kStore,{},address,registers[n]);
+    }
+    if(pushPop||i_.detail->writeback)writeReg(baseReg,b_.binary(MintOp::kAdd,base,imm(decrement?-static_cast<i64>(bytes):static_cast<i64>(bytes))));
+}
+
+void Arm32Lifter::floating() {
+    if(neon())return;
+    if(i_.id==ARM_INS_VLDR){fpMemory(true);return;}
+    if(i_.id==ARM_INS_VSTR){fpMemory(false);return;}
+    if(i_.id==ARM_INS_VLDMIA||i_.id==ARM_INS_VLDMDB){fpMultiple(true,i_.id==ARM_INS_VLDMDB);return;}
+    if(i_.id==ARM_INS_VSTMIA||i_.id==ARM_INS_VSTMDB){fpMultiple(false,i_.id==ARM_INS_VSTMDB);return;}
+    if(i_.id==ARM_INS_VMRS) {
+        if(d_.op_count!=2 || op(0).type!=ARM_OP_REG || op(1).type!=ARM_OP_REG || op(1).reg!=ARM_REG_FPSCR)return fail();
+        const auto status=Varnode::reg(arm32::kFpscr,4);
+        if(op(0).reg==ARM_REG_APSR_NZCV) {
+            for(const auto pair:std::vector<std::pair<u64,unsigned>>{{arm32::kFlagN,31},{arm32::kFlagZ,30},{arm32::kFlagC,29},{arm32::kFlagV,28}})
+                b_.assign(flag(pair.first),bit(status,imm(pair.second)));
+        } else {if(!scalarReg(op(0).reg)||op(0).reg==ARM_REG_PC||op(0).reg==ARM_REG_SP)return fail();writeReg(op(0).reg,status);}
+        return;
+    }
+    for(unsigned n=0;n<d_.op_count;++n)if(op(n).vector_index>=0 || op(n).neon_lane>=0 || op(n).shift.type!=ARM_SFT_INVALID)return fail();
+    if(i_.id==ARM_INS_VAND||i_.id==ARM_INS_VORR||i_.id==ARM_INS_VEOR||i_.id==ARM_INS_VBIC||i_.id==ARM_INS_VMVN) {
+        const bool unary=i_.id==ARM_INS_VMVN;if(d_.op_count!=(unary?2:3))return fail();
+        std::vector<Varnode> values;
+        for(unsigned n=0;n<d_.op_count;++n){if(op(n).type!=ARM_OP_REG)return fail();const auto reg=registerFromCapstone(Arch::kArm32,op(n).reg);
+            if(!reg.valid()||reg.offset<arm32::kV0||(reg.size!=8&&reg.size!=16)||(!values.empty()&&reg.size!=values[0].size))return fail();values.push_back(reg);}
+        const auto operation=i_.id==ARM_INS_VAND||i_.id==ARM_INS_VBIC?MintOp::kAnd:i_.id==ARM_INS_VEOR?MintOp::kXor:MintOp::kOr;
+        auto value=unary?b_.unary(MintOp::kNot,values[1],values[0].size):b_.binary(operation,values[1],i_.id==ARM_INS_VBIC?b_.unary(MintOp::kNot,values[2],values[2].size):values[2]);
+        b_.assign(values[0],value);return;
+    }
+    if(i_.id==ARM_INS_VMOV || (i_.id==ARM_INS_VORR&&i_.alias_id==ARM_INS_ALIAS_VMOV)) {
+        if(d_.op_count==2 && op(0).type==ARM_OP_REG) {
+            const auto destination=fpReg(op(0).reg);
+            if(op(1).type==ARM_OP_REG) {
+                const auto source=fpReg(op(1).reg);
+                if(destination.valid()&&source.valid()&&destination.size==source.size){b_.assign(destination,source);return;}
+                if(destination.valid()&&destination.size==4&&scalarReg(op(1).reg)&&op(1).reg!=ARM_REG_PC&&op(1).reg!=ARM_REG_SP){b_.assign(destination,readReg(op(1).reg));return;}
+                if(source.valid()&&source.size==4&&scalarReg(op(0).reg)&&op(0).reg!=ARM_REG_PC&&op(0).reg!=ARM_REG_SP){writeReg(op(0).reg,source);return;}
+            } else if(op(1).type==ARM_OP_FP && destination.valid()) {
+                u64 bits=0;if(destination.size==4){const float number=static_cast<float>(op(1).fp);u32 raw=0;std::memcpy(&raw,&number,4);bits=raw;}
+                else std::memcpy(&bits,&op(1).fp,8);
+                b_.assign(destination,Varnode::constant(bits,destination.size));return;
+            }
+        } else if(d_.op_count==3 && op(0).type==ARM_OP_REG&&op(1).type==ARM_OP_REG&&op(2).type==ARM_OP_REG) {
+            const auto first=fpReg(op(0).reg),last=fpReg(op(2).reg);
+            if(first.valid()&&first.size==8&&scalarReg(op(1).reg)&&scalarReg(op(2).reg)&&op(1).reg!=ARM_REG_SP&&op(2).reg!=ARM_REG_SP&&op(1).reg!=ARM_REG_PC&&op(2).reg!=ARM_REG_PC) {
+                const auto low=b_.resize(readReg(op(1).reg),8,false),high=b_.binary(MintOp::kShl,b_.resize(readReg(op(2).reg),8,false),imm(32,1));
+                b_.assign(first,b_.binary(MintOp::kOr,low,high));return;
+            }
+            if(last.valid()&&last.size==8&&scalarReg(op(0).reg)&&scalarReg(op(1).reg)&&op(0).reg!=ARM_REG_SP&&op(1).reg!=ARM_REG_SP&&op(0).reg!=ARM_REG_PC&&op(1).reg!=ARM_REG_PC&&op(0).reg!=op(1).reg) {
+                const auto source=b_.unary(MintOp::kCopy,last,8);writeReg(op(0).reg,b_.resize(source,4,false));
+                writeReg(op(1).reg,b_.resize(b_.binary(MintOp::kShrU,source,imm(32,1)),4,false));return;
+            }
+        }
+        return fail();
+    }
+    if(i_.id==ARM_INS_VCVT) {
+        if(d_.op_count!=2 || op(0).type!=ARM_OP_REG || op(1).type!=ARM_OP_REG)return fail();
+        const auto destination=fpReg(op(0).reg),source=fpReg(op(1).reg);
+        MintOp operation=MintOp::kInvalid;u8 input=0,output=0;
+        switch(d_.vector_data) {
+            case ARM_VECTORDATA_F64F32:operation=MintOp::kFloatConvert;input=4;output=8;break;
+            case ARM_VECTORDATA_F32F64:operation=MintOp::kFloatConvert;input=8;output=4;break;
+            case ARM_VECTORDATA_F32S32:case ARM_VECTORDATA_F64S32:operation=MintOp::kIntToFloat;input=4;output=d_.vector_data==ARM_VECTORDATA_F32S32?4:8;break;
+            case ARM_VECTORDATA_F32U32:case ARM_VECTORDATA_F64U32:operation=MintOp::kIntToFloatU;input=4;output=d_.vector_data==ARM_VECTORDATA_F32U32?4:8;break;
+            case ARM_VECTORDATA_S32F32:case ARM_VECTORDATA_S32F64:operation=MintOp::kFloatToInt;output=4;input=d_.vector_data==ARM_VECTORDATA_S32F32?4:8;break;
+            case ARM_VECTORDATA_U32F32:case ARM_VECTORDATA_U32F64:operation=MintOp::kFloatToIntU;output=4;input=d_.vector_data==ARM_VECTORDATA_U32F32?4:8;break;
+            default:return fail();
+        }
+        if(!destination.valid()||!source.valid()||destination.size!=output||source.size!=input)return fail();
+        const auto value=b_.unary(operation,source,output);b_.emit(MintOp::kUndefined,Varnode::reg(arm32::kFpscr,4));b_.assign(destination,value);return;
+    }
+    const u8 width=d_.vector_data==ARM_VECTORDATA_F32?4:d_.vector_data==ARM_VECTORDATA_F64?8:0;
+    if(!width || d_.op_count<2 || op(0).type!=ARM_OP_REG)return fail();
+    std::vector<Varnode> operands;
+    for(unsigned n=0;n<d_.op_count;++n){if(op(n).type!=ARM_OP_REG)return fail();const auto reg=fpReg(op(n).reg);if(!reg.valid()||reg.size!=width)return fail();operands.push_back(reg);}
+    MintOp operation=MintOp::kInvalid;
+    switch(i_.id) {
+        case ARM_INS_VADD:operation=MintOp::kFloatAdd;break;case ARM_INS_VSUB:operation=MintOp::kFloatSub;break;
+        case ARM_INS_VMUL:case ARM_INS_VNMUL:operation=MintOp::kFloatMul;break;case ARM_INS_VDIV:operation=MintOp::kFloatDiv;break;
+        case ARM_INS_VABS:operation=MintOp::kFloatAbs;break;case ARM_INS_VNEG:operation=MintOp::kFloatNeg;break;case ARM_INS_VSQRT:operation=MintOp::kFloatSqrt;break;
+        default:break;
+    }
+    Varnode value;
+    if(operation==MintOp::kFloatAbs||operation==MintOp::kFloatNeg||operation==MintOp::kFloatSqrt) {
+        if(operands.size()!=2)return fail();value=b_.unary(operation,operands[1],width);
+    } else if(operation!=MintOp::kInvalid) {
+        if(operands.size()!=3)return fail();value=b_.binary(operation,operands[1],operands[2]);
+        if(i_.id==ARM_INS_VNMUL)value=b_.unary(MintOp::kFloatNeg,value,width);
+    } else if(i_.id==ARM_INS_VMLA||i_.id==ARM_INS_VMLS) {
+        if(operands.size()!=3)return fail();value=b_.binary(i_.id==ARM_INS_VMLA?MintOp::kFloatAdd:MintOp::kFloatSub,operands[0],b_.binary(MintOp::kFloatMul,operands[1],operands[2]));
+    } else if(i_.id==ARM_INS_VFMA||i_.id==ARM_INS_VFMS||i_.id==ARM_INS_VFNMA||i_.id==ARM_INS_VFNMS) {
+        if(operands.size()!=3)return fail();auto left=operands[1],addend=operands[0];
+        if(i_.id==ARM_INS_VFMS||i_.id==ARM_INS_VFNMA)left=b_.unary(MintOp::kFloatNeg,left,width);
+        if(i_.id==ARM_INS_VFNMA||i_.id==ARM_INS_VFNMS)addend=b_.unary(MintOp::kFloatNeg,addend,width);
+        value=b_.ternary(MintOp::kFloatFma,left,operands[2],addend);
+    } else return fail();
+    if(operation!=MintOp::kFloatAbs&&operation!=MintOp::kFloatNeg)b_.emit(MintOp::kUndefined,Varnode::reg(arm32::kFpscr,4));
+    b_.assign(operands[0],value);
+}
 
 void Arm32Lifter::arithmetic(MintOp operation, bool compare, bool reverse, bool carryInput) {
     if (d_.op_count < 2 || (!compare && (op(0).type != ARM_OP_REG || !scalarReg(op(0).reg)))) return fail();
@@ -166,7 +418,10 @@ void Arm32Lifter::memory(bool load, u8 size, bool signedValue) {
     if (i_.detail->writeback && (mem.base == op(0).reg || mem.base == ARM_REG_PC)) return fail();
     auto base = readReg(mem.base);
     if (mem.base == ARM_REG_PC && thumb_) base = imm(static_cast<u32>((i_.address + 4) & ~Address{3}));
-    auto displacement = imm(mem.disp);
+    // Capstone ARM detail represents #-imm as a positive displacement plus
+    // `subtracted`, unlike backends which put the sign directly in mem.disp.
+    // Consume the sign once; indexed forms below apply it to their index.
+    auto displacement = imm(operand.subtracted && mem.disp>0 ? -mem.disp : mem.disp);
     if (mem.index != ARM_REG_INVALID) {
         auto indexValue = readReg(mem.index);
         if (!indexValue.valid()) return fail();
@@ -222,6 +477,16 @@ void Arm32Lifter::lift() {
     if(conditional && i_.id!=ARM_INS_B)return fail();
     if(std::strcmp(i_.mnemonic,"nop")==0)return;
     switch(i_.id){
+        case ARM_INS_VADD:case ARM_INS_VSUB:case ARM_INS_VMUL:case ARM_INS_VNMUL:case ARM_INS_VDIV:
+        case ARM_INS_VABS:case ARM_INS_VNEG:case ARM_INS_VSQRT:case ARM_INS_VMLA:case ARM_INS_VMLS:
+        case ARM_INS_VFMA:case ARM_INS_VFMS:case ARM_INS_VFNMA:case ARM_INS_VFNMS:case ARM_INS_VCVT:
+        case ARM_INS_VMOV:case ARM_INS_VAND:case ARM_INS_VORR:case ARM_INS_VEOR:case ARM_INS_VBIC:case ARM_INS_VMVN:
+        case ARM_INS_VMIN:case ARM_INS_VMAX:case ARM_INS_VCEQ:case ARM_INS_VCGT:case ARM_INS_VCGE:case ARM_INS_VCLT:case ARM_INS_VCLE:case ARM_INS_VTST:
+        case ARM_INS_VSHL:case ARM_INS_VSHR:case ARM_INS_VSRA:case ARM_INS_VDUP:case ARM_INS_VREV16:case ARM_INS_VREV32:case ARM_INS_VREV64:case ARM_INS_VEXT:
+        case ARM_INS_VBSL:case ARM_INS_VBIT:case ARM_INS_VBIF:
+        case ARM_INS_VMRS:case ARM_INS_VLDR:case ARM_INS_VSTR:
+        case ARM_INS_VLDMIA:case ARM_INS_VLDMDB:case ARM_INS_VSTMIA:case ARM_INS_VSTMDB:
+            floating();return;
         case ARM_INS_HINT:if(d_.op_count==1 && op(0).type==ARM_OP_IMM && op(0).imm==0)return;return fail();
         case ARM_INS_IT:return fail();
         case ARM_INS_MOV:case ARM_INS_MOVS:case ARM_INS_MVN:case ARM_INS_MOVW:case ARM_INS_MOVT:{
@@ -327,9 +592,9 @@ void liftArm32(const cs_insn& instruction, IrBuilder& builder, bool thumb) {
     for(const auto& insn:fragment.insns) {
         const auto dest=remap(insn.dest),a=remap(insn.a),b=remap(insn.b),c=remap(insn.c);
         if(dest.isRegister()) {
-            const auto computed=builder.newTemp(dest.size);builder.emit(insn.op,computed,a,b,c);
+            const auto computed=builder.newTemp(dest.size);builder.emit(insn.op,computed,a,b,c);builder.function()->insns.back().laneWidth=insn.laneWidth;
             builder.emit(MintOp::kSelect,dest,predicate,computed,dest);
-        } else builder.emit(insn.op,dest,a,b,c);
+        } else {builder.emit(insn.op,dest,a,b,c);builder.function()->insns.back().laneWidth=insn.laneWidth;}
     }
 }
 }  // namespace mint

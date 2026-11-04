@@ -48,6 +48,7 @@ bool dominatesValue(const SsaFunction& function, const Dominance& dominance,
 }  // namespace
 
 bool hasSideEffect(MintOp op) {
+    if (isAtomicMemory(op)) return true;
     switch (op) {
         case MintOp::kMemoryFence:
         case MintOp::kAtomicLoad:case MintOp::kAtomicStore:case MintOp::kAtomicExchange:case MintOp::kAtomicAdd:case MintOp::kAtomicCompareExchange:

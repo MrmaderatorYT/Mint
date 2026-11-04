@@ -208,6 +208,9 @@ std::vector<std::string> IrFunction::verify() const {
             case MintOp::kAtomicLoad:
             case MintOp::kAtomicExchange:
             case MintOp::kAtomicAdd:
+            case MintOp::kAtomicAnd:case MintOp::kAtomicOr:case MintOp::kAtomicXor:
+            case MintOp::kAtomicMinS:case MintOp::kAtomicMaxS:
+            case MintOp::kAtomicMinU:case MintOp::kAtomicMaxU:
             case MintOp::kAtomicCompareExchange:
                 if(a.size!=pointerWidth || (d.size!=1&&d.size!=2&&d.size!=4&&d.size!=8)) report(i,"invalid scalar atomic widths");
                 if(insn.op!=MintOp::kAtomicLoad && b.size!=d.size) report(i,"atomic value width differs from destination");
@@ -308,6 +311,10 @@ std::vector<std::string> IrFunction::verify() const {
             case MintOp::kFloatUnordered:
                 if (d.size != 1) report(i, "boolean result is not 1 byte");
                 if (a.size != b.size) report(i, "compared operands differ in width");
+                break;
+            case MintOp::kFloatFma:
+                if ((d.size!=4 && d.size!=8) || d.size!=a.size || a.size!=b.size || b.size!=c.size)
+                    report(i,"fused floating-point operands require matching IEEE32/64 widths");
                 break;
             case MintOp::kFloatAdd:
             case MintOp::kFloatSub:

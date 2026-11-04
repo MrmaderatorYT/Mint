@@ -13,7 +13,8 @@ void Session::notifyPluginEvent(u32 kind,Address address,const std::string& deta
 Status Session::connectDebugger(const std::string& host,u32 port,bool dap,bool allowRemote) {
     if(port==0 || port>65535)return Status::error(ErrorCode::kBadFormat,"port must be 1..65535");
     DebuggerEndpoint endpoint{host,static_cast<u16>(port),allowRemote};
-    return debugger_.connectTcp(endpoint,dap?DebuggerBackend::kLldbDap:DebuggerBackend::kGdbRemote);
+    DebuggerOptions options;if(loaded_&&!isDexLike())options.registerByteOrder=image_.memory().byteOrder();
+    return debugger_.connectTcp(endpoint,dap?DebuggerBackend::kLldbDap:DebuggerBackend::kGdbRemote,options);
 }
 Status Session::debuggerCommand(const std::string& operation,Address address,u64 value,std::string* output) {
     if(!output)return Status::error(ErrorCode::kInternalError,"missing debugger output");
@@ -38,7 +39,11 @@ Status Session::debuggerCommand(const std::string& operation,Address address,u64
     } else if(operation=="modules") {
         std::vector<DebuggerModule> modules;status=debugger_.modules(&modules);
         if(status.ok())for(const auto& module:modules){text<<module.id<<'\t'<<module.name<<'\t'<<module.path;
-            if(module.start!=kNoAddress)text<<"\t[0x"<<std::hex<<module.start<<", 0x"<<module.end<<")";text<<'\n';}
+            if(module.start!=kNoAddress)text<<"\t[0x"<<std::hex<<module.start<<", 0x"<<module.end<<")";
+            if(module.hasSvr4)text<<"\tSVR4 load_bias=0x"<<std::hex<<module.loadBias<<" link_map=0x"<<module.linkMap<<" dynamic=0x"<<module.dynamicAddress<<" namespace=0x"<<module.linkerNamespace;
+            for(const auto base:module.segmentBases)text<<"\tsegment=0x"<<std::hex<<base;
+            for(const auto base:module.sectionBases)text<<"\tsection=0x"<<std::hex<<base;
+            text<<std::dec<<'\n';}
     } else if(operation=="layout")status=debugger_.discoverRegisterLayout();
     else if(operation=="map-image") {
         if(!loaded_ || isDexLike())return Status::error(ErrorCode::kUnsupported,"address mapping requires a native Program");
@@ -91,7 +96,7 @@ Status Session::openComparison(const std::string& path,const std::string& projec
         if(projectPath==program_.path() || sameFile)return Status::error(ErrorCode::kBadFormat,"comparison must use a different project to avoid concurrent edits");
     }
     auto candidate=std::make_unique<Session>();
-    auto status=machOSlice?candidate->openMachOPath(path,rawArch):rawArch==Arch::kUnknown?candidate->openPath(path):candidate->openRawPath(path,rawArch,base,entry);
+    auto status=machOSlice?candidate->openMachOPath(path,rawArch):rawArch==Arch::kUnknown?candidate->openPath(path):candidate->openRawPath(path,rawArch,base,entry,image_.memory().byteOrder());
     if(!status.ok())return status;
     if(candidate->isDexLike())return Status::error(ErrorCode::kUnsupported,"comparison supports native binaries, not DEX/APK");
     if(candidate->image().arch()!=image_.arch())return Status::error(ErrorCode::kUnsupported,"comparison requires matching architectures");

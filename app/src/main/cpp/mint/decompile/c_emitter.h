@@ -8,6 +8,7 @@
 #include "mint/analysis/user_prototype.h"
 #include "mint/types/data_type_manager.h"
 #include "mint/analysis/local_variables.h"
+#include "mint/ir/memory_analysis.h"
 
 namespace mint {
 
@@ -40,6 +41,7 @@ struct CEmitterOptions {
     // numeric; inferred layout hypotheses never authorize field expressions.
     std::function<Status(const std::string&, DataTypeLayout*)> typeLayouts;
     std::function<std::vector<LocalVariableEdit>(Address)> locals;
+    MemoryFunctionResolver memoryFunctions;
 };
 
 std::string emitC(const SsaFunction& function, const ControlFlowStructure& structure,

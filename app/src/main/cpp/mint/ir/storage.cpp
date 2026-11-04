@@ -43,6 +43,7 @@ StorageUnit canonicalUnit(Arch arch, u64 offset, u8 size) {
         case Arch::kArm32:case Arch::kThumb:
             if(offset<64)return alignedUnit(0,offset,4);
             if(offset<=arm32::kFlagV)return {offset,1};
+            if(offset>=arm32::kFpscr && offset<arm32::kV0)return {arm32::kFpscr,4};
             return alignedUnit(arm32::kV0,offset,16);
         case Arch::kRiscV32:case Arch::kRiscV64:
             if(offset<=riscv::kPc)return {offset-offset%8,static_cast<u8>(arch==Arch::kRiscV32?4:8)};

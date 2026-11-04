@@ -51,6 +51,7 @@ Status ElfImage::loadElf32(ByteView file) {
         return Status::error(ErrorCode::kUnsupported, "ELF32 object type is not executable/shared/relocatable");
     format_ = ImageFormat::kElf32;
     type_ = header.type;
+    elfFlags_ = header.flags;
     entry_ = canonicalAddress(header.entry);
     if (arch_ == Arch::kArm32 && (header.entry & 1)) armModes_.emplace_back(entry_, true);
 

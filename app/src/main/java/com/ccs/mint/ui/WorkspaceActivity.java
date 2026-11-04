@@ -77,6 +77,10 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private static final int PROJECT_SAVE_REQUEST = 9;
     private static final int PROJECT_OPEN_REQUEST = 10;
     private static final int DEBUG_IMPORT_REQUEST = 11;
+    private static final int SANDBOX_PLUGIN_REQUEST = 12;
+    private com.ccs.mint.plugin.SandboxPluginClient sandboxPlugin;
+    private boolean sandboxPreparing;
+    private java.util.concurrent.atomic.AtomicBoolean sandboxCopyCancelled;
     private RawImportConfig pendingRawImport;
     private long viewGeneration;
 
@@ -213,7 +217,11 @@ public final class WorkspaceActivity extends AppCompatActivity {
         findViewById(R.id.project_actions).setOnClickListener(v -> showProjectActions());
         showBetaNoticeOnce();
         findViewById(R.id.try_example).setOnClickListener(v -> openExample());
-        cancel.setOnClickListener(v -> model.cancel());
+        cancel.setOnClickListener(v -> {
+            if(sandboxPlugin!=null)sandboxPlugin.close();
+            else if(sandboxPreparing && sandboxCopyCancelled!=null)sandboxCopyCancelled.set(true);
+            else model.cancel();
+        });
 
         filter.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
@@ -284,6 +292,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
         if (betaNotice != null && betaNotice.isShowing()) betaNotice.dismiss();
         betaNotice = null;
         super.onDestroy();
+        if(sandboxCopyCancelled!=null)sandboxCopyCancelled.set(true);
+        if(sandboxPlugin!=null){sandboxPlugin.close();sandboxPlugin=null;}
         // The ViewModel owns both the worker and native handle. onDestroy is also
         // the normal rotation callback, so closing either here loses the analysis.
     }
@@ -457,9 +467,10 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     LinearLayout form=new LinearLayout(this);form.setOrientation(LinearLayout.VERTICAL);
                     EditText base=new EditText(this),entry=new EditText(this);
                     base.setHint("Base address (hex)");base.setText("0x1000");entry.setHint("Entry address (hex)");entry.setText("0x1000");form.addView(base);form.addView(entry);
+                    android.widget.CheckBox bigEndian=new android.widget.CheckBox(this);bigEndian.setText("Big-endian data");bigEndian.setVisibility(architectures[which].id.equals("aarch64")?android.view.View.VISIBLE:android.view.View.GONE);form.addView(bigEndian);
                     new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Raw memory mapping").setView(form)
                             .setPositiveButton("Choose file",(dialog,w) -> {
-                                try{pendingRawImport=RawImportConfig.fromHex(architectures[which].id,base.getText().toString(),entry.getText().toString());launchFilePicker();}
+                                try{pendingRawImport=RawImportConfig.fromHex(architectures[which].id+(bigEndian.isChecked()?":be":""),base.getText().toString(),entry.getText().toString());launchFilePicker();}
                                 catch(IllegalArgumentException e){showProjectError(e.getMessage());}
                             }).setNegativeButton("Cancel",null).show();
                 }).show();
@@ -484,6 +495,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         if(request==SCRIPT_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)openScript(data.getData());
         if(request==COMPARISON_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)openComparison(data.getData());
         if(request==PLUGIN_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)openNativePlugin(data.getData());
+        if(request==SANDBOX_PLUGIN_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)openIsolatedPlugin(data.getData());
         if(request==LIBRARY_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)openLibrary(data.getData());
         if(request==TRACKING_SAVE_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)trackingDocument(data.getData(),true);
         if(request==TRACKING_LOAD_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)trackingDocument(data.getData(),false);
@@ -1443,9 +1455,10 @@ public final class WorkspaceActivity extends AppCompatActivity {
     }
     private void showNativePlugins() {
         new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Native plugins")
-                .setItems(new String[]{"Load trusted .so plugin", "List commands", "Run plugin command"},(d,which)->{
+                .setItems(new String[]{"Load trusted .so plugin", "List commands", "Run plugin command", "Run isolated plugin command"},(d,which)->{
                     if(which==0)pickDocument(PLUGIN_REQUEST);
                     else if(which==1)showReport("Plugin commands",MintSession::pluginCommands);
+                    else if(which==3)pickDocument(SANDBOX_PLUGIN_REQUEST);
                     else {
                         LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
                         EditText command=new EditText(this);command.setHint("plugin-id/command-id");fields.addView(command);
@@ -1462,6 +1475,54 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     }
                 }).show();
     }
+    private void openIsolatedPlugin(Uri uri) {
+        final MintSession active=session;final java.io.File binary=model.binaryFile();final RawImportConfig config=model.rawConfig();
+        if(active==null || binary==null)return;
+        if(android.os.Build.VERSION.SDK_INT<29){showProjectError("Isolated plugins require Android 10 or newer");return;}
+        if(sandboxPlugin!=null || sandboxPreparing){showProjectError("An isolated plugin is already running");return;}
+        LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
+        EditText command=new EditText(this);command.setHint("plugin-id/command-id");fields.addView(command);
+        EditText arguments=new EditText(this);arguments.setHint("Arguments");fields.addView(arguments);
+        new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Run isolated native command")
+                .setMessage("Runs in a separate isolated process with fresh read-only analysis of the original binary. Current project annotations and patches are not shared.")
+                .setView(fields).setNegativeButton("Cancel",null).setPositiveButton("Run",(d,w)->{
+                    if(sandboxPlugin!=null || sandboxPreparing)return;
+                    final String id=command.getText().toString(),args=arguments.getText().toString();
+                    if(id.isEmpty() || id.length()>160 || args.length()>4096){showProjectError("Enter a command ID (up to 160 characters) and at most 4096 argument characters");return;}
+                    sandboxPreparing=true;sandboxCopyCancelled=new java.util.concurrent.atomic.AtomicBoolean();
+                    final java.util.concurrent.atomic.AtomicBoolean cancelled=sandboxCopyCancelled;busy(true);
+                    worker.execute(()->{
+                        java.io.File file=null;String failure=null;
+                        try {
+                            java.io.File root=new java.io.File(getCodeCacheDir(),"mint-isolated-plugins");
+                            if(!root.isDirectory() && !root.mkdirs())throw new java.io.IOException("Cannot create isolated plugin copy");
+                            file=java.io.File.createTempFile("plugin-",".so",root);
+                            try(java.io.InputStream input=getContentResolver().openInputStream(uri);java.io.FileOutputStream output=new java.io.FileOutputStream(file)) {
+                                if(input==null || !file.setReadOnly())throw new java.io.IOException("Cannot open/protect plugin copy");
+                                byte[] buffer=new byte[65536];int n;long size=0;
+                                while((n=input.read(buffer))!=-1){if(cancelled.get())throw new java.io.IOException("Isolated plugin cancelled");if((size+=n)>16*1024*1024)throw new java.io.IOException("Plugin exceeds 16 MiB");output.write(buffer,0,n);}
+                                if(size==0)throw new java.io.IOException("Plugin is empty");output.getFD().sync();
+                            }
+                        }catch(Exception error){failure=error.getMessage();}
+                        final java.io.File copied=file;final String problem=failure;
+                        main.post(()->{
+                            sandboxPreparing=false;
+                            if(isDestroyed() || active!=session || cancelled.get() || problem!=null){
+                                if(copied!=null)copied.delete();
+                                if(!isDestroyed() && active==session){busy(false);displayReport("Isolated plugin",cancelled.get()?"Isolated plugin cancelled":problem);}
+                                return;
+                            }
+                            try {
+                                sandboxPlugin=new com.ccs.mint.plugin.SandboxPluginClient(this,binary,copied,id,args,
+                                        config==null?"":config.architecture,config==null?0:config.baseAddress,config==null?0:config.entryAddress,config!=null&&config.machOSlice,60000,
+                                        (success,output,uid,pid)->{sandboxPlugin=null;if(!isDestroyed() && active==session){busy(false);displayReport("Isolated plugin",output);}});
+                                sandboxPlugin.start();
+                            }catch(Exception error){sandboxPlugin=null;copied.delete();busy(false);showProjectError(error.getMessage());}
+                        });
+                    });
+                }).show();
+    }
+
     private void openNativePlugin(Uri uri) {
         final MintSession active=session;if(active==null)return;
         new androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Trust and load native plugin?")

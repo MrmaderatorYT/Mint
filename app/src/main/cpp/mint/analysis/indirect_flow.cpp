@@ -70,7 +70,7 @@ bool Recovery::readOnly(Address address,u8 width,u64* output,bool* relocated){
         // A zero-valued RELATIVE slot can legitimately target VA zero. Imports
         // were excluded above; the ordinary raw read retains this exact value.
     }
-    u64 result=0;if(!image_.memory().read(address,&result,width))return false;
+    u64 result=0;if(!image_.memory().readUnsigned(address,width,&result))return false;
     *output=result&mask(width);return true;
 }
 bool Recovery::binary(MintOp op,u64 a,u64 b,u8 width,u8 outputWidth,u64* result){

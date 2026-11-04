@@ -96,7 +96,8 @@ public:
         std::string reason;
     };
     /// Re-decodes all owners of patched instructions and reuses unaffected
-    /// functions only when flow topology and authoritative metadata stay fixed.
+    /// functions when authoritative metadata/membership stay fixed. Proven local
+    /// direct-branch retargeting rebuilds affected CFGs; other flow changes fall back.
     /// Unsupported/uncertain cases fall back to full analysis with a reason.
     Status reanalyzeChanged(const ElfImage& image, const Options& options,
                             const std::vector<AddressRange>& dirtyRanges,

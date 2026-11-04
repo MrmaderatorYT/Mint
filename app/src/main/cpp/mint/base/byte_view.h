@@ -20,8 +20,10 @@ class ByteView {
 public:
     ByteView() = default;
 
-    ByteView(const u8* data, size_t size)
-        : data_(size == 0 ? nullptr : data), size_(data == nullptr ? 0 : size) {}
+    ByteView(const u8* data, size_t size, ByteOrder order = ByteOrder::kLittle)
+        : data_(size == 0 ? nullptr : data), size_(data == nullptr ? 0 : size), order_(order) {}
+    ByteOrder byteOrder() const { return order_; }
+    ByteView withByteOrder(ByteOrder order) const { return ByteView(data_,size_,order); }
 
     const u8* data() const { return data_; }
     size_t size() const { return size_; }
@@ -38,13 +40,13 @@ public:
     /// subviews is safe: an empty view yields empty views.
     ByteView subview(u64 offset, u64 length) const {
         if (!covers(offset, length)) return {};
-        return ByteView(data_ + offset, static_cast<size_t>(length));
+        return ByteView(data_ ? data_ + offset : nullptr, static_cast<size_t>(length),order_);
     }
 
     /// Everything from `offset` onwards, or empty if `offset` is past the end.
     ByteView from(u64 offset) const {
         if (offset > size_) return {};
-        return ByteView(data_ + offset, static_cast<size_t>(size_ - offset));
+        return ByteView(data_ ? data_ + offset : nullptr, static_cast<size_t>(size_ - offset),order_);
     }
 
     bool byteAt(u64 offset, u8* out) const {
@@ -54,23 +56,31 @@ public:
     }
 
     /// Reads a fixed-width integer. `T` must be a trivial integral type; the
-    /// bytes are interpreted little-endian, which covers every architecture
-    /// this engine targets (AArch64 and x86-64 are both little-endian in every
-    /// Android configuration, and DEX is little-endian by specification).
+    /// bytes follow this view's explicit byte order (little-endian by default),
+    /// independently of the host. Subviews retain that order.
     template <typename T>
     bool read(u64 offset, T* out) const {
         static_assert(std::is_integral<T>::value || std::is_enum<T>::value,
                       "ByteView::read is for integral and enum types");
         if (!covers(offset, sizeof(T))) return false;
-        T value;
-        std::memcpy(&value, data_ + offset, sizeof(T));
-        *out = value;
+        if constexpr (std::is_same<T,bool>::value) { *out=data_[offset]!=0; }
+        else {
+            using U=typename std::make_unsigned<T>::type;
+            U value=0;
+            for(size_t i=0;i<sizeof(T);++i) {
+                const size_t index=order_==ByteOrder::kBig?sizeof(T)-1-i:i;
+                value |= static_cast<U>(data_[offset+i]) << (index*8);
+            }
+            *out=static_cast<T>(value);
+        }
         return true;
     }
 
-    /// Reads a whole fixed-layout record. Used for ELF and DEX tables, where
-    /// reading field by field would turn every loop over thousands of entries
-    /// into a wall of offset arithmetic nobody can review.
+    /// Copies a raw fixed-layout record, without endian conversion. Used for
+    /// little-endian DEX/ELF32 tables on supported little-endian hosts; ELF64
+    /// uses a named-field decoder. A mixed-width struct cannot be swapped as
+    /// one integer. Raw records are suitable only when their byte order and
+    /// layout already match the host.
     ///
     /// Safe against misaligned input because it goes through memcpy: the mapped
     /// file offers no alignment guarantee, and an unaligned struct load is
@@ -116,6 +126,7 @@ public:
 private:
     const u8* data_ = nullptr;
     size_t size_ = 0;
+    ByteOrder order_ = ByteOrder::kLittle;
 };
 
 /// Sequential cursor over a ByteView, for headers that are read field by field.

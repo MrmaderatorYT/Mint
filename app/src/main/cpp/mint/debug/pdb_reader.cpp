@@ -1,4 +1,6 @@
 #include "mint/debug/pdb_reader.h"
+#include "mint/debug/codeview_lines.h"
+#include "mint/debug/pdb_omap.h"
 #include "mint/loader/elf_image.h"
 #include "mint/types/data_type_manager.h"
 #include "mint/analysis/user_prototype.h"
@@ -72,6 +74,37 @@ private:
     ByteView file_; u32 blockSize_ = 0, blocks_ = 0; u64 copied_ = 0;
     std::vector<Stream> streams_; std::map<u32, std::vector<u8>> copies_;
 };
+Status sourceStrings(Streams& streams,ByteView info,ByteView* output) {
+    *output={};if(info.size()==28)return Status::success();
+    u32 stringBytes=0;
+    if(!info.read(28,&stringBytes)||stringBytes>1024*1024 || !info.covers(32,stringBytes))return bad("invalid named-stream strings");
+    const auto names=info.subview(32,stringBytes);u64 cursor=32+u64(stringBytes);
+    u32 size=0,capacity=0;
+    if(!info.read(cursor,&size)||!info.read(cursor+4,&capacity)||capacity>65536||size>capacity)return bad("invalid named-stream hash size");cursor+=8;
+    std::vector<u32> present,deleted;
+    auto bitmap=[&](std::vector<u32>* words)->bool {
+        u32 count=0;if(!info.read(cursor,&count)||count>(u64(capacity)+31)/32||!info.covers(cursor+4,u64(count)*4))return false;cursor+=4;
+        for(u32 n=0;n<count;++n){u32 word=0;info.read(cursor,&word);cursor+=4;
+            if(capacity%32 && n==capacity/32 && (word>>(capacity%32)))return false;
+            words->push_back(word);}
+        return true;
+    };
+    if(!bitmap(&present)||!bitmap(&deleted))return bad("invalid named-stream bitmap");
+    u32 population=0;for(size_t n=0;n<present.size();++n){if(n<deleted.size()&&(present[n]&deleted[n]))return bad("overlapping named-stream bitmaps");
+        for(u32 word=present[n];word;word&=word-1)++population;}
+    if(population!=size || !info.covers(cursor,u64(size)*8))return bad("named-stream entry count mismatch");
+    bool found=false;
+    for(u32 n=0;n<size;++n){u32 name=0,index=0;info.read(cursor,&name);info.read(cursor+4,&index);cursor+=8;
+        std::string key;if(!stringAt(names,name,&key))return bad("invalid named-stream name");
+        if(key!="/names")continue;
+        if(found)return bad("duplicate global string stream");found=true;
+        const auto data=streams.stream(index);u32 signature=0,version=0,length=0;
+        if(!data.read(0,&signature)||signature!=0xeffeeffe||!data.read(4,&version)||(version!=1&&version!=2)||
+            !data.read(8,&length)||!data.covers(12,length))return bad("invalid global PDB string table");
+        *output=data.subview(12,length);
+    }
+    return Status::success();
+}
 struct Storage { std::string expression, ctype; u64 size = 0; u32 alignment = 1; bool valid = false; };
 class Types {
 public:
@@ -222,10 +255,54 @@ Status readPdb(const ElfImage& image, ByteView pdb, DwarfReport* out, bool allow
     DwarfReport report; report.format = "PDB7/CodeView"; report.addressSize = image.pointerSize(); report.units = 1;
     report.warnings.push_back(matched ? "PDB explicitly selected and verified by PE RSDS GUID/age; recorded PDB path was not opened" : "UNVERIFIED PDB explicitly acknowledged; metadata identity is not proven");
     report.partial = !matched; Types types(image.pointerSize(), &report); status = types.load(streams.stream(2)); if (!status.ok()) return status;
-    auto address = [&](u16 section, u32 offset, Address* value) {
-        if (!section || section > image.sections().size()) return false; const auto& target = image.sections()[section - 1];
-        if (offset >= target.size || target.addr > ~Address{0} - offset) return false; *value = target.addr + offset; return image.memory().isMapped(*value);
+    ByteView globalStrings;status=sourceStrings(streams,identity,&globalStrings);if(!status.ok())return status;
+    u32 moduleBytes = 0, contributionBytes = 0, sectionMapBytes = 0, fileBytes = 0, serverBytes = 0, optionalBytes = 0, ecBytes = 0;
+    dbi.read(24, &moduleBytes); dbi.read(28, &contributionBytes); dbi.read(32, &sectionMapBytes); dbi.read(36, &fileBytes); dbi.read(40, &serverBytes); dbi.read(48, &optionalBytes); dbi.read(52, &ecBytes);
+    const u64 optional = 64 + u64(moduleBytes) + contributionBytes + sectionMapBytes + fileBytes + serverBytes + ecBytes;
+    if (!dbi.covers(64, moduleBytes) || !dbi.covers(optional, optionalBytes) || optionalBytes % 2) return bad("invalid DBI substream extent");
+    auto debugStream=[&](unsigned slot){u16 stream=0xffff;if(optionalBytes>=u64(slot+1)*2)dbi.read(optional+slot*2,&stream);return stream;};
+    PdbOmap omap;const u16 fromSource=debugStream(4),toSource=debugStream(3);
+    if(toSource!=0xffff){status=PdbOmap::validateTable(streams.stream(toSource));if(!status.ok())return status;}
+    std::vector<CodeViewSourceSection> sourceSections;
+    if(fromSource!=0xffff) {
+        const auto originals=debugStream(10);if(originals==0xffff)return bad("OMAP requires original section headers");
+        status=omap.load(streams.stream(fromSource),streams.stream(originals));if(!status.ok())return status;
+        for(const auto& section:omap.sections()) {
+            if(image.imageBase()>~Address{0}-section.rva || image.imageBase()+section.rva>~Address{0}-section.size)return bad("original source address overflow");
+            sourceSections.push_back({image.imageBase()+section.rva,section.size,section.executable});
+        }
+        report.warnings.push_back("OMAPFROM maps original section offsets to current PE addresses; removed regions are omitted, and inserted/cloned code absent from that forward map has no invented source coverage");
+    } else if(toSource!=0xffff)return Status::error(ErrorCode::kUnsupported,"PDB has OMAPTO without the source-to-image map; inversion is ambiguous");
+    auto mappedRange=[&](u32 rva,u64 length,bool executable,Address* start)->Status {
+        if(!length || length>(u64{1}<<32)-rva || image.imageBase()>~Address{0}-rva || image.imageBase()+rva>~Address{0}-length)return bad("mapped PE range overflow");
+        *start=image.imageBase()+rva;const Address end=*start+length;
+        for(Address cursor=*start;cursor<end;) {
+            const auto* segment=image.memory().segmentAt(cursor);
+            if(!segment || (executable&&!segment->executable()))return bad("mapped metadata range is outside bound PE permissions");
+            const Address next=std::min(end,segment->end());if(next<=cursor)return bad("non-advancing mapped range");cursor=next;
+        }
+        return Status::success();
     };
+    size_t mappedRangeCount=0;
+    auto ranges=[&](u16 section,u32 offset,u64 length,bool executable,std::vector<DwarfRange>* out)->Status {
+        std::vector<DwarfRange> result;
+        if(omap.active()) {
+            u32 source=0;auto status=omap.source(section,offset,length,&source);if(!status.ok())return status;
+            if(executable&&!omap.sections()[section-1].executable)return bad("function metadata is not in an executable original section");
+            std::vector<PdbOmapRange> mapped;status=omap.translate(source,length,&mapped);if(!status.ok())return status;
+            mappedRangeCount+=mapped.size();if(mappedRangeCount>500000)return Status::error(ErrorCode::kTooLarge,"PDB OMAP total range budget exceeded");
+            for(const auto& piece:mapped){Address at=0;status=mappedRange(piece.target,piece.size,executable,&at);if(!status.ok())return status;result.push_back({at,at+piece.size});}
+        } else {
+            if(!section || section>image.sections().size())return bad("invalid CodeView section index");const auto& target=image.sections()[section-1];
+            if(offset>=target.size || length>target.size-offset || target.addr>~Address{0}-offset)return bad("CodeView range outside section");
+            const Address at=target.addr+offset;
+            if(at<image.imageBase() || at-image.imageBase()>0xffffffffull)return bad("CodeView section outside PE RVA space");
+            Address mapped=0;auto status=mappedRange(static_cast<u32>(at-image.imageBase()),length,executable,&mapped);if(!status.ok())return status;
+            result.push_back({mapped,mapped+length});
+        }
+        *out=std::move(result);return Status::success();
+    };
+    size_t totalFunctionRanges=0;
     std::set<std::pair<Address, std::string>> seen;
     auto symbols = [&](ByteView bytes) -> Status {
         u64 cursor = 0;
@@ -240,25 +317,35 @@ Status readPdb(const ElfImage& image, ByteView pdb, DwarfReport* out, bool allow
             else if (kind == 0x110c || kind == 0x110d) { if (!record.read(2, &type) || !record.read(6, &offset) || !record.read(10, &segment)) return bad("truncated DATA32"); nameOffset = 12; data = true; }
             else continue;
             std::string name; Address at = 0;
-            if (!stringAt(record, nameOffset, &name) || !address(segment, offset, &at)) return bad("invalid CodeView symbol address/name");
+            if (!stringAt(record,nameOffset,&name))return bad("invalid CodeView symbol name");
             if (!function && !data) continue;
-            if (function && (!image.memory().isExecutable(at) || (size && (size > image.sections()[segment - 1].size - offset || !image.memory().isExecutable(at + size - 1))))) return bad("PDB function range is not executable in its bound PE");
+            std::vector<DwarfRange> point;auto mapped=ranges(segment,offset,1,function,&point);if(!mapped.ok())return mapped;
+            if(point.empty())continue; // OMAP marks this source identity as removed.
+            at=point[0].low;
+            std::vector<DwarfRange> functionRanges;
+            if(function&&size){mapped=ranges(segment,offset,size,true,&functionRanges);if(!mapped.ok())return mapped;
+                totalFunctionRanges+=functionRanges.size();if(totalFunctionRanges>200000)return Status::error(ErrorCode::kTooLarge,"PDB mapped function-range budget exceeded");}
             if (!seen.emplace(at, name + (function ? ":fn" : ":data")).second) {
                 // Publics establish identity; richer module PROC32 metadata
                 // supplies ranges/prototypes for that same exact binding.
                 if (function && (type || size)) for (auto& fn : report.functions) if (fn.entry == at && fn.name == name) {
                     if (type) fn.prototype = types.prototype(type, image.arch() == Arch::kX86_32);
-                    if (size) fn.ranges = {{at, at + size}}; break;
+                    if (size) fn.ranges = functionRanges; break;
                 }
                 continue;
             }
             if (function) {
                 DwarfFunction fn; fn.entry = at; fn.name = fn.linkageName = name; fn.dieOffset = report.dies;
-                if (size) fn.ranges.push_back({at, at + size}); if (type) fn.prototype = types.prototype(type, image.arch() == Arch::kX86_32);
+                if (size) fn.ranges = functionRanges; if (type) fn.prototype = types.prototype(type, image.arch() == Arch::kX86_32);
                 report.functions.push_back(std::move(fn));
             } else if (data) {
                 DwarfVariable variable; variable.name = name; variable.location.kind = DwarfLocation::Kind::kAddress; variable.location.address = at; variable.location.expression = "PE address 0x" + std::to_string(at);
-                const auto storage = types.storage(type); if (storage.valid) variable.type = storage.expression;
+                const auto storage = types.storage(type);
+                if (storage.valid) {
+                    std::vector<DwarfRange> object;auto status=ranges(segment,offset,storage.size,false,&object);if(!status.ok())return status;
+                    if(object.size()==1&&object[0].low==at&&object[0].high-at==storage.size)variable.type=storage.expression;
+                    else if(omap.active()&&std::find(report.warnings.begin(),report.warnings.end(),"OMAP split/removed object bytes: variable type layout was not adopted") == report.warnings.end())report.warnings.push_back("OMAP split/removed object bytes: variable type layout was not adopted");
+                }
                 report.variables.push_back(std::move(variable));
             }
             if (report.functions.size() > 100000 || report.variables.size() > 100000) return Status::error(ErrorCode::kTooLarge, "PDB metadata budget exceeded");
@@ -266,26 +353,44 @@ Status readPdb(const ElfImage& image, ByteView pdb, DwarfReport* out, bool allow
         return Status::success();
     };
     status = symbols(streams.stream(symbolStream)); if (!status.ok()) return status;
-    u32 moduleBytes = 0, contributionBytes = 0, sectionMapBytes = 0, fileBytes = 0, serverBytes = 0, optionalBytes = 0, ecBytes = 0;
-    dbi.read(24, &moduleBytes); dbi.read(28, &contributionBytes); dbi.read(32, &sectionMapBytes); dbi.read(36, &fileBytes); dbi.read(40, &serverBytes); dbi.read(48, &optionalBytes); dbi.read(52, &ecBytes);
-    const u64 optional = 64 + u64(moduleBytes) + contributionBytes + sectionMapBytes + fileBytes + serverBytes + ecBytes;
-    if (!dbi.covers(64, moduleBytes) || !dbi.covers(optional, optionalBytes) || optionalBytes % 2) return bad("invalid DBI substream extent");
-    // OMAP rewrites addresses; do not publish a wrong old-layout symbol index.
-    u16 omap = 0xffff;
-    if ((optionalBytes >= 8 && dbi.read(optional + 6, &omap) && omap != 0xffff) || (optionalBytes >= 10 && dbi.read(optional + 8, &omap) && omap != 0xffff)) return Status::error(ErrorCode::kUnsupported, "PDB OMAP address transformation requires an explicit remapping model");
+    u64 sourceTextBytes=0;
     for (u64 cursor = 64; cursor < 64 + u64(moduleBytes);) {
         if (!dbi.covers(cursor, 64)) return bad("truncated DBI module header");
-        u16 stream = 0xffff; u32 symbolBytes = 0; dbi.read(cursor + 34, &stream); dbi.read(cursor + 36, &symbolBytes);
+        u16 stream = 0xffff; u32 symbolBytes = 0,c11Bytes=0,c13Bytes=0;
+        dbi.read(cursor + 34, &stream); dbi.read(cursor + 36, &symbolBytes);dbi.read(cursor+40,&c11Bytes);dbi.read(cursor+44,&c13Bytes);
         std::string module, object; u64 next = cursor + 64;
         if (!stringAt(dbi, next, &module, &next) || !stringAt(dbi, next, &object, &next)) return bad("unterminated DBI module names");
         cursor = (next + 3) & ~u64{3}; if (cursor > 64 + u64(moduleBytes)) return bad("DBI module extent mismatch");
-        if (stream == 0xffff || !symbolBytes) continue;
+        if (stream == 0xffff) {if(symbolBytes||c11Bytes||c13Bytes)return bad("module data has no stream");continue;}
         ByteView moduleStream = streams.stream(stream); u32 signature = 0;
-        if (symbolBytes < 4 || !moduleStream.covers(0, symbolBytes) || !moduleStream.read(0, &signature) || signature != 4) return bad("invalid module CodeView symbol signature");
-        status = symbols(moduleStream.subview(4, symbolBytes - 4)); if (!status.ok()) return status;
+        if(symbolBytes) {
+            if (symbolBytes < 4 || !moduleStream.covers(0, symbolBytes) || !moduleStream.read(0, &signature) || signature != 4) return bad("invalid module CodeView symbol signature");
+            status = symbols(moduleStream.subview(4, symbolBytes - 4)); if (!status.ok()) return status;
+        }
+        const u64 c13Offset=u64(symbolBytes)+c11Bytes;
+        if(!moduleStream.covers(symbolBytes,c11Bytes)||!moduleStream.covers(c13Offset,c13Bytes))return bad("invalid module source extent");
+        if(c13Bytes){std::vector<DwarfSourceRow> rows;status=readCodeViewLines(image,moduleStream.subview(c13Offset,c13Bytes),globalStrings,&rows,omap.active()?&sourceSections:nullptr);if(!status.ok())return status;
+            if(omap.active()) {
+                std::vector<DwarfSourceRow> mappedRows;u64 mappedTextBytes=0;
+                for(size_t n=0;n+1<rows.size();++n){const auto& row=rows[n];const auto& next=rows[n+1];
+                    if(row.endSequence||next.address<=row.address)continue;
+                    if(row.address<image.imageBase()||row.address-image.imageBase()>0xffffffffull)return bad("C13 original RVA overflow");
+                    std::vector<PdbOmapRange> pieces;status=omap.translate(static_cast<u32>(row.address-image.imageBase()),next.address-row.address,&pieces);if(!status.ok())return status;
+                    mappedRangeCount+=pieces.size();if(mappedRangeCount>500000)return Status::error(ErrorCode::kTooLarge,"PDB OMAP total range budget exceeded");
+                    for(const auto& piece:pieces){Address at=0;status=mappedRange(piece.target,piece.size,true,&at);if(!status.ok())return status;
+                        if(mappedRows.size()>99998)return Status::error(ErrorCode::kTooLarge,"PDB mapped source row budget exceeded");
+                        mappedTextBytes+=row.file.size();if(mappedTextBytes>8*1024*1024)return Status::error(ErrorCode::kTooLarge,"PDB mapped source text budget exceeded");
+                        auto mapped=row;mapped.address=at;mappedRows.push_back(std::move(mapped));mappedRows.push_back({at+piece.size,{},0,0,true});}
+                }
+                rows=std::move(mappedRows);
+            }
+            if(rows.size()>100000-report.sources.size())return Status::error(ErrorCode::kTooLarge,"PDB source row budget exceeded");
+            for(const auto& row:rows)sourceTextBytes+=row.file.size();
+            if(sourceTextBytes>16*1024*1024)return Status::error(ErrorCode::kTooLarge,"PDB source text budget exceeded");
+            report.sources.insert(report.sources.end(),std::make_move_iterator(rows.begin()),std::make_move_iterator(rows.end()));}
     }
     report.partial = true;
-    report.warnings.push_back("Imported bounded DBI public/procedure/data symbols and exact TPI layouts; source C13 lines, type servers, virtual/bitfield object layouts and unhandled CodeView record families are not inferred");
+    report.warnings.push_back("Imported bounded DBI symbols, exact TPI layouts and C13 source lines/columns; source contents/checksums, legacy C11 lines, type servers, virtual/bitfield layouts and unhandled CodeView records are not inferred");
     *out = std::move(report); return Status::success();
 }
 } // namespace mint

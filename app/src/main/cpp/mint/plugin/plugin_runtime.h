@@ -14,7 +14,7 @@ public:
     PluginManager();~PluginManager();
     PluginManager(PluginManager&&) noexcept;PluginManager& operator=(PluginManager&&) noexcept;
     PluginManager(const PluginManager&)=delete;
-    Status load(const std::string& path,bool trustNativeCode);
+    Status load(const std::string& path,bool trustNativeCode,int descriptor=-1);
     Status registerBuiltin(const MintPluginV1* descriptor);
     Status registerBuiltinArchitecture(const MintArchitecturePluginV1* descriptor);
     Status registerBuiltinExtension(const MintPluginExtensionV2* descriptor);

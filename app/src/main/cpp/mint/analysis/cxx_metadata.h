@@ -25,6 +25,11 @@ struct CxxBaseClass {
     bool isPublic = false;
     bool virtualOffsetResolved = false;
     i64 objectOffset = 0;
+    // Microsoft PMD components are retained rather than misinterpreted as an
+    // Itanium vtable-relative virtual-base displacement.
+    bool usesPmd = false;
+    i32 vbptrOffset = -1, vbtableOffset = 0;
+    bool ambiguous = false;
 };
 
 struct CxxVtableAddressPoint {
@@ -68,11 +73,12 @@ struct CxxMetadataReport {
     std::vector<Class> classes;
 };
 
-// Symbol/relocation-backed Itanium ABI inventory for little-endian ELF/Mach-O
+// Symbol/relocation-backed Itanium ABI inventory for ELF/Mach-O
 // 32/64 native images. Separate primary/secondary address points, __si/__vmi
 // RTTI and virtual-base object offsets require exact validating linkage/byte
-// evidence. No stripped-class heuristic, Microsoft RTTI or invented field size
-// is implied. LSDA groups protected regions and their ordered landing-pad
+// evidence. PE adds export/COL-backed Microsoft RTTI hierarchy/PMD evidence.
+// No stripped-class heuristic or invented field size is implied.
+// LSDA groups protected regions and their ordered landing-pad
 // dispatch actions, not reconstructed source-level try/catch.
 CxxMetadataReport inspectCxxMetadata(const ElfImage& image, size_t limit = 1024);
 std::string cxxMetadataText(const ElfImage& image, size_t limit = 1024);

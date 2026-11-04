@@ -31,6 +31,7 @@ const char* symbol(MintOp op) {
 /// Operations whose value depends only on their operands, and which can therefore be
 /// moved to the point of use without changing what the program computes.
 bool isPure(MintOp op) {
+    if (isAtomicMemory(op)) return false;
     switch (op) {
         case MintOp::kLoad:
         case MintOp::kStore:
@@ -117,6 +118,10 @@ std::string ExprBuilder::operation(const SsaInsn& insn) {
         return "*(" + unsignedType(width) + "*)" + a;
     }
     if(insn.op==MintOp::kAtomicLoad)return "__atomic_load_n(("+unsignedType(valueWidth(insn.dest))+"*)(uintptr_t)("+a+"), __ATOMIC_ACQUIRE)";
+    if(insn.op==MintOp::kAtomicAnd || insn.op==MintOp::kAtomicOr || insn.op==MintOp::kAtomicXor) {
+        const auto operation=insn.op==MintOp::kAtomicAnd?"and":insn.op==MintOp::kAtomicOr?"or":"xor";
+        return std::string("__atomic_fetch_")+operation+"(("+unsignedType(valueWidth(insn.dest))+"*)(uintptr_t)("+a+"), "+b+", __ATOMIC_SEQ_CST)";
+    }
     if(insn.op==MintOp::kAtomicExchange || insn.op==MintOp::kAtomicAdd)return std::string(insn.op==MintOp::kAtomicExchange?"__atomic_exchange_n((":"__atomic_fetch_add((")+unsignedType(valueWidth(insn.dest))+"*)(uintptr_t)("+a+"), "+b+", __ATOMIC_SEQ_CST)";
     if (insn.op == MintOp::kSelect) return "(" + a + " ? " + b + " : " + c + ")";
     if (insn.op == MintOp::kSignExt) {
