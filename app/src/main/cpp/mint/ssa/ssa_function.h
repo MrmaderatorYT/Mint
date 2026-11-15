@@ -64,6 +64,8 @@ struct SsaInsn {
     /// Bytes per lane, carried through from the IR so the SSA listing can show
     /// which arithmetic a vector op actually performs.
     u8 laneWidth = 0;
+    std::vector<IrSwitchCase> switchCases; // use[1] is the captured table index.
+    std::vector<SsaId> tailInputs; // Explicit uses, positional in the proven ABI.
     u32 block = 0;
     bool dead = false;
 };

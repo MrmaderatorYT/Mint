@@ -1,5 +1,7 @@
 #include "mint/ir/lifter.h"
 
+#include <map>
+
 #include "mint/base/log.h"
 #include "mint/ir/lifter_internal.h"
 #include "mint/plugin/architecture_bridge.h"
@@ -157,6 +159,19 @@ Status Lifter::liftFunction(const Function& function, const MemoryMap& memory,
     out->arch = arch_;
     out->byteOrder = memory.byteOrder();
 
+    std::map<Address,std::vector<const ResolvedIndirectJump*>> captures;
+    std::map<Address,const ResolvedIndirectJump*> switches;
+    std::map<Address,Varnode> selectors;
+    std::map<Address,Address> tailCalls;
+    if(arch_==Arch::kX86_64 && function.tailCalls.size()<=64)
+        for(const auto& tail:function.tailCalls)tailCalls.emplace(tail.branch,tail.target);
+    for(const auto& jump:function.resolvedIndirectJumps) {
+        if(jump.switchCases.empty() || jump.switchCases.size()>256 || jump.selectorAddress==kNoAddress ||
+            jump.selectorAddress>jump.branch || (jump.selectorWidth!=1&&jump.selectorWidth!=2&&jump.selectorWidth!=4&&jump.selectorWidth!=8))continue;
+        if(!switches.emplace(jump.branch,&jump).second)continue;
+        captures[jump.selectorAddress].push_back(&jump);
+    }
+
     IrBuilder builder(out);
     thumbItRemaining_ = 0;
     thumbItState_ = 0;
@@ -179,6 +194,16 @@ Status Lifter::liftFunction(const Function& function, const MemoryMap& memory,
             const ByteView view = memory.viewAt(cursor, want);
             if (view.empty()) break;
 
+            // A rel32 load commonly overwrites the same register that indexed
+            // the table. Retain its exact pre-load value as a normal IR use.
+            const auto capture=captures.find(cursor);
+            if(capture!=captures.end())for(const auto* jump:capture->second) {
+                const auto selector=builder.newTemp(jump->selectorWidth);
+                builder.setAddress(cursor);
+                builder.emit(MintOp::kCopy,selector,Varnode::reg(jump->selectorRegister,jump->selectorWidth));
+                selectors.emplace(jump->branch,selector);
+            }
+
             const u32 consumed = liftInstruction(cursor, view, &builder);
             if (consumed == 0) {
                 // Bytes that will not decode still get an op, so the IR admits the
@@ -187,6 +212,21 @@ Status Lifter::liftFunction(const Function& function, const MemoryMap& memory,
                 builder.emitIntrinsic(0);
                 ++out->machineInsnCount;
                 break;
+            }
+            const auto resolved=switches.find(cursor);
+            const auto selector=selectors.find(cursor);
+            if(resolved!=switches.end() && selector!=selectors.end() && !out->insns.empty()) {
+                auto& branch=out->insns.back();
+                if(branch.op==MintOp::kBranchInd && branch.address==cursor) {
+                    branch.b=selector->second;
+                    for(const auto& arm:resolved->second->switchCases)branch.switchCases.push_back({arm.value,arm.target});
+                }
+            }
+            const auto tail=tailCalls.find(cursor);
+            if(tail!=tailCalls.end() && !out->insns.empty() && machineBlock.successors.empty()) {
+                auto& branch=out->insns.back();
+                if(branch.op==MintOp::kBranch && branch.address==cursor && branch.a.isConstant() && branch.a.offset==tail->second)
+                    branch.op=MintOp::kTailCall;
             }
             cursor += consumed;
             ++out->machineInsnCount;

@@ -38,7 +38,7 @@ bool boundedGraph(const SsaFunction& function) {
     if(function.values.size()>250000 || function.insns.size()>250000 || function.phis.size()>250000 || function.blocks.size()>25000)return false;
     size_t links=0;
     auto take=[&](size_t count){if(count>4000000-links)return false;links+=count;return true;};
-    for(const auto& insn:function.insns)if(!take(insn.clobbers.size()+3))return false;
+    for(const auto& insn:function.insns)if(insn.switchCases.size()>256||insn.tailInputs.size()>6||!take(insn.clobbers.size()+3+insn.switchCases.size()*2+insn.tailInputs.size()))return false;
     for(const auto& phi:function.phis)if(!take(phi.args.size()))return false;
     for(const auto& block:function.blocks)if(!take(block.successors.size())||!take(block.predecessors.size())||!take(block.phis.size()))return false;
     return true;
@@ -49,14 +49,14 @@ u64 fingerprint(const SsaFunction& function) {
     mix(function.entry);mix(static_cast<u8>(function.arch));mix(static_cast<u8>(function.byteOrder));
     mix(function.values.size());mix(function.insns.size());mix(function.phis.size());mix(function.blocks.size());
     for(const auto& value:function.values){mix(static_cast<u8>(value.def));mix(value.defIndex);mix(static_cast<u8>(value.storage.space));mix(value.storage.offset);mix(value.storage.size);}
-    for(const auto& insn:function.insns){mix(static_cast<u8>(insn.op));mix(insn.dest);for(auto use:insn.use)mix(use);mix(insn.dead);mix(insn.block);mix(insn.laneWidth);mix(insn.clobbers.size());for(auto clobber:insn.clobbers)mix(clobber);}
+    for(const auto& insn:function.insns){mix(static_cast<u8>(insn.op));mix(insn.dest);for(auto use:insn.use)mix(use);mix(insn.dead);mix(insn.block);mix(insn.laneWidth);mix(insn.clobbers.size());for(auto clobber:insn.clobbers)mix(clobber);mix(insn.switchCases.size());for(const auto& item:insn.switchCases){mix(item.value);mix(item.target);}mix(insn.tailInputs.size());for(auto input:insn.tailInputs)mix(input);}
     for(const auto& phi:function.phis){mix(phi.dest);mix(phi.block);mix(phi.dead);mix(phi.args.size());for(auto arg:phi.args)mix(arg);}
     for(const auto& block:function.blocks){mix(block.id);mix(block.start);mix(block.firstInsn);mix(block.insnCount);mix(block.phis.size());for(auto phi:block.phis)mix(phi);mix(block.successors.size());for(auto successor:block.successors)mix(successor);mix(block.predecessors.size());for(auto predecessor:block.predecessors)mix(predecessor);}
     return hash;
 }
 bool readMemory(MintOp op){return op==MintOp::kLoad||op==MintOp::kVectorLoad;}
 bool writeMemory(MintOp op){return op==MintOp::kStore||op==MintOp::kVectorStore;}
-bool barrier(MintOp op){return op==MintOp::kCall||op==MintOp::kCallInd||op==MintOp::kIntrinsic||op==MintOp::kMemoryFence||isAtomicMemory(op);}
+bool barrier(MintOp op){return op==MintOp::kCall||op==MintOp::kCallInd||op==MintOp::kTailCall||op==MintOp::kIntrinsic||op==MintOp::kMemoryFence||isAtomicMemory(op);}
 struct Slot {
     MemoryAddress address;u8 width;
     bool operator==(const Slot& other)const {return width==other.width && same(address,other.address);}
@@ -180,18 +180,42 @@ struct CallContext {
 };
 class CallSummaries {
 public:
-    explicit CallSummaries(const MemoryFunctionResolver& resolver):resolver_(resolver){}
+    explicit CallSummaries(const MemoryFunctionResolver& resolver,size_t initialWork=0):resolver_(resolver),work_(initialWork){}
     std::vector<MemoryDependencyBinding> dependencies;
     MemoryCallEffect call(const CallContext& context,u32 index) {
-        MemoryCallEffect result;result.instruction=index;
-        const auto& function=context.function;const auto& insn=function.insns[index];
-        if(insn.op!=MintOp::kCall || insn.use[0]>=function.values.size())return result;
+        Address target;
+        if(!directTarget(context.function,index,&target)){MemoryCallEffect unknown;unknown.instruction=index;return unknown;}
+        return instantiate(context,index,target,get(target,context.function.arch,context.function.byteOrder));
+    }
+    bool bind(const CallContext& context,u32 index,const Varnode& storage,MemoryAddress* result) {
+        if(!tick())return false;
+        *result=at(context,index,storage);
+        return work_<=2000000;
+    }
+private:
+    const MemoryFunctionResolver& resolver_;
+    struct Cache {
+        bool solved=false;
+        CallSummary summary;
+        std::shared_ptr<const SsaFunction> body;
+        std::vector<MemoryAddress> facts;
+        std::unique_ptr<CallContext> context;
+        std::vector<Address> edges;
+    };
+    std::map<Address,Cache> cache_;
+    size_t values_=0,instructions_=0,work_=0;
+    static bool directTarget(const SsaFunction& function,u32 index,Address* result) {
+        const auto& insn=function.insns[index];
+        if(insn.op!=MintOp::kCall || insn.use[0]>=function.values.size())return false;
         const auto& target=function.values[insn.use[0]];
-        if(target.def!=SsaDef::kConstant || !target.storage.isConstant() || target.storage.size>8)return result;
-        if((function.arch==Arch::kX86_32||function.arch==Arch::kX86_64)&&target.storage.size!=pointerWidth(function.arch))return result;
-        result.target=target.storage.offset;
-        const auto summary=get(result.target,function.arch,function.byteOrder);
+        if(target.def!=SsaDef::kConstant || !target.storage.isConstant() || target.storage.size>8)return false;
+        if((function.arch==Arch::kX86_32||function.arch==Arch::kX86_64)&&target.storage.size!=pointerWidth(function.arch))return false;
+        *result=target.storage.offset;return true;
+    }
+    MemoryCallEffect instantiate(const CallContext& context,u32 index,Address target,const CallSummary& summary) {
+        MemoryCallEffect result;result.instruction=index;result.target=target;
         if(!summary.complete)return result;
+        const auto& function=context.function;
         const bool x86=function.arch==Arch::kX86_32||function.arch==Arch::kX86_64;
         MemoryAddress entryStack;
         if(x86) {
@@ -210,11 +234,6 @@ public:
         }
         result.complete=true;return result;
     }
-private:
-    const MemoryFunctionResolver& resolver_;
-    struct Cache {bool active=true;CallSummary summary;};
-    std::map<Address,Cache> cache_;
-    size_t depth_=0,values_=0,instructions_=0,work_=0;
     static bool forbiddenInput(Arch arch,const Varnode& input) {
         if(input.offset==stackOffset(arch))return true;
         if(arch==Arch::kAArch64)return input.offset==arm64::kXn(30)||input.offset==arm64::kPc;
@@ -309,56 +328,130 @@ private:
         for(auto successor:f.blocks[insn.block].successors)if(f.blocks[successor].start==target.storage.offset)return true;
         return false;
     }
-    CallSummary get(Address target,Arch arch,ByteOrder order) {
-        const auto cached=cache_.find(target);if(cached!=cache_.end())return cached->second.active?CallSummary{}:cached->second.summary;
+    void discover(Address target,Arch arch,ByteOrder order,size_t depth) {
+        if(cache_.count(target))return;
         const bool native=arch==Arch::kAArch64||arch==Arch::kArm32||arch==Arch::kThumb||arch==Arch::kX86_32||arch==Arch::kX86_64||arch==Arch::kRiscV32||arch==Arch::kRiscV64;
-        if(!resolver_ || cache_.size()>=64 || depth_>=16 || !native)return {};
-        auto inserted=cache_.emplace(target,Cache{}).first;
-        auto finish=[&](CallSummary summary){inserted->second.active=false;inserted->second.summary=summary;return summary;};
+        if(!resolver_ || cache_.size()>=64 || depth>=16 || !native || !tick())return;
+        auto& node=cache_[target];node.solved=true; // Invalid/unavailable bodies are unknown.
         std::shared_ptr<const SsaFunction> body;
-        try{body=resolver_(target);}catch(...){return finish({});}
+        try{body=resolver_(target);}catch(...){return;}
         if(!body || body->entry!=target || body->arch!=arch || body->byteOrder!=order || !boundedGraph(*body) || body->blocks.empty() ||
             body->values.size()>32768 || body->phis.size()>32768 || body->insns.size()>8192 || body->blocks.size()>512 ||
-            body->values.size()>250000-values_ || body->insns.size()>250000-instructions_)return finish({});
+            body->values.size()>250000-values_ || body->insns.size()>250000-instructions_)return;
         values_+=body->values.size();instructions_+=body->insns.size();
-        if(!body->verify().empty())return finish({});
+        if(!body->verify().empty())return;
         dependencies.push_back({body,fingerprint(*body)});
-        std::vector<MemoryAddress> facts;if(!addressFacts(*body,&facts,&work_).ok())return finish({});
-        CallContext context(*body,facts);std::set<SummaryRange> writes;std::vector<Varnode> preservedWrites;
+        node.body=body;
+        if(!addressFacts(*body,&node.facts,&work_).ok())return;
+        node.context=std::make_unique<CallContext>(*body,node.facts);
+        for(const auto& block:body->blocks)if(node.context->dominance.reachable(block.id))
+            for(u32 index=block.firstInsn;index<block.firstInsn+block.insnCount;++index) {
+                if(!tick())return;
+                Address callee;
+                if(!body->insns[index].dead&&directTarget(*body,index,&callee))node.edges.push_back(callee);
+            }
+        std::sort(node.edges.begin(),node.edges.end());node.edges.erase(std::unique(node.edges.begin(),node.edges.end()),node.edges.end());
+        node.solved=false;
+        for(auto callee:node.edges)discover(callee,arch,order,depth+1);
+    }
+    CallSummary evaluateBody(const Cache& node,const std::map<Address,CallSummary>& approximants) {
+        const auto& body=node.body;const auto& facts=node.facts;const auto& context=*node.context;
+        const auto arch=body->arch;
+        std::set<SummaryRange> writes;std::vector<Varnode> preservedWrites;
         const auto callerSaved=abiCallerSavedRegisters(arch);
         for(const auto& insn:body->insns)if(insn.dest<body->values.size()) {
+            if(!tick())return {};
             const auto storage=body->values[insn.dest].storage;
             if(storage.isRegister()&&std::find(callerSaved.begin(),callerSaved.end(),storage)==callerSaved.end()&&
                 std::find(preservedWrites.begin(),preservedWrites.end(),storage)==preservedWrites.end())preservedWrites.push_back(storage);
         }
         const Varnode sp=Varnode::reg(stackOffset(arch),pointerWidth(arch));
-        if((arch==Arch::kX86_32||arch==Arch::kX86_64)&&std::find(preservedWrites.begin(),preservedWrites.end(),sp)==preservedWrites.end())return finish({});
-        ++depth_;struct Depth {size_t& depth;~Depth(){--depth;}} guard{depth_};
+        if((arch==Arch::kX86_32||arch==Arch::kX86_64)&&std::find(preservedWrites.begin(),preservedWrites.end(),sp)==preservedWrites.end())return {};
         for(const auto& block:body->blocks) {
             if(!context.dominance.reachable(block.id))continue;
             const SsaInsn* last=nullptr;
             for(u32 index=block.firstInsn;index<block.firstInsn+block.insnCount;++index) {
-                if(!tick())return finish({});const auto& insn=body->insns[index];if(insn.dead)continue;last=&insn;
+                if(!tick())return {};const auto& insn=body->insns[index];if(insn.dead)continue;last=&insn;
                 if(writeMemory(insn.op)) {
-                    if(insn.use[0]>=facts.size()||insn.use[1]>=body->values.size()||!record(*body,facts[insn.use[0]],body->values[insn.use[1]].storage.size,&writes))return finish({});
+                    if(insn.use[0]>=facts.size()||insn.use[1]>=body->values.size()||!record(*body,facts[insn.use[0]],body->values[insn.use[1]].storage.size,&writes))return {};
                 } else if(insn.op==MintOp::kCall || insn.op==MintOp::kCallInd) {
-                    const auto effect=call(context,index);if(!effect.complete)return finish({});
-                    for(const auto& write:effect.writes)if(!record(*body,write.address,write.width,&writes))return finish({});
-                } else if(barrier(insn.op)||insn.op==MintOp::kBranchInd||insn.op==MintOp::kTrap)return finish({});
-                else if((insn.op==MintOp::kBranch||insn.op==MintOp::kCondBranch)&&!internalBranch(*body,insn))return finish({});
+                    Address target;if(!directTarget(*body,index,&target))return {};
+                    // SCC approximants are private. An empty one is not a
+                    // published purity proof; every body is validated each round.
+                    const auto internal=approximants.find(target);const auto external=cache_.find(target);
+                    if(internal==approximants.end()&&(external==cache_.end()||!external->second.solved))return {};
+                    const auto& summary=internal!=approximants.end()?internal->second:external->second.summary;
+                    const auto effect=instantiate(context,index,target,summary);if(!effect.complete)return {};
+                    for(const auto& write:effect.writes)if(!record(*body,write.address,write.width,&writes))return {};
+                } else if(barrier(insn.op)||insn.op==MintOp::kBranchInd||insn.op==MintOp::kTrap)return {};
+                else if((insn.op==MintOp::kBranch||insn.op==MintOp::kCondBranch)&&!internalBranch(*body,insn))return {};
                 if(insn.op==MintOp::kReturn)for(const auto& storage:preservedWrites) {
                     const auto value=at(context,index,storage,true);
                     if(storage==sp) {
                         const i64 expected=arch==Arch::kX86_32||arch==Arch::kX86_64?pointerWidth(arch):0;
-                        if(value.kind!=MemoryBaseKind::kEntryStack||value.offset!=expected)return finish({});
+                        if(value.kind!=MemoryBaseKind::kEntryStack||value.offset!=expected)return {};
                     } else if(value.kind!=MemoryBaseKind::kSymbolic||value.offset!=0||value.base>=body->values.size()||
-                        body->values[value.base].def!=SsaDef::kEntry||body->values[value.base].storage!=storage)return finish({});
+                        body->values[value.base].def!=SsaDef::kEntry||body->values[value.base].storage!=storage)return {};
                 }
             }
-            if(!last || (last->op!=MintOp::kReturn&&last->op!=MintOp::kBranch&&last->op!=MintOp::kCondBranch))return finish({});
+            if(!last || (last->op!=MintOp::kReturn&&last->op!=MintOp::kBranch&&last->op!=MintOp::kCondBranch))return {};
         }
-        CallSummary result;result.complete=true;result.writes.assign(writes.begin(),writes.end());return finish(std::move(result));
+        CallSummary result;result.complete=true;result.writes.assign(writes.begin(),writes.end());return result;
     }
+    void solveComponent(const std::vector<Address>& component) {
+        // May-write equations start at bottom (no known writes), NOT at a
+        // complete public summary. Union is monotone; publication requires a
+        // simultaneous fixed point and every local/nested effect and return
+        // contract to validate. This bounds writes along every finite execution
+        // prefix, without asserting termination or private/disjoint stack frames.
+        std::map<Address,CallSummary> current;
+        for(auto target:component)current[target].complete=true;
+        bool converged=false;
+        for(unsigned round=0;round<64;++round) {
+            auto next=current;bool changed=false,valid=true;
+            for(auto target:component) {
+                auto effect=evaluateBody(cache_.at(target),current);
+                if(!effect.complete){valid=false;break;}
+                std::set<SummaryRange> ranges(current.at(target).writes.begin(),current.at(target).writes.end());
+                ranges.insert(effect.writes.begin(),effect.writes.end());
+                if(ranges.size()>64){valid=false;break;}
+                changed|=ranges.size()!=current.at(target).writes.size();
+                next[target].writes.assign(ranges.begin(),ranges.end());
+            }
+            if(!valid)break;
+            current=std::move(next);
+            if(!changed){converged=true;break;}
+        }
+        // All-or-nothing SCC publication. A failed round never leaves partial
+        // effects on a member or on callers that depend on that member.
+        for(auto target:component) {
+            auto& node=cache_.at(target);node.solved=true;
+            node.summary=converged?std::move(current.at(target)):CallSummary{};
+        }
+    }
+    void solvePending() {
+        // Tarjan emits dependency SCCs before their callers. The graph is fully
+        // discovered first: missing edges/bodies remain unknown at evaluation.
+        std::map<Address,size_t> indices,low;std::set<Address> active;std::vector<Address> stack;size_t next=0;
+        std::function<void(Address)> visit=[&](Address target) {
+            indices[target]=low[target]=next++;stack.push_back(target);active.insert(target);
+            for(auto callee:cache_.at(target).edges) {
+                const auto found=cache_.find(callee);if(found==cache_.end()||found->second.solved)continue;
+                if(!indices.count(callee)){visit(callee);low[target]=std::min(low[target],low[callee]);}
+                else if(active.count(callee))low[target]=std::min(low[target],indices[callee]);
+            }
+            if(low[target]!=indices[target])return;
+            std::vector<Address> component;
+            do {component.push_back(stack.back());active.erase(stack.back());stack.pop_back();}while(component.back()!=target);
+            solveComponent(component);
+        };
+        for(const auto& item:cache_)if(!item.second.solved&&!indices.count(item.first))visit(item.first);
+    }
+    CallSummary get(Address target,Arch arch,ByteOrder order) {
+        discover(target,arch,order,0);solvePending();
+        const auto found=cache_.find(target);return found==cache_.end()?CallSummary{}:found->second.summary;
+    }
+
 };
 
 }
@@ -366,6 +459,45 @@ bool MemoryAnalysis::matches(const SsaFunction& function) const {
     if(dependencies.size()>64)return false;
     for(const auto& dependency:dependencies)if(!dependency.function || !boundedGraph(*dependency.function) || dependency.fingerprint!=fingerprint(*dependency.function))return false;
     return analyzedFunction==&function && values.size()==function.values.size() && accessByInstruction.size()==function.insns.size() && boundedGraph(function) && functionFingerprint==fingerprint(function);
+}
+Status bindAapcs64CallInputs(const SsaFunction& function,const MemoryAnalysis* memory,
+                            std::vector<MemoryCallInputs>* output,std::vector<u8>* priorEffects) {
+    if(!output)return Status::error(ErrorCode::kBadFormat,"missing call-input output");
+    if(function.arch!=Arch::kAArch64)return Status::error(ErrorCode::kUnsupported,"call-input bindings require AArch64");
+    if(!boundedGraph(function) || function.values.size()>32768 || function.phis.size()>32768 ||
+       function.insns.size()>8192 || function.blocks.size()>512)
+        return Status::error(ErrorCode::kTooLarge,"call-input SSA bounds exceeded");
+    if(!function.verify().empty())return Status::error(ErrorCode::kBadFormat,"invalid call-input SSA");
+    std::vector<MemoryAddress> computed;
+    size_t work=0;
+    const std::vector<MemoryAddress>* facts=nullptr;
+    if(memory&&memory->matches(function))facts=&memory->values;
+    else {
+        const auto status=addressFacts(function,&computed,&work);
+        if(!status.ok())return status;
+        facts=&computed;
+    }
+    CallContext context(function,*facts);
+    const MemoryFunctionResolver noFunctions;
+    CallSummaries binder(noFunctions,work);
+    std::vector<MemoryCallInputs> prepared;
+    size_t calls=0;
+    for(const auto& block:function.blocks)if(context.dominance.reachable(block.id))
+        for(u32 index=block.firstInsn;index<block.firstInsn+block.insnCount;++index) {
+            const auto& insn=function.insns[index];
+            if(insn.dead || (insn.op!=MintOp::kCall&&insn.op!=MintOp::kCallInd))continue;
+            if(++calls>4096)return Status::error(ErrorCode::kTooLarge,"call-input call count exceeded");
+            if(insn.op!=MintOp::kCall || insn.use[0]>=function.values.size())continue;
+            const auto& target=function.values[insn.use[0]];
+            if(target.def!=SsaDef::kConstant || !target.storage.isConstant() || target.storage.size!=8)continue;
+            MemoryCallInputs inputs;inputs.instruction=index;inputs.target=target.storage.offset;
+            for(unsigned argument=0;argument<inputs.arguments.size();++argument)
+                if(!binder.bind(context,index,Varnode::reg(arm64::kXn(argument),8),&inputs.arguments[argument]))
+                    return Status::error(ErrorCode::kTooLarge,"call-input binding work limit exceeded");
+            prepared.push_back(std::move(inputs));
+        }
+    if(priorEffects)*priorEffects=std::move(context.priorEffects);
+    *output=std::move(prepared);return Status::success();
 }
 bool memoryMayAlias(const MemoryAddress& a,u8 aWidth,const MemoryAddress& b,u8 bWidth) {
     if(!aWidth || !bWidth || !a.exact() || !b.exact() || a.pointerWidth!=b.pointerWidth || (a.pointerWidth!=4&&a.pointerWidth!=8))return true;

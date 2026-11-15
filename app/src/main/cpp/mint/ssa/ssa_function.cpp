@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <set>
 #include <unordered_map>
 
 #include "mint/ir/dominance.h"
@@ -59,6 +60,7 @@ bool hasSideEffect(MintOp op) {
         case MintOp::kBranchInd:
         case MintOp::kCall:
         case MintOp::kCallInd:
+        case MintOp::kTailCall:
         case MintOp::kReturn:
         case MintOp::kIntrinsic:
             return true;
@@ -172,6 +174,27 @@ std::vector<std::string> SsaFunction::verify() const {
     }
     for (size_t index = 0; index < insns.size(); ++index) {
         const SsaInsn& insn = insns[index];
+        if(insn.tailInputs.size()>6 || (!insn.tailInputs.empty()&&insn.op!=MintOp::kTailCall))report("invalid tail input metadata");
+        if(insn.op==MintOp::kTailCall){
+            if(arch!=Arch::kX86_64||insn.dest!=kNoValue||!insn.clobbers.empty()||insn.use[1]!=kNoValue||insn.use[2]!=kNoValue||insn.use[0]>=values.size()||values[insn.use[0]].def!=SsaDef::kConstant||!values[insn.use[0]].storage.isConstant()||values[insn.use[0]].storage.size!=8)report("invalid direct terminal x86-64 tail transfer");
+            if(insn.block<blocks.size()){const auto& block=blocks[insn.block];if(!block.successors.empty()||index+1!=u64(block.firstInsn)+block.insnCount)report("tail transfer is not a terminal CFG exit");}
+        }
+        if(!insn.switchCases.empty()) {
+            if(insn.op!=MintOp::kBranchInd || insn.use[1]>=values.size() || insn.switchCases.size()>256)report("invalid table-index switch metadata");
+            std::set<u64> cases;std::set<Address> targets,expected;
+            const auto width=insn.use[1]<values.size()?values[insn.use[1]].storage.size:0;
+            if(!width || width>8)report("invalid switch index width");
+            for(const auto& arm:insn.switchCases) {
+                if(!cases.insert(arm.value).second || (width && width<8 && arm.value>>unsigned(width*8)))report("duplicate or out-of-width switch case value");
+                targets.insert(arm.target);
+            }
+            if(insn.block<blocks.size()) {
+                const auto& block=blocks[insn.block];
+                if(index+1!=u64(block.firstInsn)+block.insnCount)report("switch metadata is not on the block terminator");
+                for(auto next:block.successors)if(next<blocks.size())expected.insert(blocks[next].start);
+            }
+            if(targets!=expected)report("switch case targets do not match CFG successors");
+        } else if(insn.op==MintOp::kBranchInd && insn.use[1]!=kNoValue)report("switch index has no proven case mapping");
         if (insn.block >= blocks.size()) {
             report("instruction " + std::to_string(index) + " has an invalid block");
         }
@@ -197,6 +220,11 @@ std::vector<std::string> SsaFunction::verify() const {
                 report("value " + std::to_string(use) + " does not dominate instruction " +
                        std::to_string(index));
             }
+        }
+        for(auto use:insn.tailInputs){
+            if(use>=values.size()){report("invalid tail input use");continue;}
+            ++observedUses[use];if(!dominatesValue(*this,dominance,use,insn.block,static_cast<u32>(index),0,false))report("tail input does not dominate transfer");
+            if(!values[use].storage.size||values[use].storage.size>8)report("invalid tail input width");
         }
     }
 
@@ -302,6 +330,7 @@ std::string SsaFunction::toText() const {
             if (insn.op == MintOp::kIntrinsic) {
                 out += " #" + std::to_string(insn.intrinsicId);
             }
+            if(!insn.tailInputs.empty()){out+=" [inputs";for(auto input:insn.tailInputs)out+=" "+valueText(input);out+="]";}
             out += "\n";
         }
     }

@@ -13,7 +13,7 @@ enum class SsaUseKind : u8 { kInstruction, kPhi };
 struct SsaUseSite {
     SsaUseKind kind = SsaUseKind::kInstruction;
     u32 index = 0;       ///< instruction or phi index
-    u8 operand = 0;      ///< source slot for an instruction, argument for a phi
+    u8 operand = 0;      ///< sources 0..2, tail inputs 3+, or argument for a phi
     u32 predecessor = kNoValue;  ///< the incoming block for a phi argument
 };
 

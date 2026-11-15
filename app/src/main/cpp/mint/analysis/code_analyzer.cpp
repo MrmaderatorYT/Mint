@@ -1,4 +1,5 @@
 #include "mint/analysis/code_analyzer.h"
+#include "mint/analysis/x86_switch_recovery.h"
 
 #include <algorithm>
 #include <cctype>
@@ -11,6 +12,7 @@
 #include "mint/analysis/unwind_roots.h"
 #include "mint/ir/lifter.h"
 #include "mint/ir/normalize.h"
+#include "mint/ir/tail_call_analysis.h"
 #include "mint/ssa/ssa_builder.h"
 
 namespace mint {
@@ -690,7 +692,12 @@ void CodeAnalyzer::descend(const ElfImage& image, const Options& options,
                 // follow() already treats a branch to another function's entry that
                 // way. A chain of tail-calling functions would otherwise collapse
                 // into one enormous body whose decompilation is unreadable.
-                if (record.hasKnownTarget()) follow(record.target);
+                if (record.hasKnownTarget()) {
+                    const auto proof=indirectFlowReports_.find(function.entry);
+                    if(proof!=indirectFlowReports_.end())for(const auto& tail:proof->second.tailCalls)
+                        if(tail.branch==record.address&&tail.target==record.target)function.tailCalls.push_back(tail);
+                    follow(record.target);
+                }
                 else function.incomplete = true;
                 break;
 
@@ -741,8 +748,10 @@ void CodeAnalyzer::descend(const ElfImage& image, const Options& options,
                     if (recoverBranchTargets(image, function.entry, record, &targets)) {
                         if (const auto* proven = provenIndirectSite(function.entry, record.address, false))
                             for (const auto& target : proven->targets) branchModeHints_[target.address] = target.decodeArch;
-                        function.resolvedIndirectJumps.push_back(
-                            ResolvedIndirectJump{record.address, targets});
+                        ResolvedIndirectJump jump; jump.branch=record.address;jump.targets=targets;
+                        if(const auto* proven=provenIndirectSite(function.entry,record.address,false))
+                            if(!proven->switchTable.switchCases.empty()) {jump=proven->switchTable;jump.targets=targets;}
+                        function.resolvedIndirectJumps.push_back(std::move(jump));
                         for (Address target : targets) follow(target);
                     } else {
                         function.incomplete = true;
@@ -760,6 +769,7 @@ void CodeAnalyzer::descend(const ElfImage& image, const Options& options,
     if (function.instructions.empty()) return;
 
     std::sort(function.instructions.begin(), function.instructions.end());
+    std::sort(function.tailCalls.begin(),function.tailCalls.end(),[](const auto& a,const auto& b){return a.branch<b.branch;});
     function.callees.assign(callees.begin(), callees.end());
     std::sort(function.callees.begin(), function.callees.end());
 
@@ -969,15 +979,28 @@ const IndirectFlowSite* CodeAnalyzer::provenIndirectSite(Address entry, Address 
 }
 
 bool CodeAnalyzer::sameProvenFlow(const IndirectFlowReport& a, const IndirectFlowReport& b) {
-    using Key = std::tuple<Address, bool, Address, Arch>;
+    using Key = std::tuple<Address, bool, Address, Arch, bool>;
     auto keys = [](const IndirectFlowReport& report) {
         std::vector<Key> result;
         for (const auto& site : report.sites) if (site.complete)
-            for (const auto& target : site.targets) result.emplace_back(site.address, site.call, target.address, target.decodeArch);
+            for (const auto& target : site.targets) result.emplace_back(site.address, site.call, target.address, target.decodeArch,site.discoveryOnly);
         std::sort(result.begin(), result.end());
         return result;
     };
-    return keys(a) == keys(b);
+    auto cases=[](const IndirectFlowReport& report) {
+        using CaseKey=std::tuple<Address,Address,u64,u8,Address,u64,Address>;
+        std::vector<CaseKey> result;
+        for(const auto& site:report.sites)if(site.complete)for(const auto& item:site.switchTable.switchCases)
+            result.emplace_back(site.address,site.switchTable.selectorAddress,site.switchTable.selectorRegister,
+                site.switchTable.selectorWidth,site.switchTable.table,item.value,item.target);
+        std::sort(result.begin(),result.end());return result;
+    };
+    auto tails=[](const IndirectFlowReport& report) {
+        std::vector<std::pair<Address,Address>> result;
+        for(const auto& tail:report.tailCalls)result.emplace_back(tail.branch,tail.target);
+        std::sort(result.begin(),result.end());return result;
+    };
+    return keys(a) == keys(b)&&cases(a)==cases(b)&&tails(a)==tails(b);
 }
 
 Status CodeAnalyzer::proveIndirectFlow(const ElfImage& image, const Function& function, IndirectFlowReport* report) const {
@@ -985,7 +1008,9 @@ Status CodeAnalyzer::proveIndirectFlow(const ElfImage& image, const Function& fu
     bool needed = false;
     for (Address address : function.instructions) {
         const auto* record = code_.find(address);
-        if (record && (record->flow == FlowKind::kIndirectCall || record->flow == FlowKind::kIndirectJump)) needed = true;
+        if (record && (record->flow == FlowKind::kIndirectCall || record->flow == FlowKind::kIndirectJump ||
+            (image.format()==ImageFormat::kElf64 && function.decodeArch==Arch::kX86_64 &&
+             record->flow==FlowKind::kJump && record->target!=function.entry && functionBoundaries_.count(record->target)))) needed = true;
     }
     if (!needed) { report->converged = true; return Status::success(); }
     // One function cannot monopolize a mobile analysis. Unsupported plugin
@@ -996,17 +1021,75 @@ Status CodeAnalyzer::proveIndirectFlow(const ElfImage& image, const Function& fu
         if (mode != instructionArchitectures_.end() && mode->second != function.decodeArch) return Status::success();
     }
     Lifter lifter; IrFunction ir; SsaFunction ssa;
-    if (!lifter.open(function.decodeArch).ok() || !lifter.liftFunction(function, image.memory(), &ir).ok() || !ir.verify().empty()) return Status::success();
+    // Old tail annotations are never inputs to their own native-state proof.
+    Function checked=function;checked.tailCalls.clear();
+    if (!lifter.open(function.decodeArch).ok() || !lifter.liftFunction(checked, image.memory(), &ir).ok() || !ir.verify().empty()) return Status::success();
     normalizeRegisterAccesses(&ir);
     if (!buildSsa(ir, &ssa).ok() || !ssa.verify().empty()) return Status::success();
     Status status = recoverIndirectFlow(image, ssa, report);
     if (!status.ok()) { *report = {}; report->functionEntry = function.entry; return Status::success(); }
+    if(image.format()==ImageFormat::kElf64 && function.decodeArch==Arch::kX86_64 &&
+        image.memory().byteOrder()==ByteOrder::kLittle && !image.memory().hasOverlaps()) {
+        std::vector<u32> candidates;
+        for(u32 i=0;i<ssa.insns.size();++i) {
+            const auto& insn=ssa.insns[i];const auto* native=code_.find(insn.address);
+            if(insn.op!=MintOp::kBranch || insn.use[0]>=ssa.values.size() || !native || native->flow!=FlowKind::kJump)continue;
+            const auto& value=ssa.values[insn.use[0]];
+            if(!value.storage.isConstant() || value.storage.size!=8 || value.storage.offset!=native->target ||
+                native->target==function.entry || !functionBoundaries_.count(native->target) || excluded(native->target) ||
+                std::binary_search(function.instructions.begin(),function.instructions.end(),native->target))continue;
+            candidates.push_back(i);
+        }
+        // Share a per-function proof budget rather than giving each exit an
+        // independent maximum. No partial proof of a site is ever published.
+        if(!candidates.empty() && candidates.size()<=64) {
+            MemoryAnalysis memory;
+            Disassembler decoder;
+            if(analyzeMemory(ssa,&memory).ok() && decoder.open(Arch::kX86_64).ok())for(auto index:candidates) {
+                const auto& insn=ssa.insns[index];const auto target=ssa.values[insn.use[0]].storage.offset;
+                const auto mode=instructionArchitectures_.find(target);
+                if(!image.memory().isExecutable(target) || (mode!=instructionArchitectures_.end()&&mode->second!=Arch::kX86_64))continue;
+                InsnRecord decoded;const auto bytes=image.memory().viewAt(target,15);
+                if(!decoder.decode(target,bytes,&decoded) || decoded.flow==FlowKind::kInvalid || !decoded.size ||
+                    decoded.next()<target || bytes.size()<decoded.size)continue;
+                const auto* known=code_.find(target);
+                if(known && (known->id!=decoded.id || known->size!=decoded.size || known->flow!=decoded.flow ||
+                    ((decoded.flow!=FlowKind::kIndirectJump&&decoded.flow!=FlowKind::kIndirectCall)&&known->target!=decoded.target)))continue;
+                bool overlap=false;
+                for(size_t n=code_.lowerBound(target>14?target-14:0);n<code_.size()&&code_.instructions()[n].address<decoded.next();++n) {
+                    const auto& other=code_.instructions()[n];
+                    if(other.address!=target&&other.next()>target){overlap=true;break;}
+                }
+                if(overlap)continue;
+                TailCallStateProof proof;TailCallAnalysisOptions limits;
+                limits.maxWork=2000000/candidates.size();
+                if(!proveX86SysvTailState(ssa,index,&memory,&proof,limits).ok() || !proof.complete)continue;
+                report->tailCalls.push_back({insn.address,target});
+                report->tailDependencies.push_back({target,decoded.next()});
+            }
+        }
+    }
+    std::sort(report->tailCalls.begin(),report->tailCalls.end(),[](const auto& a,const auto& b){return a.branch<b.branch;});
+    checked.tailCalls=report->tailCalls;
+    std::vector<X86SwitchTable> switches;
+    if(recoverX86RelativeSwitches(image,code_,checked,&switches).ok())for(auto& table:switches) {
+        IndirectFlowSite site;site.address=table.jump.branch;site.complete=true;site.discoveryOnly=!table.fullyDiscovered;
+        site.confidence=IndirectFlowConfidence::kProven;
+        site.switchTable=std::move(table.jump);site.dependencies=std::move(table.dependencies);
+        for(auto target:site.switchTable.targets)site.targets.push_back({target,target,Arch::kX86_64});
+        site.provenance={"guarded x86-64 PIC signed rel32 switch table"};
+        site.reason=site.discoveryOnly?"validated dispatch/table proposal; case bodies require discovery and re-proof":
+            "guarded index, complete immutable rel32 table and discovered case CFG verified";
+        const auto old=std::find_if(report->sites.begin(),report->sites.end(),[&](const auto& other){return !other.call&&other.address==site.address;});
+        if(old==report->sites.end())report->sites.push_back(std::move(site));else *old=std::move(site);
+    }
     for (auto& site : report->sites) {
         const auto* record = code_.find(site.address);
         if (!record || (site.call ? record->flow != FlowKind::kIndirectCall : record->flow != FlowKind::kIndirectJump)) site.complete = false;
         for (const auto& target : site.targets) {
             const auto mode = instructionArchitectures_.find(target.address);
-            if (excluded(target.address) || (mode != instructionArchitectures_.end() && mode->second != target.decodeArch)) site.complete = false;
+            if (excluded(target.address) || (mode != instructionArchitectures_.end() && mode->second != target.decodeArch) ||
+                (!site.switchTable.switchCases.empty()&&target.address!=function.entry&&functionBoundaries_.count(target.address))) site.complete = false;
         }
         if (!site.complete && site.confidence == IndirectFlowConfidence::kProven) {
             site.confidence = IndirectFlowConfidence::kPartial;
@@ -1035,7 +1118,9 @@ Status CodeAnalyzer::analyze(const ElfImage& image, const Options& options) {
             bool needed = function.indirectJumps != 0;
             if (!needed) for (Address address : function.instructions) {
                 const auto* record = code_.find(address);
-                if (record && record->flow == FlowKind::kIndirectCall) { needed = true; break; }
+                if (record && (record->flow == FlowKind::kIndirectCall ||
+                    (image.format()==ImageFormat::kElf64 && function.decodeArch==Arch::kX86_64 &&
+                     record->flow==FlowKind::kJump && record->target!=function.entry && functionBoundaries_.count(record->target)))) { needed = true; break; }
             }
             if (!needed) continue;
             // Global bound complements each pass's finite-set operation limit.
@@ -1043,7 +1128,7 @@ Status CodeAnalyzer::analyze(const ElfImage& image, const Options& options) {
                 proveIndirectFlow(image, function, &report);
                 liftedInstructions += function.instructions.size();
             }
-            if (!report.sites.empty()) current.emplace(function.entry, std::move(report));
+            if (!report.sites.empty() || !report.tailCalls.empty()) current.emplace(function.entry, std::move(report));
         }
         bool changed = false;
         const IndirectFlowReport empty;
@@ -1057,6 +1142,16 @@ Status CodeAnalyzer::analyze(const ElfImage& image, const Options& options) {
         }
         indirectFlowReports_ = current;
         if (!changed) {
+            bool provisional=false;
+            for(const auto& entry:current)for(const auto& site:entry.second.sites)provisional|=site.complete&&site.discoveryOnly;
+            if(provisional) {
+                // Instruction/resource limits may prevent decoding all cases.
+                // A stable proposal is not a completed proof.
+                status=analyzeDiscovery(image,effective,{});
+                if(status.ok())addWarning("switch case discovery remained incomplete; proposed switch edges were discarded");
+                if(options.progress)options.progress->store(100,std::memory_order_relaxed);
+                return status;
+            }
             if (options.progress) options.progress->store(100, std::memory_order_relaxed);
             return Status::success();
         }

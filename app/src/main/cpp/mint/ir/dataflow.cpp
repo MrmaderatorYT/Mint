@@ -30,6 +30,7 @@ Status buildDefUse(const SsaFunction& function, SsaDefUse* out) {
             out->uses[insn.use[slot]].push_back(
                 SsaUseSite{SsaUseKind::kInstruction, index, slot, kNoValue});
         }
+        for(size_t n=0;n<insn.tailInputs.size();++n)if(validValue(function,insn.tailInputs[n]))out->uses[insn.tailInputs[n]].push_back(SsaUseSite{SsaUseKind::kInstruction,index,static_cast<u8>(3+n),kNoValue});
     }
     for (u32 index = 0; index < function.phis.size(); ++index) {
         const SsaPhi& phi = function.phis[index];
@@ -76,6 +77,7 @@ Status computeLiveness(const SsaFunction& function, SsaLiveness* out) {
                     localUses[block.id].insert(use);
                 }
             }
+            for(auto use:insn.tailInputs)if(validValue(function,use)&&defined.find(use)==defined.end())localUses[block.id].insert(use);
             if (validValue(function, insn.dest)) defined.insert(insn.dest);
         }
     }

@@ -132,10 +132,11 @@ constexpr OpInfo kTable[] = {
     {"atomic_minu",2,true,false},
     {"atomic_maxu",2,true,false},
     {"ffma",3,true,false},
+    {"tailcall",1,false,true},
 };
 
 static_assert(sizeof(kTable) / sizeof(kTable[0]) ==
-                  static_cast<size_t>(MintOp::kFloatFma) + 1,
+                  static_cast<size_t>(MintOp::kTailCall) + 1,
               "the opcode table must have exactly one entry per MintOp");
 
 }  // namespace

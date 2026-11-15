@@ -377,6 +377,12 @@ Status executeIr(const IrFunction& function, InterpState* state,
                     state->memory().clear();
                     break;
                 }
+                case MintOp::kTailCall: {
+                    InterpCall call;call.target=a.concreteLike()?a.bits:kNoAddress;call.address=insn.address;
+                    for(const auto& input:insn.tailInputs)call.arguments.push_back(state->read(input));
+                    result->calls.push_back(std::move(call));result->stoppedOnCall=true;result->stopReason="tail transfer";
+                    return Status::success(); // No native execution, CALL push or RET pop.
+                }
                 case MintOp::kPopCount:
                     value = a.concreteLike() ? InterpValue::concrete(static_cast<u64>(__builtin_popcountll(a.bits & maskFor(a.width))), insn.dest.size) : unknownLike(insn.dest); break;
                 case MintOp::kClz:

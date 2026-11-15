@@ -1,6 +1,7 @@
 #include "mint/ir/ir_function.h"
 
 #include <cstdio>
+#include <set>
 
 #include "mint/ir/registers.h"
 #include "mint/plugin/architecture_bridge.h"
@@ -155,12 +156,20 @@ std::vector<std::string> IrFunction::verify() const {
             report(i, info.hasDest ? "missing destination" : "unexpected destination");
         }
         for (unsigned slot = 0; slot < 3; ++slot) {
-            const bool wanted = slot < info.sources;
+            const bool wanted = slot < info.sources || (slot == 1 && insn.op == MintOp::kBranchInd && !insn.switchCases.empty());
             if (insn.source(slot).valid() != wanted) {
                 report(i, "source slot " + std::to_string(slot) +
                               (wanted ? " is missing" : " should be unused"));
             }
         }
+        if(!insn.switchCases.empty()) {
+            if(insn.op!=MintOp::kBranchInd || !insn.b.valid() || insn.b.size>8 || insn.switchCases.size()>256)report(i,"invalid table-index switch metadata");
+            std::set<u64> cases;
+            for(const auto& arm:insn.switchCases) {
+                if(!cases.insert(arm.value).second || (insn.b.size<8 && insn.b.size && arm.value>>unsigned(insn.b.size*8)))report(i,"duplicate or out-of-width switch case value");
+            }
+        }
+        if(insn.tailInputs.size()>6 || (!insn.tailInputs.empty()&&insn.op!=MintOp::kTailCall))report(i,"invalid tail input metadata");
 
         auto checkStorage = [&](const Varnode& node, const char* role) {
             if (!node.valid()) return;
@@ -186,6 +195,7 @@ std::vector<std::string> IrFunction::verify() const {
         checkStorage(insn.dest, "dest");
         checkStorage(insn.a, "a");
         checkStorage(insn.b, "b");
+        for(const auto& input:insn.tailInputs){checkStorage(input,"tail input");if(!input.valid()||input.size>8)report(i,"invalid tail input operand");}
         checkStorage(insn.c, "c");
 
         const Varnode& d = insn.dest;
@@ -383,6 +393,9 @@ std::vector<std::string> IrFunction::verify() const {
             case MintOp::kCall:
                 if (!a.isConstant()) report(i, "direct transfer target is not constant");
                 break;
+            case MintOp::kTailCall:
+                if(arch!=Arch::kX86_64||!a.isConstant()||a.size!=8)report(i,"tail transfer requires a direct x86-64 target");
+                break;
             case MintOp::kCondBranch:
                 if (a.size != 1) report(i, "branch condition is not 1 byte");
                 if (!b.isConstant()) report(i, "branch target is not constant");
@@ -423,6 +436,13 @@ std::vector<std::string> IrFunction::verify() const {
                                    std::to_string(successor));
             }
         }
+        if(block.insnCount&&insns[block.firstInsn+block.insnCount-1].op==MintOp::kTailCall&&!block.successors.empty())problems.push_back("tail transfer has local CFG successors");
+        if(block.insnCount && !insns[block.firstInsn+block.insnCount-1].switchCases.empty()) {
+            std::set<Address> expectedTargets,caseTargets;
+            for(auto successor:block.successors)if(successor<blocks.size())expectedTargets.insert(blocks[successor].start);
+            for(const auto& arm:insns[block.firstInsn+block.insnCount-1].switchCases)caseTargets.insert(arm.target);
+            if(expectedTargets!=caseTargets)problems.push_back("switch case targets do not match the original CFG successors");
+        }
         expected += block.insnCount;
     }
     if (!blocks.empty() && expected != insns.size()) {
@@ -451,13 +471,15 @@ std::string IrFunction::toText() const {
             line += " = ";
         }
         line += info.name;
-        for (unsigned slot = 0; slot < info.sources; ++slot) {
+        const unsigned sources=info.sources+(!insn.switchCases.empty()&&insn.op==MintOp::kBranchInd?1:0);
+        for (unsigned slot = 0; slot < sources; ++slot) {
             line += slot == 0 ? " " : ", ";
             line += describeVarnode(insn.source(slot), arch);
         }
         if (insn.op == MintOp::kIntrinsic) {
             line += " #" + std::to_string(insn.intrinsicId);
         }
+        if(!insn.tailInputs.empty()){line+=" [inputs";for(const auto& input:insn.tailInputs)line+=" "+describeVarnode(input,arch);line+="]";}
         return line;
     };
 

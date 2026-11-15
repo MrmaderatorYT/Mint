@@ -251,6 +251,7 @@ enum class MintOp : u8 {
     kAtomicMinU,
     kAtomicMaxU,
     kFloatFma, ///< IEEE fused a*b+c, one rounding at the declared precision.
+    kTailCall, ///< Direct terminal transfer; no CALL push, RET pop or result def.
 };
 
 /// Static facts about an opcode, for the printer, the verifier and the emulator.

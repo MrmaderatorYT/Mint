@@ -134,7 +134,7 @@ Status simplifyIr(IrFunction* function, IrSimplifyStats* stats) {
     // uses can be represented explicitly; a plain operand may-use scan cannot
     // prove such writes dead, even if a register is overwritten after the call.
     const bool hasCall = std::any_of(function->insns.begin(), function->insns.end(),
-        [](const IrInsn& insn) { return insn.op == MintOp::kCall || insn.op == MintOp::kCallInd; });
+        [](const IrInsn& insn) { return insn.op == MintOp::kCall || insn.op == MintOp::kCallInd || insn.op == MintOp::kTailCall; });
     std::vector<u8> removed(function->insns.size(), 0);
     for (size_t i = 0; i < function->insns.size(); ++i) {
         IrInsn& insn = function->insns[i];
@@ -143,7 +143,7 @@ Status simplifyIr(IrFunction* function, IrSimplifyStats* stats) {
             (hasNativeReturn && std::any_of(nativeResults.begin(),nativeResults.end(),[&](const auto& result){return insn.dest.overlaps(result);}));
         for (size_t j = 0; j < function->insns.size() && !used; ++j) {
             if (i == j) continue;
-            for (unsigned slot = 0; slot < 3; ++slot) {
+            for (unsigned slot = 0; slot < 3+function->insns[j].tailInputs.size(); ++slot) {
                 const Varnode& source = function->insns[j].source(slot);
                 if (insn.dest.overlaps(source)) {
                     used = true;
@@ -239,6 +239,7 @@ Status simplifySsa(SsaFunction* function, SsaSimplifyStats* stats) {
     }
     for (SsaInsn& insn : function->insns) {
         for (SsaId& use : insn.use) use = find(use);
+        for(auto& use:insn.tailInputs)use=find(use);
     }
     for (SsaPhi& phi : function->phis) {
         for (SsaId& argument : phi.args) argument = find(argument);
@@ -261,6 +262,7 @@ Status simplifySsa(SsaFunction* function, SsaSimplifyStats* stats) {
         for (SsaId use : insn.use) {
             if (use != kNoValue) ++uses[use];
         }
+        for(auto use:insn.tailInputs)if(use<uses.size())++uses[use];
     }
     for (const SsaPhi& phi : function->phis) {
         for (SsaId argument : phi.args) {

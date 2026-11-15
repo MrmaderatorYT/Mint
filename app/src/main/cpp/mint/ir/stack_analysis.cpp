@@ -12,7 +12,7 @@
 
 namespace mint {
 namespace {
-bool memoryBarrier(MintOp op) {return op==MintOp::kCall||op==MintOp::kCallInd||op==MintOp::kIntrinsic||op==MintOp::kMemoryFence||isAtomicMemory(op)||op==MintOp::kVectorStore;}
+bool memoryBarrier(MintOp op) {return op==MintOp::kCall||op==MintOp::kCallInd||op==MintOp::kTailCall||op==MintOp::kIntrinsic||op==MintOp::kMemoryFence||isAtomicMemory(op)||op==MintOp::kVectorStore;}
 
 constexpr size_t kMaxValues = 2000000;
 constexpr size_t kMaxInsns = 2000000;
@@ -251,6 +251,7 @@ Status analyzeStackMemory(const SsaFunction& function, StackAnalysis* result) {
             }
         }
         if (memoryBarrier(insn.op)) ++prepared.barriers;
+        for(auto input:insn.tailInputs)if(input<facts.size()&&facts[input].mayStack)prepared.escapedStackAddress=true;
         // The memory address use itself is not an escape. Storing a stack address
         // as a value, passing it, or letting an unmodelled operation consume it is.
         for (unsigned operand = 0; operand < opInfo(insn.op).sources; ++operand) {

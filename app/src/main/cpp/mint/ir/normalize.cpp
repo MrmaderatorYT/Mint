@@ -156,6 +156,7 @@ NormalizeStats Normalizer::run() {
                 Varnode& operand = slot == 0 ? insn.a : (slot == 1 ? insn.b : insn.c);
                 if (needsWork(operand)) operand = extract(operand);
             }
+            for(auto& operand:insn.tailInputs)if(needsWork(operand))operand=extract(operand);
 
             // An insert has to follow the instruction that produced the value, and
             // nothing may follow a terminator, so a partial destination on one is

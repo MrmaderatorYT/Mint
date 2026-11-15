@@ -70,6 +70,11 @@ private:
     u32 region(u32 start, u32 stop, const Region& allowed, u32 activeLoop, unsigned depth);
     u32 arm(u32 from, u32 target, u32 stop, const Region& body, const Region& allowed, u32 activeLoop, unsigned depth);
     void fallback(const std::string& reason);
+    void switchLabels(u32 node,const SsaInsn& term) {
+        if(term.switchCases.empty())return;
+        auto& branch=out_.nodes[node];branch.indexedSwitch=true;branch.condition.value=term.use[1];
+        for(auto& arm:branch.arms)for(const auto& label:term.switchCases)if(label.target==arm.targetAddress)arm.caseValues.push_back(label.value);
+    }
     void block(u32 parent, u32 index);
     const SsaInsn* terminator(u32 id) const { const auto& b = f_.blocks[id]; return b.insnCount ? &f_.insns[b.firstInsn + b.insnCount - 1] : nullptr; }
     const SsaFunction& f_; ControlFlowAst& out_; Graph graph_, preds_; Dom dom_, post_;
@@ -86,7 +91,19 @@ bool Builder::validate() {
         for (u32 at = b.firstInsn; at < b.firstInsn + b.insnCount; ++at) { if (owned[at] || (at + 1 < b.firstInsn + b.insnCount && isTerminator(f_.insns[at].op))) return false; owned[at] = true; }
         const auto* term = terminator(i);
         if (term && (term->op == MintOp::kCondBranch || term->op == MintOp::kBranchInd) && (term->use[0] == kNoValue || term->use[0] >= f_.values.size())) return false;
-        if (term && term->op == MintOp::kReturn && !b.successors.empty()) return false;
+        if (term && (term->op == MintOp::kReturn||term->op==MintOp::kTailCall) && !b.successors.empty()) return false;
+        if(term&&term->op==MintOp::kTailCall&&(term->use[0]>=f_.values.size()||f_.values[term->use[0]].def!=SsaDef::kConstant))return false;
+        if(term && !term->switchCases.empty()) {
+            if(term->op!=MintOp::kBranchInd || term->use[1]>=f_.values.size() || term->switchCases.size()>256)return false;
+            const auto width=f_.values[term->use[1]].storage.size;if(!width || width>8)return false;
+            std::set<u64> values;std::set<Address> targets,expected;
+            for(auto next:b.successors)expected.insert(f_.blocks[next].start);
+            for(const auto& arm:term->switchCases) {
+                if(!values.insert(arm.value).second || (width<8 && arm.value>>unsigned(width*8)))return false;
+                targets.insert(arm.target);
+            }
+            if(targets!=expected)return false;
+        }
     }
     return std::find(owned.begin(), owned.end(), false) == owned.end();
 }
@@ -179,13 +196,14 @@ u32 Builder::region(u32 start, u32 stop, const Region& allowed, u32 activeLoop, 
             for (size_t i = 0; i < next.size(); ++i) {
                 const auto body = arm(current, next[i], finish, arms[i], allowed, activeLoop, depth);
                 if (conditional) child(id, body);
-                else { const auto address = f_.blocks[next[i]].start; for (const auto& existing : out_.nodes[id].arms) if (existing.targetAddress == address) okay_ = false; out_.nodes[id].arms.push_back({address, next[i], body}); }
+                else { const auto address = f_.blocks[next[i]].start; for (const auto& existing : out_.nodes[id].arms) if (existing.targetAddress == address) okay_ = false; out_.nodes[id].arms.push_back({address, next[i], body,{}}); }
             }
+            if(indirect)switchLabels(id,*term);
             child(result, id); if (conditional) ++out_.ifCount; else ++out_.switchCount;
             if (finish == activeLoop || finish == kNoBlock || !allowed.count(finish)) current = kNoBlock; else current = finish;
             continue;
         }
-        if (next.empty()) { if (!term || term->op != MintOp::kReturn) child(result, transfer(current, kNoBlock, ControlFlowAstKind::kGoto)); break; }
+        if (next.empty()) { if (!term || (term->op != MintOp::kReturn&&term->op!=MintOp::kTailCall)) child(result, transfer(current, kNoBlock, ControlFlowAstKind::kGoto)); break; }
         if (next.size() != 1 || (term && term->op == MintOp::kReturn)) { okay_ = false; break; }
         const auto target = next.front(); child(result, transfer(current, target, ControlFlowAstKind::kEdge));
         if (target == activeLoop) { child(result, transfer(current, target, ControlFlowAstKind::kContinue)); break; }
@@ -200,14 +218,15 @@ void Builder::fallback(const std::string& reason) {
     out_.root = node(ControlFlowAstKind::kFallback);
     for (u32 index = 0; index < f_.blocks.size(); ++index) {
         block(out_.root, index); const auto& next = graph_[index]; const auto* term = terminator(index);
-        if (term && term->op == MintOp::kReturn) continue;
+        if (term && (term->op == MintOp::kReturn||term->op==MintOp::kTailCall)) continue;
         if (term && term->op == MintOp::kCondBranch) {
             const auto branch = node(ControlFlowAstKind::kIf); if (branch == kNoAstNode) break; out_.nodes[branch].block = index; out_.nodes[branch].condition = {index, term->use[0], false};
             for (size_t arm = 0; arm < 2; ++arm) { const auto body = sequence(); const auto target = arm < next.size() ? next[arm] : kNoBlock; if (target != kNoBlock) child(body, transfer(index, target, ControlFlowAstKind::kEdge)); child(body, transfer(index, target, ControlFlowAstKind::kGoto)); child(branch, body); }
             child(out_.root, branch);
         } else if (term && term->op == MintOp::kBranchInd && !next.empty()) {
             const auto branch = node(ControlFlowAstKind::kSwitch); if (branch == kNoAstNode) break; out_.nodes[branch].block = index; out_.nodes[branch].condition = {index, term->use[0], false};
-            for (auto target : next) { const auto body = sequence(); child(body, transfer(index, target, ControlFlowAstKind::kEdge)); child(body, transfer(index, target, ControlFlowAstKind::kGoto)); out_.nodes[branch].arms.push_back({f_.blocks[target].start, target, body}); }
+            for (auto target : next) { const auto body = sequence(); child(body, transfer(index, target, ControlFlowAstKind::kEdge)); child(body, transfer(index, target, ControlFlowAstKind::kGoto)); out_.nodes[branch].arms.push_back({f_.blocks[target].start, target, body,{}}); }
+            switchLabels(branch,*term);
             child(out_.root, branch);
         } else { const auto target = next.empty() ? kNoBlock : next.front(); if (target != kNoBlock) child(out_.root, transfer(index, target, ControlFlowAstKind::kEdge)); child(out_.root, transfer(index, target, ControlFlowAstKind::kGoto)); }
     }
@@ -238,7 +257,15 @@ bool validateAst(const ControlFlowAst& ast) {
         if (node.kind == ControlFlowAstKind::kLoop && (node.children.size() != 1 || node.block >= blocks.size())) return false;
         if (node.kind == ControlFlowAstKind::kEdge && (node.from >= blocks.size() || node.target >= blocks.size())) return false;
         if ((node.kind == ControlFlowAstKind::kGoto || node.kind == ControlFlowAstKind::kBreak || node.kind == ControlFlowAstKind::kContinue) && node.target != kNoBlock && node.target >= blocks.size()) return false;
-        if (node.kind == ControlFlowAstKind::kSwitch) { if (node.condition.block >= blocks.size() || node.arms.size() > 256) return false; std::set<Address> targets; for (const auto& arm : node.arms) { if (arm.target >= blocks.size() || !targets.insert(arm.targetAddress).second) return false; pending.emplace_back(arm.body, depth + 1); } }
+        if (node.kind == ControlFlowAstKind::kSwitch) {
+            if (node.condition.block >= blocks.size() || node.arms.size() > 256 || (node.indexedSwitch&&node.condition.value==kNoValue)) return false;
+            std::set<Address> targets;std::set<u64> cases;
+            for (const auto& arm : node.arms) {
+                if (arm.target >= blocks.size() || !targets.insert(arm.targetAddress).second || (node.indexedSwitch&&arm.caseValues.empty()) || (!node.indexedSwitch&&!arm.caseValues.empty())) return false;
+                for(auto value:arm.caseValues)if(!cases.insert(value).second || cases.size()>256)return false;
+                pending.emplace_back(arm.body, depth + 1);
+            }
+        }
         for (auto child : node.children) pending.emplace_back(child, depth + 1);
     }
     return std::find(state.begin(), state.end(), 0) == state.end() && std::find(blocks.begin(), blocks.end(), false) == blocks.end();
@@ -258,6 +285,7 @@ Status buildControlFlowAst(const SsaFunction& function, ControlFlowAst* out) {
 }
 Status emitControlFlowAst(const ControlFlowAst& ast, std::ostream& out, const ControlFlowAstCallbacks& cb) {
     if (!validateAst(ast) || !cb.block || !cb.edge || !cb.condition || !cb.indirectTarget || !cb.label) return bad("invalid AST/callbacks");
+    for(const auto& node:ast.nodes)if(node.indexedSwitch&&!cb.value)return bad("missing table-index value callback");
     std::function<void(u32, unsigned)> emit = [&](u32 id, unsigned depth) {
         const auto& node = ast.nodes[id]; const auto indent = std::string(depth * 4, ' ');
         const auto target = [&](u32 block) { return block == kNoBlock ? std::string("unresolved_indirect") : cb.label(block); };
@@ -268,8 +296,12 @@ Status emitControlFlowAst(const ControlFlowAst& ast, std::ostream& out, const Co
             case ControlFlowAstKind::kIf: out << indent << "if (" << (node.condition.negated ? "!(" : "") << cb.condition(node.condition.block) << (node.condition.negated ? ")" : "") << ") {\n"; emit(node.children[0], depth + 1); out << indent << "} else {\n"; emit(node.children[1], depth + 1); out << indent << "}\n"; break;
             case ControlFlowAstKind::kLoop: out << indent << (node.postTest ? "do {\n" : "while (true) {\n"); emit(node.children[0], depth + 1); out << indent << (node.postTest ? "} while (true);\n" : "}\n"); break;
             case ControlFlowAstKind::kSwitch:
-                out << indent << "switch ((uintptr_t)(" << cb.indirectTarget(node.condition.block) << ")) { /* computed target addresses */\n";
-                for (const auto& arm : node.arms) { out << indent << "case 0x" << std::hex << arm.targetAddress << std::dec << "ULL: {\n"; emit(arm.body, depth + 1); out << indent << "    break;\n" << indent << "}\n"; }
+                out << indent << "switch (("<<(node.indexedSwitch?"uint64_t":"uintptr_t")<<")(" << (node.indexedSwitch?cb.value(node.condition.value):cb.indirectTarget(node.condition.block)) << ")) { /* "<<(node.indexedSwitch?"proven table indices":"computed target addresses")<<" */\n";
+                for (const auto& arm : node.arms) {
+                    if(node.indexedSwitch)for(auto value:arm.caseValues)out<<indent<<"case "<<value<<"ULL:\n";
+                    else out << indent << "case 0x" << std::hex << arm.targetAddress << std::dec << "ULL: ";
+                    out<<"{\n"; emit(arm.body, depth + 1); out << indent << "    break;\n" << indent << "}\n";
+                }
                 out << indent << "default: goto unresolved_indirect;\n" << indent << "}\n"; break;
             case ControlFlowAstKind::kContinue: out << indent << "continue;\n"; break;
             case ControlFlowAstKind::kBreak: case ControlFlowAstKind::kGoto: out << indent << "goto " << target(node.target) << ";\n"; break;

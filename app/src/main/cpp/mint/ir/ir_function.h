@@ -9,10 +9,13 @@
 
 namespace mint {
 
+struct IrSwitchCase { u64 value = 0; Address target = 0; };
+
 /// One IR operation.
 ///
 /// Three source slots because kSelect needs three and nothing needs four. Slots
-/// past an op's arity are left invalid, and the verifier checks that.
+/// past an op's arity are left invalid, except for the proven switch selector
+/// in kBranchInd's second slot. The verifier checks that contract.
 struct IrInsn {
     MintOp op = MintOp::kInvalid;
     Varnode dest;
@@ -38,7 +41,16 @@ struct IrInsn {
     /// opcodes for every vector operation and a table that has to grow in lockstep.
     u8 laneWidth = 0;
 
+    // A proven table-index mapping for kBranchInd only. Operand a remains the
+    // machine target; optional operand b snapshots the index before its register
+    // is overwritten. Repeated targets retain distinct case values.
+    std::vector<IrSwitchCase> switchCases{};
+    // Explicit physical inputs selected by a verified narrow prototype contract.
+    // Empty alone never establishes a zero-argument source signature.
+    std::vector<Varnode> tailInputs{};
+
     const Varnode& source(unsigned index) const {
+        if(index>=3)return tailInputs.at(index-3);
         switch (index) {
             case 0: return a;
             case 1: return b;

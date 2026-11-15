@@ -63,6 +63,10 @@ struct Function {
     /// CFG construction consumes these after every target has been decoded.
     std::vector<ResolvedIndirectJump> resolvedIndirectJumps;
 
+    /// Transient, verified direct tail exits. No successor block is invented in
+    /// this function; the target remains a separate callee. Rebuilt on restore.
+    std::vector<ResolvedTailCall> tailCalls;
+
     /// Bytes that failed to decode inside the function's span, which usually means
     /// data inlined into code.
     u32 undecodableSites = 0;

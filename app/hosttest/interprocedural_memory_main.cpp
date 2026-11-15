@@ -43,6 +43,14 @@ using Bodies=std::map<Address,std::shared_ptr<SsaFunction>>;
 MemoryFunctionResolver resolver(Bodies& bodies){return [&](Address entry)->std::shared_ptr<const SsaFunction>{const auto found=bodies.find(entry);return found==bodies.end()?nullptr:found->second;};}
 std::shared_ptr<SsaFunction> pure(Arch arch,Address entry){Fixture f(arch,entry);f.block(0);f.load(f.constant(0x6000));f.ret();return std::make_shared<SsaFunction>(f.finish());}
 std::shared_ptr<SsaFunction> writer(Arch arch,Address entry,bool relative,i64 offset,u8 size=0){Fixture f(arch,entry);f.block(0);f.store(relative?f.address(f.arg(0),offset):f.constant(static_cast<u64>(offset)),f.constant(9,size));f.ret();return std::make_shared<SsaFunction>(f.finish());}
+// Keep a real base return in each recursive fixture. Complete memory effects do
+// not prove termination, but must include both paths and every body in a cycle.
+std::shared_ptr<SsaFunction> recursiveBody(Arch arch,Address entry,Address target,const std::function<void(Fixture&)>& effects={},const std::function<void(Fixture&)>& after={}){
+    Fixture f(arch,entry,3);f.ir.blocks[0].successors={1,2};
+    f.block(0);f.op(MintOp::kCondBranch,{},f.condition(),f.constant(f.ir.blocks[1].start));
+    f.block(1);f.ret();
+    f.block(2);if(effects)effects(f);f.call(target);if(after)after(f);f.ret();return std::make_shared<SsaFunction>(f.finish());
+}
 SsaFunction caller(Arch arch,Address target,bool symbolic=false,bool indirect=false){Fixture f(arch,0x1000);f.block(0);if(f.x86())f.op(MintOp::kCopy,f.sp(),symbolic?f.address(f.arg(0),0x1000):f.constant(0x800000));f.op(MintOp::kCopy,f.temp(),f.arg(0));const auto address=symbolic?f.address(f.arg(0),0):f.constant(0x4000);f.store(address,f.arg(1));f.call(target,indirect);f.load(address);f.ret();return f.finish();}
 const MemoryAccess& lastLoad(const MemoryAnalysis& m){const auto found=std::find_if(m.accesses.rbegin(),m.accesses.rend(),[](const auto& a){return !a.store;});require(found!=m.accesses.rend(),"load evidence exists");return *found;}
 MemoryAnalysis analyze(const SsaFunction& f,const MemoryFunctionResolver& functions={}){MemoryAnalysis m;const auto status=analyzeMemory(f,&m,functions);require(status.ok(),status.toString());return m;}
@@ -84,10 +92,88 @@ void transitive(Arch arch){
     bodies[0x2000]=writer(arch,0x2000,true,8);
     Fixture shifted(arch,0x3000);shifted.block(0);auto next=shifted.address(shifted.arg(0),16);shifted.op(MintOp::kCopy,shifted.arg(0),next);shifted.call(0x2000);shifted.ret();bodies[0x3000]=std::make_shared<SsaFunction>(shifted.finish());
     f=caller(arch,0x3000,true);m=analyze(f,functions);require(m.selectiveCalls==1&&std::any_of(m.calls[0].writes.begin(),m.calls[0].writes.end(),[](const auto& w){return w.address.kind==MemoryBaseKind::kSymbolic&&w.address.offset==24;})&&lastLoad(m).reachingStore!=kNoValue,"transitive pointer displacement composes using pre-call physical register value");
-    Fixture recursive(arch,0x3000);recursive.block(0);recursive.call(0x3000);recursive.ret();bodies[0x3000]=std::make_shared<SsaFunction>(recursive.finish());
-    require(lastLoad(analyze(f,functions)).reachingStore==kNoValue,"recursive cycles remain unknown rather than assumed pure");
     Fixture tail(arch,0x2000);tail.block(0);tail.ret();auto jump=std::make_shared<SsaFunction>(tail.finish());jump->insns.back().op=MintOp::kBranch;bodies[0x3000]=jump;jump->entry=0x3000;
     require(lastLoad(analyze(f,functions)).reachingStore==kNoValue,"unrepresented external tail control remains unknown");
+}
+void recursion(Arch arch){
+    Bodies bodies;const auto functions=resolver(bodies);const bool x86=Fixture(arch,0).x86();
+    const auto f=caller(arch,0x2000);const auto symbolic=caller(arch,0x2000,true);
+    bodies[0x2000]=recursiveBody(arch,0x2000,0x2000,[](Fixture& body){body.load(body.arg(0));});
+    auto m=analyze(f,functions);
+    require((lastLoad(m).reachingStore!=kNoValue)==!x86,"direct recursive read-only SCC preserves facts except unbounded x86 return-slot writes");
+    require(m.calls.size()==1&&m.calls[0].complete==!x86,"recursive proof is published only after its complete bounded fixed point");
+    if(!x86)require(m.readOnlyCalls==1&&m.dependencies.size()==1&&m.matches(f),"direct recursive read-only proof retains its exact body dependency");
+
+    bodies[0x2000]=recursiveBody(arch,0x2000,0x3000,[](Fixture& body){body.load(body.arg(0));});
+    bodies[0x3000]=recursiveBody(arch,0x3000,0x2000);
+    m=analyze(f,functions);
+    require((lastLoad(m).reachingStore!=kNoValue)==!x86,"mutually recursive read-only SCC reaches a joint fixed point");
+    if(x86)return;
+    require(m.readOnlyCalls==1&&m.dependencies.size()==2&&m.matches(f),"mutual recursion binds every participating body snapshot");
+
+    const auto saved=*bodies[0x3000];
+    *bodies[0x3000]=*recursiveBody(arch,0x3000,0x2000,[](Fixture& body){body.store(body.constant(0x4000),body.constant(9));});
+    require(!m.matches(f),"mutating another SCC member invalidates the caller's read-only proof");
+    require(lastLoad(analyze(f,functions)).reachingStore==kNoValue,"a write in another SCC member reaches the caller after recomputation");
+    *bodies[0x3000]=saved;require(m.matches(f),"restoring exact SCC member contents restores dependency binding");
+
+    for(i64 offset:{0,16}){
+        bodies[0x2000]=recursiveBody(arch,0x2000,0x2000,[&](Fixture& body){body.store(body.address(body.arg(0),offset),body.constant(9));});
+        m=analyze(symbolic,functions);
+        require(m.selectiveCalls==1&&m.callBarriers==0&&m.calls[0].complete&&m.calls[0].writes.size()==1,"stable recursive argument-relative writes converge without duplicate effects");
+        require((lastLoad(m).reachingStore!=kNoValue)==(offset==16),"recursive argument write kills overlapping bytes and preserves same-base disjoint bytes");
+    }
+    bodies[0x2000]=recursiveBody(arch,0x2000,0x3000,[](Fixture& body){body.store(body.address(body.arg(0),16),body.constant(9));});
+    bodies[0x3000]=recursiveBody(arch,0x3000,0x2000,[](Fixture& body){body.store(body.address(body.arg(0),32),body.constant(9));});
+    m=analyze(symbolic,functions);
+    require(m.selectiveCalls==1&&m.calls[0].writes.size()==2&&lastLoad(m).reachingStore!=kNoValue,"mutual recursion unions stable writes from both bodies before publishing effects");
+    bodies[0x3000]=recursiveBody(arch,0x3000,0x2000,[](Fixture& body){body.store(body.address(body.arg(0),0),body.constant(9));});
+    require(lastLoad(analyze(symbolic,functions)).reachingStore==kNoValue,"overlapping write propagated around mutual recursion cannot be lost");
+
+    bodies[0x2000]=recursiveBody(arch,0x2000,0x2000,[](Fixture& body){body.store(body.address(body.arg(1),16),body.constant(9));});
+    m=analyze(symbolic,functions);
+    require(m.selectiveCalls==1&&m.calls[0].complete&&lastLoad(m).reachingStore==kNoValue,"distinct recursive symbolic argument roots remain potentially aliased");
+    bodies[0x2000]=recursiveBody(arch,0x2000,0x2000,[](Fixture& body){body.store(body.constant(0x5000),body.constant(9));});
+    require(lastLoad(analyze(symbolic,functions)).reachingStore==kNoValue,"recursive absolute write may alias a dynamic caller pointer");
+
+    for(i64 offset:{0,16}){
+        bodies[0x2000]=recursiveBody(arch,0x2000,0x2000,{},[&](Fixture& body){body.store(body.constant(0x4000+offset),body.constant(9));});
+        m=analyze(f,functions);
+        require(m.selectiveCalls==1&&m.calls[0].complete&&m.calls[0].writes.size()==1&&(lastLoad(m).reachingStore!=kNoValue)==(offset==16),"recursive fixed point includes absolute writes after the recursive call");
+    }
+    const auto preserved=Varnode::reg(arch==Arch::kAArch64?arm64::kXn(19):arch==Arch::kArm32||arch==Arch::kThumb?arm32::kRn(4):riscv::kXn(8),Fixture(arch,0).width());
+    Fixture stable(arch,0x1000);stable.block(0);const auto savedAddress=stable.address(preserved,0);stable.store(savedAddress,stable.constant(7));stable.call(0x2000);stable.load(savedAddress);stable.ret();const auto stableCaller=stable.finish();
+    for(i64 offset:{0,16}){
+        bodies[0x2000]=recursiveBody(arch,0x2000,0x2000,{},[&](Fixture& body){body.store(body.address(preserved,offset),body.constant(9));});
+        m=analyze(stableCaller,functions);
+        require(m.selectiveCalls==1&&m.calls[0].complete&&m.calls[0].writes.size()==1&&(lastLoad(m).reachingStore!=kNoValue)==(offset==16),"writes through an unchanged ABI-preserved register after recursion retain exact alias behavior");
+    }
+
+    auto poisonedCallers=[&](){
+        for(Address target:{Address{0x2000},Address{0x3000}}){
+            Fixture wrapper(arch,target+0x2000);wrapper.block(0);wrapper.call(target);wrapper.ret();bodies[wrapper.ir.entry]=std::make_shared<SsaFunction>(wrapper.finish());
+        }
+        for(bool reverse:{false,true}){
+            Fixture outer(arch,0x1000);outer.block(0);outer.store(outer.constant(0x4000),outer.constant(7));outer.call(reverse?0x5000:0x4000);outer.call(reverse?0x4000:0x5000);outer.load(outer.constant(0x4000));outer.ret();const auto ssa=outer.finish();
+            const auto result=analyze(ssa,functions);
+            require(result.calls.size()==2&&!result.calls[0].complete&&!result.calls[1].complete&&result.callBarriers==2&&lastLoad(result).reachingStore==kNoValue,"outer callers to either poisoned SCC member never observe a provisional successful summary");
+        }
+    };
+    for(bool stack:{false,true}){
+        bodies[0x2000]=recursiveBody(arch,0x2000,0x3000);
+        bodies[0x3000]=recursiveBody(arch,0x3000,0x2000,[&](Fixture& body){if(stack)body.op(MintOp::kAdd,body.sp(),body.sp(),body.constant(8));else body.op(MintOp::kCopy,preserved,body.constant(0x5000));});
+        poisonedCallers();
+    }
+    bodies[0x2000]=recursiveBody(arch,0x2000,0x3000);
+    bodies[0x3000]=recursiveBody(arch,0x3000,0x2000,[](Fixture& body){const auto pointer=body.load(body.constant(0x6000));body.store(pointer,body.constant(9));});
+    poisonedCallers();
+
+    for(auto effect:{MintOp::kCall,MintOp::kCallInd,MintOp::kIntrinsic}){
+        bodies[0x2000]=recursiveBody(arch,0x2000,0x3000);
+        bodies[0x3000]=recursiveBody(arch,0x3000,0x2000,[&](Fixture& body){if(effect==MintOp::kIntrinsic)body.op(effect);else body.call(0x5555,effect==MintOp::kCallInd);});
+        m=analyze(f,functions);
+        require(m.callBarriers==1&&!m.calls[0].complete&&lastLoad(m).reachingStore==kNoValue,"unknown external/indirect/intrinsic effect poisons every member of a recursive SCC");
+    }
 }
 void barriersAndBindings(Arch arch){
     Bodies bodies;const auto functions=resolver(bodies);auto leaf=pure(arch,0x2000);bodies[0x2000]=leaf;auto f=caller(arch,0x2000);auto m=analyze(f,functions);
@@ -204,6 +290,17 @@ void bounds(){
     require(m.calls.size()==4096&&m.callBarriers==1&&lastLoad(m).reachingStore==kNoValue,"unrecorded calls beyond instruction budget remain conservative barriers");
     bodies[0x2000]=pure(arch,0x2000);bodies[0x2000]->values.resize(32769);
     require(lastLoad(analyze(f,functions)).reachingStore==kNoValue,"oversized body is rejected before expensive verification");
+
+    bodies.clear();f=caller(arch,0x2000,true);
+    bodies[0x2000]=recursiveBody(arch,0x2000,0x2000,[](Fixture& body){body.store(body.arg(0),body.constant(9));body.op(MintOp::kAdd,body.arg(0),body.arg(0),body.constant(16));});
+    m=analyze(f,functions);
+    require(!m.calls[0].complete&&lastLoad(m).reachingStore==kNoValue,"recursive pointer displacement exhausts the footprint bound instead of publishing a partial fixed point");
+    for(unsigned count:{64,65}){
+        bodies[0x2000]=recursiveBody(arch,0x2000,0x2000,[&](Fixture& body){for(unsigned n=0;n<count;++n)body.store(body.constant(0x5000+n*16),body.constant(n));});
+        f=caller(arch,0x2000);m=analyze(f,functions);
+        require(m.calls[0].complete==(count==64)&&(lastLoad(m).reachingStore!=kNoValue)==(count==64),"recursive SCC honors the exact write-range limit and never publishes truncated effects");
+        if(count==64)require(m.calls[0].writes.size()==64,"recursive fixed point deduplicates maximum-size stable write footprint");
+    }
 }
 }
-int main(){for(auto arch:{Arch::kAArch64,Arch::kX86_64,Arch::kRiscV32,Arch::kRiscV64,Arch::kArm32,Arch::kThumb,Arch::kX86_32}){effects(arch);transitive(arch);barriersAndBindings(arch);typesAndEmitter(arch);hiddenRegisters(arch);controlFlow(arch);if(arch==Arch::kX86_32||arch==Arch::kX86_64)x86Stack(arch);}bounds();std::cout<<checks<<" interprocedural memory checks passed\n";}
+int main(){for(auto arch:{Arch::kAArch64,Arch::kX86_64,Arch::kRiscV32,Arch::kRiscV64,Arch::kArm32,Arch::kThumb,Arch::kX86_32}){effects(arch);transitive(arch);recursion(arch);barriersAndBindings(arch);typesAndEmitter(arch);hiddenRegisters(arch);controlFlow(arch);if(arch==Arch::kX86_32||arch==Arch::kX86_64)x86Stack(arch);}bounds();std::cout<<checks<<" interprocedural memory checks passed\n";}

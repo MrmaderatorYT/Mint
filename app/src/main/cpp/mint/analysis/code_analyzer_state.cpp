@@ -151,7 +151,13 @@ CodeAnalyzer::Snapshot CodeAnalyzer::snapshot() const {
     result.instructions = code_.instructions();
     result.functions = functions_;
     // CFG is derived and is intentionally not a persisted part of the model.
-    for (Function& function : result.functions) function.cfg = ControlFlowGraph{};
+    for (Function& function : result.functions) {
+        function.cfg = ControlFlowGraph{};
+        function.tailCalls.clear();
+        for(auto& jump:function.resolvedIndirectJumps) {
+            jump.switchCases.clear();jump.selectorAddress=kNoAddress;jump.selectorRegister=0;jump.selectorWidth=0;jump.table=kNoAddress;
+        }
+    }
     result.warnings = warnings_;
     result.functionBoundaries = sortedFunctionBoundaries_;
     result.reachedInstructionLimit = stats_.reachedInstructionLimit != 0;
@@ -244,6 +250,8 @@ Status CodeAnalyzer::restore(const ElfImage& image, const Options& options, cons
     for (size_t fi = 0; fi < state.functions.size(); ++fi) {
         if (cancelled(options)) return invalidState("restore cancelled");
         Function function = state.functions[fi];
+        // Tail-state evidence is transient even in an in-memory snapshot.
+        function.tailCalls.clear();
         if ((fi != 0 && function.entry <= previous) || function.entry == kNoAddress ||
             !image.memory().isExecutable(function.entry) || prepared.excluded(function.entry) ||
             static_cast<u8>(function.origin) > static_cast<u8>(FunctionOrigin::kDwarf) ||
@@ -288,6 +296,9 @@ Status CodeAnalyzer::restore(const ElfImage& image, const Options& options, cons
             if (jump.targets.size() > kMaxRelations - relations || !resolved.emplace(jump.branch, jump.targets).second) return invalidState("invalid resolved branch list");
             relations += jump.targets.size();
         }
+        for(auto& jump:function.resolvedIndirectJumps) {
+            jump.switchCases.clear();jump.selectorAddress=kNoAddress;jump.selectorRegister=0;jump.selectorWidth=0;jump.table=kNoAddress;
+        }
         // Saved targets only describe a candidate CFG. Re-lift exact current
         // bytes and prove its finite target sets before any cached edge or
         // recovered call is trusted. A self-supporting seedless SSA cycle is
@@ -295,7 +306,17 @@ Status CodeAnalyzer::restore(const ElfImage& image, const Options& options, cons
         function.cfg = ControlFlowGraph::build(prepared.code_, function.instructions, function.entry, function.resolvedIndirectJumps);
         IndirectFlowReport proof;
         prepared.proveIndirectFlow(image, function, &proof);
-        if (!proof.sites.empty()) {
+        for(const auto& site:proof.sites)if(site.complete&&site.discoveryOnly)return invalidState("cached switch cases need further discovery");
+        function.tailCalls=proof.tailCalls;
+        // Selector/case metadata is transient. Even an in-memory snapshot may
+        // not supply trusted labels; reconstruct them from the same fresh proof.
+        for(auto& jump:function.resolvedIndirectJumps) {
+            jump.switchCases.clear();jump.selectorAddress=kNoAddress;jump.selectorRegister=0;jump.selectorWidth=0;jump.table=kNoAddress;
+            for(const auto& site:proof.sites)if(site.complete&&!site.call&&site.address==jump.branch&&!site.switchTable.switchCases.empty()) {
+                const auto targets=jump.targets;jump=site.switchTable;jump.targets=targets;break;
+            }
+        }
+        if (!proof.sites.empty() || !proof.tailCalls.empty()) {
             for (const auto& site : proof.sites) if (site.complete)
                 for (const auto& target : site.targets) prepared.branchModeHints_[target.address] = target.decodeArch;
             prepared.indirectFlowReports_[function.entry] = std::move(proof);
@@ -457,17 +478,34 @@ Status CodeAnalyzer::reanalyzeChanged(const ElfImage& image, const Options& opti
     if (affected.empty() && !changedInstructions.empty()) return fallback("patched instructions have no known function owners");
     prepared.indirectFlowReports_ = indirectFlowReports_;
     for (const auto& item : branchModeHints_) prepared.branchModeHints_.emplace(item);
+    size_t reproofInstructions = 0;
     for (const Function& function : functions_) {
         const auto saved = indirectFlowReports_.find(function.entry);
-        if (saved == indirectFlowReports_.end()) continue;
-        bool dependent = affected.count(function.entry) != 0;
-        if (!dependent) for (const auto& site : saved->second.sites) for (const auto& dependency : site.dependencies)
+        // A failed table proof has no complete dependency set. In particular,
+        // undo can repair an invalid entry outside all known instructions.
+        // Recheck unresolved x86 dispatchers even for otherwise data-only edits;
+        // a newly valid proposal must trigger ordinary full case discovery.
+        bool unknownExit = function.decodeArch == Arch::kX86_64 &&
+            function.indirectJumps > function.resolvedIndirectJumps.size();
+        if(function.decodeArch==Arch::kX86_64)for(auto address:function.instructions) {
+            const auto* insn=code_.find(address);
+            if(insn && insn->flow==FlowKind::kJump && insn->target!=function.entry && functionBoundaries_.count(insn->target) &&
+                std::none_of(function.tailCalls.begin(),function.tailCalls.end(),[&](const auto& tail){return tail.branch==address;}))unknownExit=true;
+        }
+        if (saved == indirectFlowReports_.end() && !unknownExit) continue;
+        bool dependent = affected.count(function.entry) != 0 || unknownExit;
+        if (!dependent && saved != indirectFlowReports_.end()) for (const auto& site : saved->second.sites) for (const auto& dependency : site.dependencies)
             for (const auto& range : merged) if (dependency.start < range.end && range.start < dependency.end) dependent = true;
+        if (!dependent && saved != indirectFlowReports_.end()) for(const auto& dependency:saved->second.tailDependencies)
+            for(const auto& range:merged)if(dependency.start<range.end&&range.start<dependency.end)dependent=true;
         if (!dependent) continue;
         if (cancelled(options)) return invalidState("incremental indirect proof cancelled");
+        if (function.instructions.size() > 1000000 - reproofInstructions) return fallback("incremental indirect proof budget exceeded");
+        reproofInstructions += function.instructions.size();
         IndirectFlowReport current;
         proveIndirectFlow(image, function, &current);
-        if (!sameProvenFlow(saved->second, current)) return fallback("general indirect-flow target dependency changed");
+        const IndirectFlowReport empty;
+        if (!sameProvenFlow(saved == indirectFlowReports_.end() ? empty : saved->second, current)) return fallback("general indirect-flow target dependency changed");
         prepared.indirectFlowReports_[function.entry] = std::move(current);
     }
     for (const Function& old : functions_) {

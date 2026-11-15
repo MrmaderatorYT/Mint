@@ -25,6 +25,14 @@ u64 fingerprint(const SsaFunction& function) {
         mix(&hash,static_cast<u8>(insn.op));mix(&hash,insn.address);mix(&hash,insn.dest);mix(&hash,insn.block);mix(&hash,insn.dead);mix(&hash,insn.laneWidth);
         for(auto use:insn.use)mix(&hash,use);
         for(auto def:insn.clobbers)mix(&hash,def);
+        if(!insn.tailInputs.empty()) {
+            mix(&hash,0x7461696cULL);mix(&hash,insn.tailInputs.size());
+            for(auto input:insn.tailInputs)mix(&hash,input);
+        }
+        if(!insn.switchCases.empty()) {
+            mix(&hash,0x737769746368ULL);mix(&hash,insn.switchCases.size());
+            for(const auto& arm:insn.switchCases){mix(&hash,arm.value);mix(&hash,arm.target);}
+        }
     }
     for(const auto& phi:function.phis) {mix(&hash,phi.dest);mix(&hash,phi.block);mix(&hash,phi.dead);for(auto arg:phi.args)mix(&hash,arg);}
     for(const auto& block:function.blocks) {mix(&hash,block.start);mix(&hash,block.end);for(auto next:block.successors)mix(&hash,next);}

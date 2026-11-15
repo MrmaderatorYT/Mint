@@ -240,6 +240,15 @@ Status recoverJumpTables(const ElfImage& image, const IrFunction& function,
 
         JumpTable table;
         table.block = block.id;
+        if(function.arch==Arch::kX86_64) {
+            // The old local backwards scan cannot prove a dominating range
+            // guard. x86 switch edges/labels come exclusively from the early
+            // checked proof (general SSA indirect targets remain independent).
+            for(const auto& item:terminator.switchCases)
+                if(std::find(table.targets.begin(),table.targets.end(),item.target)==table.targets.end())table.targets.push_back(item.target);
+            if(!table.targets.empty()){table.entryWidth=4;++result->recoveredJumps;result->tables.push_back(std::move(table));}
+            continue;
+        }
         if (recoverRelativeTable(
                 image, function, terminatorIndex, terminator.a, &table)) {
             ++result->recoveredJumps;

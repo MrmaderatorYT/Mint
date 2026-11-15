@@ -4,6 +4,7 @@
 #include "mint/base/status.h"
 #include "mint/loader/elf_image.h"
 #include "mint/ssa/ssa_function.h"
+#include "mint/analysis/cfg.h"
 
 namespace mint {
 struct IndirectFlowTarget {
@@ -17,6 +18,10 @@ struct IndirectFlowSite {
     Address address = 0;
     bool call = false;
     bool complete = false;
+    // Private discovery proposals must be re-proved with all case bodies before
+    // analysis may publish them as complete. Never persisted as trusted facts.
+    bool discoveryOnly = false;
+    ResolvedIndirectJump switchTable;
     IndirectFlowConfidence confidence = IndirectFlowConfidence::kUnknown;
     std::vector<IndirectFlowTarget> targets;
     std::vector<IndirectFlowDependency> dependencies;
@@ -26,6 +31,8 @@ struct IndirectFlowSite {
 struct IndirectFlowReport {
     Address functionEntry = 0;
     std::vector<IndirectFlowSite> sites;
+    std::vector<ResolvedTailCall> tailCalls;
+    std::vector<IndirectFlowDependency> tailDependencies;
     size_t iterations = 0;
     bool converged = false;
 };

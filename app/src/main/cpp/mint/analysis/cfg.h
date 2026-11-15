@@ -41,9 +41,21 @@ struct CfgEdge {
 /// Targets recovered while recursive descent was still building the function.
 /// Keeping the branch address lets CFG construction mark every target as a leader
 /// and attach the edges after block IDs are known.
+struct SwitchCaseTarget {u64 value=0;Address target=0;};
+// A direct terminal transfer with the native entry-stack/preserved-register
+// contract re-proved against current bytes. Typed source calls need an ABI
+// declaration and argument bindings separately.
+struct ResolvedTailCall {Address branch=0,target=0;};
 struct ResolvedIndirectJump {
     Address branch = 0;
     std::vector<Address> targets;
+    // Transient, re-proved switch semantics. Cache files persist target edges
+    // only; selector/case metadata is rebuilt from effective bytes on restore.
+    std::vector<SwitchCaseTarget> switchCases{};
+    Address selectorAddress=kNoAddress;
+    u64 selectorRegister=0;
+    u8 selectorWidth=0;
+    Address table=kNoAddress;
 };
 
 struct BasicBlock {

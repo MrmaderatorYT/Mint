@@ -127,7 +127,8 @@ Status Builder::validateInput() const {
             if (!node.valid() || !node.isRegister()) return true;
             return accessIsWholeUnit(input_.arch, node.offset, node.size);
         };
-        if (!check(insn.dest) || !check(insn.a) || !check(insn.b) || !check(insn.c)) {
+        if (!check(insn.dest) || !check(insn.a) || !check(insn.b) || !check(insn.c) ||
+            std::any_of(insn.tailInputs.begin(),insn.tailInputs.end(),[&](const auto& input){return !check(input);})) {
             return Status::error(
                 ErrorCode::kBadFormat,
                 "register access is not a whole storage unit; normalize before SSA");
@@ -227,7 +228,7 @@ void Builder::computeVariableLiveness() {
         const IrBlock& block = input_.blocks[b];
         for (u32 i = 0; i < block.insnCount; ++i) {
             const IrInsn& insn = input_.insns[block.firstInsn + i];
-            for (unsigned slot = 0; slot < 3; ++slot) {
+            for (unsigned slot = 0; slot < 3+insn.tailInputs.size(); ++slot) {
                 const Varnode& source = insn.source(slot);
                 if (!source.valid() || source.isConstant()) continue;
                 const u32 variable = variableFor(source, false);
@@ -397,12 +398,14 @@ void Builder::renameBlock(u32 block, std::vector<u8>* visited) {
         insn.address = inputInsn.address;
         insn.intrinsicId = inputInsn.intrinsicId;
         insn.laneWidth = inputInsn.laneWidth;
+        insn.switchCases = inputInsn.switchCases;
         insn.block = block;
         for (unsigned slot = 0; slot < 3; ++slot) {
             const SsaId use = read(inputInsn.source(slot));
             insn.use[slot] = use;
             if (use != kNoValue) ++output_->values[use].uses;
         }
+        for(const auto& input:inputInsn.tailInputs){const auto use=read(input);insn.tailInputs.push_back(use);if(use!=kNoValue)++output_->values[use].uses;}
         const u32 instructionIndex = static_cast<u32>(output_->insns.size());
         if (inputInsn.dest.valid() && !inputInsn.dest.isConstant()) {
             const u32 variable = variableFor(inputInsn.dest, true);
@@ -512,6 +515,7 @@ void Builder::simplifyAliases() {
 
     for (SsaInsn& insn : output_->insns) {
         for (SsaId& use : insn.use) use = findAlias(use, &parent);
+        for(auto& use:insn.tailInputs)use=findAlias(use,&parent);
     }
     for (SsaPhi& phi : output_->phis) {
         for (SsaId& arg : phi.args) arg = findAlias(arg, &parent);
@@ -528,6 +532,7 @@ void Builder::recalculateUses() {
         for (SsaId use : insn.use) {
             if (use != kNoValue && use < output_->values.size()) ++output_->values[use].uses;
         }
+        for(auto use:insn.tailInputs)if(use<output_->values.size())++output_->values[use].uses;
     }
     for (const SsaPhi& phi : output_->phis) {
         for (SsaId arg : phi.args) {
@@ -584,7 +589,7 @@ Status Builder::run() {
                 const u32 variable = variableFor(insn.dest, true);
                 defBlocks_[variable].insert(block.id);
             }
-            for (unsigned slot = 0; slot < 3; ++slot) {
+            for (unsigned slot = 0; slot < 3+insn.tailInputs.size(); ++slot) {
                 if (insn.source(slot).valid() && !insn.source(slot).isConstant()) {
                     variableFor(insn.source(slot), true);
                 }

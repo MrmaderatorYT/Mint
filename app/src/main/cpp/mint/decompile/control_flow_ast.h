@@ -13,7 +13,7 @@ namespace mint {
 constexpr u32 kNoAstNode = ~u32(0);
 enum class ControlFlowAstKind { kSequence, kBlock, kIf, kLoop, kSwitch, kEdge, kBreak, kContinue, kGoto, kFallback };
 struct AstCondition { u32 block = kNoBlock; SsaId value = kNoValue; bool negated = false; };
-struct AstSwitchArm { Address targetAddress = 0; u32 target = kNoBlock, body = kNoAstNode; };
+struct AstSwitchArm { Address targetAddress = 0; u32 target = kNoBlock, body = kNoAstNode; std::vector<u64> caseValues; };
 struct ControlFlowAstNode {
     ControlFlowAstKind kind = ControlFlowAstKind::kSequence;
     u32 block = kNoBlock, from = kNoBlock, target = kNoBlock;
@@ -22,6 +22,7 @@ struct ControlFlowAstNode {
     std::vector<AstSwitchArm> arms;
     std::vector<u32> loopBlocks, latches;
     bool postTest = false;
+    bool indexedSwitch = false;
 };
 struct ControlFlowAst {
     u32 root = kNoAstNode;
@@ -50,10 +51,12 @@ struct ControlFlowAstCallbacks {
     std::function<std::string(u32)> condition; // Original terminator use[0].
     std::function<std::string(u32)> indirectTarget;
     std::function<std::string(u32)> label;
+    std::function<std::string(SsaId)> value; // Captured table index, when proved.
 };
-// A switch dispatches the computed *target address*, with actual block-address
-// cases, not invented source-language case values. Unmatched targets stay
-// unresolved. Loop exits use the original exit label, so nested switch breaks
+// Proven table mappings dispatch on the captured index and retain every case,
+// including repeated targets. Other indirect flow dispatches on computed target
+// addresses. Unmatched values stay unresolved. Loop exits use the original label,
+// so nested switch breaks
 // cannot accidentally break the switch instead of the loop.
 Status emitControlFlowAst(const ControlFlowAst&, std::ostream&, const ControlFlowAstCallbacks&);
 std::string controlFlowAstText(const ControlFlowAst&);

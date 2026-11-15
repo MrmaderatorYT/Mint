@@ -1,4 +1,6 @@
 #include "mint/decompile/c_emitter.h"
+#include "mint/decompile/tail_call.h"
+#include "mint/ir/interprocedural_types.h"
 #include "mint/ir/memory_analysis.h"
 #include "mint/analysis/abi_model.h"
 #include "mint/plugin/architecture_bridge.h"
@@ -186,7 +188,9 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
         : Status::error(ErrorCode::kUnsupported, "AST structuring disabled");
 
     TypeRecovery types;
-    recoverTypes(function, &types, memoryStatus.ok()?&memory:nullptr);
+    InterproceduralTypeOptions typeOptions;
+    typeOptions.prototypes=options.prototypes;typeOptions.typeLayouts=options.typeLayouts;
+    recoverInterproceduralTypes(function,&types,memoryStatus.ok()?&memory:nullptr,options.memoryFunctions,typeOptions);
     auto kindOf = [&](SsaId id) {
         return id < types.values.size() ? types.values[id].kind : RecoveredTypeKind::kUnknown;
     };
@@ -342,6 +346,10 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
         if(staleLocalEdits)out<<"/* "<<staleLocalEdits<<" saved local edits do not match the current analysis; retained in project, not applied. */\n";
         if(memoryStatus.ok())out<<"/* General memory: "<<memory.exactDependencies<<" exact store/load dependencies; "<<memory.callBarriers<<" alias barriers; "<<memory.unresolvedAccesses<<" unresolved accesses; "<<memory.readOnlyCalls<<" proven read-only calls; "<<memory.selectiveCalls<<" selective write calls. */\n";
         else out<<"/* General memory evidence unavailable; explicit loads/stores retained. */\n";
+        if(!types.callEvidence.empty()||!types.conflictingLayouts.empty()||types.interproceduralLimited)
+            out<<"/* Interprocedural type evidence: "<<types.callEvidence.size()<<" bound argument observations; "
+               <<types.conflictingLayouts.size()<<" conflicting layouts suppressed"
+               <<(types.interproceduralLimited?"; bounded analysis incomplete":"")<<". Layouts are hypotheses. */\n";
         out << "/* loops: " << structure.loops.size() << ", switch-like blocks: "
             << structure.switchBlocks.size() << " */\n";
         if (!stackStatus.ok()) {
@@ -603,13 +611,22 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
     // the program does, silently. Stated as a layout, it is a hypothesis the reader
     // applies; woven into the expressions, it would be an assertion.
     for (const RecoveredStruct& layout : types.structs) {
-        if (layout.fields.size() < 2) continue;
+        if (layout.fields.size() < 2 || editedTypes.count(layout.base)) continue;
         if (layout.base < stack.values.size() && stack.values[layout.base].mayBeStack) continue;
         out << "    /* layout via " << expr.value(layout.base) << ":";
         for (const RecoveredField& field : layout.fields) {
             out << "\n     *   +0x" << std::hex << field.offset << std::dec << "  "
                 << typeName(field.type.kind, field.width == 0 ? u8(8) : field.width)
                 << "  field_" << std::hex << field.offset << std::dec;
+            if(!field.origins.empty()) {
+                out<<"  [from ";size_t count=0;
+                for(const auto& origin:field.origins) {
+                    if(count++)out<<", ";
+                    out<<"0x"<<std::hex<<origin.function<<"@0x"<<origin.instruction<<std::dec;
+                    if(count==4&&field.origins.size()>count){out<<", ...";break;}
+                }
+                out<<"]";
+            }
         }
         out << "\n     */\n";
     }
@@ -707,6 +724,31 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
             }
 
             switch (insn.op) {
+                case MintOp::kTailCall: {
+                    UserPrototype calleePrototype;
+                    const bool direct=insn.use[0]<function.values.size()&&function.values[insn.use[0]].def==SsaDef::kConstant;
+                    if(direct&&options.prototypes)calleePrototype=options.prototypes(function.values[insn.use[0]].storage.offset);
+                    TailCallContract contract;
+                    const bool typed=direct&&buildTailCallContract(function.arch,function.byteOrder,userPrototype,calleePrototype,options.typeLayouts,&contract).ok()&&validateTailCallInputs(function,insn,contract,memoryStatus.ok()?&memory:nullptr);
+                    if(!typed){
+                        out<<"    op_tail_transfer("<<expr.value(insn.use[0])<<");\n    __builtin_unreachable();\n";
+                        continue;
+                    }
+                    const auto name=options.names?options.names(function.values[insn.use[0]].storage.offset):std::string{};
+                    std::string callee=name.empty()?std::string{}:identifier(name);
+                    if(callee.empty())callee="(uintptr_t)"+expr.value(insn.use[0]);
+                    std::string typesText,arguments;
+                    for(size_t n=0;n<contract.callee.parameters.size();++n){
+                        if(n){typesText+=", ";arguments+=", ";}
+                        const auto type=localCType(contract.callee.parameters[n].type);typesText+=type;
+                        arguments+="("+type+")("+expr.value(insn.tailInputs[n])+")";
+                    }
+                    if(typesText.empty())typesText="void";
+                    const auto site="(("+localCType(contract.callee.returnType)+"(*)("+typesText+"))"+callee+")("+arguments+")";
+                    if(localTypeExpression(contract.caller.returnType)=="void")out<<"    "<<site<<";\n    return;\n";
+                    else out<<"    return "<<site<<";\n";
+                    continue;
+                }
                 case MintOp::kReturn: {
                     if(userPrototype.valid() && abiStatus.ok() && (functionAbi.result.indirect || functionAbi.result.pieces.size()>1 || compositeLayout(functionResultLayout))) {
                         out<<"    return "<<(functionFloatingResult?"op_abi_unpack_":"op_abi_aggregate_result_")<<(function.byteOrder==ByteOrder::kBig?"be_":"")<<identifier(userPrototype.returnType)<<"(";
@@ -1005,6 +1047,7 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
         callbacks.edge = [&](u32 from, u32 target) { emitEdgeCopies(function.blocks[from], target); };
         callbacks.condition = [&](u32 id) { const auto& block = function.blocks[id]; return expr.value(function.insns[block.firstInsn + block.insnCount - 1].use[0]); };
         callbacks.indirectTarget = callbacks.condition;
+        callbacks.value = [&](SsaId value) { return expr.value(value); };
         callbacks.label = blockLabel;
         if (options.includeComments) for (const auto& diagnostic : ast.diagnostics) out << "    /* " << diagnostic << " */\n";
         emittedAst = emitControlFlowAst(ast, out, callbacks).ok();

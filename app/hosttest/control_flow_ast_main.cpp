@@ -11,6 +11,7 @@
 #include "mint/decompile/control_flow_ast.h"
 #include "mint/decompile/decompiler.h"
 #include "mint/ir/normalize.h"
+#include "mint/ir/ir_simplify.h"
 #include "mint/ir/registers.h"
 #include "mint/ssa/ssa_builder.h"
 
@@ -57,7 +58,11 @@ Trace original(const SsaFunction& f, const std::function<bool(u32, unsigned)>& p
         if (op == MintOp::kReturn) { runtime.trace.returned = true; return runtime.trace; }
         u32 next = kNoBlock;
         if (op == MintOp::kCondBranch) next = block.successors[runtime.condition(current) ? 0 : 1];
-        else if (op == MintOp::kBranchInd) { const auto index = runtime.target(current); if (index >= block.successors.size()) return runtime.trace; next = block.successors[index]; }
+        else if (op == MintOp::kBranchInd) {
+            const auto index = runtime.target(current);const auto& term=f.insns[block.firstInsn+block.insnCount-1];
+            if(term.switchCases.empty()){if (index >= block.successors.size()) return runtime.trace;next=block.successors[index];}
+            else {const auto label=std::find_if(term.switchCases.begin(),term.switchCases.end(),[&](const auto& arm){return arm.value==index;});if(label==term.switchCases.end())return runtime.trace;for(auto target:block.successors)if(f.blocks[target].start==label->target)next=target;}
+        }
         else if (!block.successors.empty()) next = block.successors.front();
         if (next == kNoBlock) return runtime.trace; runtime.trace.edges.emplace_back(current, next); current = next;
     }
@@ -70,7 +75,11 @@ Flow execute(u32 id, const ControlFlowAst& ast, Runtime& runtime, unsigned depth
         case ControlFlowAstKind::kBlock: runtime.block(node.block); if (runtime.function.insns[runtime.function.blocks[node.block].firstInsn + runtime.function.blocks[node.block].insnCount - 1].op == MintOp::kReturn) { runtime.trace.returned = true; return {Flow::Return, kNoBlock}; } return {};
         case ControlFlowAstKind::kEdge: runtime.trace.edges.emplace_back(node.from, node.target); return {};
         case ControlFlowAstKind::kIf: return execute(node.children[runtime.condition(node.condition.block) != node.condition.negated ? 0 : 1], ast, runtime, depth + 1);
-        case ControlFlowAstKind::kSwitch: { const auto index = runtime.target(node.condition.block); if (index >= node.arms.size()) return {Flow::Go, kNoBlock}; return execute(node.arms[index].body, ast, runtime, depth + 1); }
+        case ControlFlowAstKind::kSwitch: {
+            const auto index = runtime.target(node.condition.block);
+            if(node.indexedSwitch){for(const auto& arm:node.arms)if(std::find(arm.caseValues.begin(),arm.caseValues.end(),index)!=arm.caseValues.end())return execute(arm.body,ast,runtime,depth+1);return {Flow::Go,kNoBlock};}
+            if (index >= node.arms.size()) return {Flow::Go, kNoBlock}; return execute(node.arms[index].body, ast, runtime, depth + 1);
+        }
         case ControlFlowAstKind::kGoto: return {Flow::Go, node.target};
         case ControlFlowAstKind::kBreak: return {Flow::Break, node.target};
         case ControlFlowAstKind::kContinue: return {Flow::Continue, node.target};
@@ -109,7 +118,64 @@ std::string render(const ControlFlowAst& ast) {
     cb.condition = [](u32 id) { return "condition_" + std::to_string(id); };
     cb.indirectTarget = [](u32 id) { return "target_" + std::to_string(id); };
     cb.label = [](u32 id) { return "L" + std::to_string(id); };
+    cb.value = [](SsaId id) { return "index_value_" + std::to_string(id); };
     const auto status = emitControlFlowAst(ast, out, cb); require(status.ok(), "AST rendering: " + status.message()); return out.str();
+}
+size_t occurrences(const std::string& text,const std::string& needle){size_t count=0,at=0;while((at=text.find(needle,at))!=std::string::npos){++count;at+=needle.size();}return count;}
+void indexedSwitches(){
+    auto indexed=[](SsaFunction* f){
+        auto& term=f->insns[f->blocks[0].firstInsn+f->blocks[0].insnCount-1];
+        SsaValue index;index.def=SsaDef::kEntry;index.storage=Varnode::reg(arm64::kXn(0),8);index.uses=1;
+        f->values.push_back(index);term.use[1]=f->values.size()-1;
+        term.switchCases={{0,f->blocks[1].start},{1,f->blocks[2].start},{2,f->blocks[1].start}};
+    };
+    auto f=fixture({{1,2},{3},{3},{}},{0});indexed(&f);const auto ast=build(f);
+    require(ast.structured&&ast.switchCount==1,"indexed switch structures unique targets despite duplicate case targets");
+    const auto node=std::find_if(ast.nodes.begin(),ast.nodes.end(),[](const auto& n){return n.indexedSwitch;});
+    require(node!=ast.nodes.end()&&node->arms.size()==2&&node->condition.value==f.insns[1].use[1]&&node->condition.value!=f.insns[1].use[0],"indexed AST uses exact selector rather than computed branch address");
+    for(unsigned choice:{0u,1u,2u,99u})equivalent(f,ast,{},[=](u32,unsigned){return choice;});
+    const auto text=render(ast);
+    require(text.find("switch ((uint64_t)(index_value_")!=std::string::npos&&text.find("computed target addresses")==std::string::npos,"indexed renderer selects captured SSA value");
+    require(text.find("case 0ULL:\n")<text.find("case 2ULL:\n")&&text.find("case 2ULL:\n")<text.find("edge_copies(0,1)"),"duplicate target labels share one arm body");
+    require(occurrences(text,"edge_copies(0,1)")==1&&occurrences(text,"edge_copies(0,2)")==1&&occurrences(text,"side_effect(1)")==1,"duplicate labels never duplicate edge copies or target side effects");
+    require(text.find("default: goto unresolved_indirect;")!=std::string::npos,"unmatched table indices remain unresolved");
+    auto malformed=f;malformed.insns[1].switchCases[2].value=0;ControlFlowAst sentinel;sentinel.ifCount=99;
+    require(!buildControlFlowAst(malformed,&sentinel).ok()&&sentinel.ifCount==99,"duplicate case value rejected without changing AST output");
+    malformed=f;malformed.insns[1].switchCases[2].target=0x7777;
+    require(!buildControlFlowAst(malformed,&sentinel).ok(),"case mapping outside original CFG rejected");
+    malformed=f;malformed.insns[1].use[1]=kNoValue;
+    require(!buildControlFlowAst(malformed,&sentinel).ok(),"missing captured index is never guessed");
+    auto shared=fixture({{1,2},{2,3},{1,3},{}},{0});indexed(&shared);const auto fallback=build(shared);
+    require(!fallback.structured&&render(fallback).find("case 2ULL:")!=std::string::npos,"labelled fallback retains proven index-to-target mapping");
+    for(unsigned choice:{0u,1u,2u})equivalent(shared,fallback,[](u32,unsigned visit){return visit<2;},[=](u32,unsigned){return choice;});
+    shared.insns[1].switchCases.clear();shared.insns[1].use[1]=kNoValue;const auto originalTarget=render(build(shared));
+    require(originalTarget.find("switch ((uintptr_t)(target_0))")!=std::string::npos&&originalTarget.find("index_value_")==std::string::npos,"unproven labelled dispatch uses original computed branch target");
+
+    IrFunction ir;ir.arch=Arch::kX86_64;ir.entry=0x1000;ir.name="indexed_phi_capture";ir.tempCount=1;ir.blocks.resize(4);
+    const Graph graph={{1,2},{3},{3},{}};
+    for(u32 id=0;id<4;++id){
+        auto& block=ir.blocks[id];block.id=id;block.start=0x1000+id*0x20;block.end=block.start+0x20;block.firstInsn=ir.insns.size();block.successors=graph[id];
+        auto add=[&](MintOp op,Varnode dest={},Varnode a={},Varnode b={}){IrInsn insn;insn.op=op;insn.dest=dest;insn.a=a;insn.b=b;insn.address=block.start+4*block.insnCount;ir.insns.push_back(insn);++block.insnCount;};
+        if(!id){
+            add(MintOp::kCopy,Varnode::temp(0,4),Varnode::reg(x86::kRdi,4));
+            add(MintOp::kCopy,Varnode::reg(x86::kRdi,8),Varnode::reg(x86::kRsi,8));
+            add(MintOp::kBranchInd,{},Varnode::reg(x86::kRdi,8),Varnode::temp(0,4));
+            ir.insns.back().switchCases={{0,0x1020},{1,0x1040},{2,0x1020}};
+        }else if(id<3){add(MintOp::kCopy,Varnode::reg(x86::kRax,8),Varnode::constant(id,8));add(MintOp::kBranch,{},Varnode::constant(0x1060,8));}
+        else add(MintOp::kReturn,{},Varnode::constant(0x4000,8));
+    }
+    for(const auto& block:ir.blocks)for(auto next:block.successors)ir.blocks[next].predecessors.push_back(block.id);
+    require(ir.verify().empty(),"captured narrow index IR verifies before normalization");normalizeRegisterAccesses(&ir);require(ir.verify().empty(),"captured narrow index normalizes with its mapping intact");
+    require(simplifyIr(&ir).ok()&&ir.verify().empty(),"IR simplification preserves selector capture and case metadata");
+    SsaFunction ssa;require(buildSsa(ir,&ssa).ok()&&ssa.verify().empty(),"captured narrow index SSA verifies");
+    const auto term=std::find_if(ssa.insns.begin(),ssa.insns.end(),[](const auto& insn){return insn.op==MintOp::kBranchInd;});
+    require(term!=ssa.insns.end()&&term->switchCases.size()==3&&term->use[0]!=term->use[1],"SSA aliases retain selector separately from overwritten target register");
+    const auto index=term->use[1];require(index<ssa.values.size()&&ssa.values[index].def==SsaDef::kInsn&&ssa.insns[ssa.values[index].defIndex].op==MintOp::kTrunc,"normalized selector capture remains a live narrow SSA use");
+    require(std::any_of(ssa.phis.begin(),ssa.phis.end(),[](const auto& phi){return !phi.dead;}),"indexed switch fixture retains a live join phi");
+    const auto phiAst=build(ssa);const auto phiText=render(phiAst);
+    require(occurrences(phiText,"edge_copies(0,1)")==1&&occurrences(phiText,"edge_copies(0,2)")==1&&occurrences(phiText,"edge_copies(1,3)")==1&&occurrences(phiText,"edge_copies(2,3)")==1,"all switch and join-phi copy edges are emitted exactly once");
+    DecompileResult out;require(decompileSsa(ssa,&out).ok()&&out.cSource.find("proven table indices")!=std::string::npos,"captured selector and actual cases reach ordinary C emission");
+    cFixtures<<out.cSource<<'\n';
 }
 void structured() {
     const auto nested = fixture({{4, 1}, {6}, {5}, {5}, {3, 2}, {6}, {}}); const auto nestedAst = build(nested);
@@ -283,7 +349,7 @@ void executableLoop() {
 }  // namespace
 int main(int argc, char** argv) {
     cFixtures << "#include <stdint.h>\n#include <stdbool.h>\n";
-    structured(); fallbacks(); native(Arch::kAArch64); native(Arch::kX86_64); identity(Arch::kAArch64); identity(Arch::kX86_64); narrowReturn(Arch::kArm32); narrowReturn(Arch::kRiscV32); declaredFields(); executableLoop();
+    structured(); fallbacks(); indexedSwitches(); native(Arch::kAArch64); native(Arch::kX86_64); identity(Arch::kAArch64); identity(Arch::kX86_64); narrowReturn(Arch::kArm32); narrowReturn(Arch::kRiscV32); declaredFields(); executableLoop();
     cFixtures << "\n#ifdef MINT_AST_GENERATED_MAIN\nint main(void) {\n"
         "    uint64_t memory[3] = {3, 1, 0};\n"
         "    if (generated_loop_semantics(memory) != 2 || memory[0] != 1 || memory[2] != 11) return 1;\n"
@@ -292,6 +358,7 @@ int main(int argc, char** argv) {
         "    Record object = {0}; object.payload = 7;\n"
         "    if (typed_fields(&object) != 49 || object.payload != 42) return 3;\n"
         "    if (identity_1(123) != 123 || identity_2(456) != 456) return 4;\n"
+        "    if (indexed_phi_capture(0, 99) != 1 || indexed_phi_capture(2, 99) != 1 || indexed_phi_capture(1, 99) != 2) return 5;\n"
         "    return 0;\n}\n#endif\n";
     if (argc == 3 && std::string(argv[1]) == "--emit-c") { std::ofstream output(argv[2], std::ios::binary); output << cFixtures.str(); require(output.good(), "write owned C syntax-verification fixture"); }
     else require(argc == 1, "usage: mint_control_flow_ast_test [--emit-c output.c]");

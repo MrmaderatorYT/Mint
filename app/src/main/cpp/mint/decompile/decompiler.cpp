@@ -3,6 +3,7 @@
 #include "mint/decompile/c_emitter.h"
 #include "mint/decompile/cfg_structurer.h"
 #include "mint/ir/ir_simplify.h"
+#include "mint/decompile/tail_call.h"
 
 namespace mint {
 
@@ -12,6 +13,8 @@ Status decompileSsa(const SsaFunction& function, DecompileResult* result,
                     const TypeLayoutResolver& typeLayouts, const LocalResolver& locals,
                     const MemoryFunctionResolver& memoryFunctions) {
     if (!result) return Status::error(ErrorCode::kInternalError, "null decompile output");
+    const auto problems=function.verify();
+    if(!problems.empty())return Status::error(ErrorCode::kBadFormat,"cannot decompile invalid SSA: "+problems.front());
     result->ssa = function;
     result->structure = structureControlFlow(result->ssa);
     CEmitterOptions options;
@@ -33,6 +36,14 @@ Status decompileIr(const IrFunction& input, DecompileResult* result,
                    const MemoryFunctionResolver& memoryFunctions) {
     if (!result) return Status::error(ErrorCode::kInternalError, "null decompile output");
     IrFunction normalized = input;
+    // Physical tail inputs become real IR uses before SSA liveness/phi placement.
+    // Unknown declarations retain only the low-level terminal transfer.
+    const auto caller=prototypes?prototypes(input.entry):UserPrototype{};
+    for(auto& insn:normalized.insns)if(insn.op==MintOp::kTailCall){
+        insn.tailInputs.clear();TailCallContract contract;
+        if(insn.a.isConstant()&&prototypes&&buildTailCallContract(input.arch,input.byteOrder,caller,prototypes(insn.a.offset),typeLayouts,&contract).ok())
+            for(const auto& parameter:contract.calleeAbi.parameters)insn.tailInputs.push_back(parameter.pieces[0].storage);
+    }
     result->normalize = normalizeRegisterAccesses(&normalized);
     IrSimplifyStats simplifyStats;
     Status status = simplifyIr(&normalized, &simplifyStats);

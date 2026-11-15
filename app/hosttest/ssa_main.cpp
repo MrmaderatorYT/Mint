@@ -166,6 +166,7 @@ int main(int argc, char** argv) {
             std::printf("uint64_t op_%s();\n", name);
         }
         std::printf("uint64_t call();\n");
+        std::printf("_Noreturn void op_tail_transfer(uintptr_t);\n");
         std::set<std::string> emitted;
         std::vector<std::string> bodies;
         size_t count = 0, failed = 0;
