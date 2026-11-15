@@ -6,7 +6,7 @@
 
 Mint is an offline binary-analysis and decompilation workspace **running on Android**. Its primary purpose is reversing native binaries, not Android APK application analysis. The original targets are ELF64/AArch64 and ELF64/x86-64; ELF32/ARM/Thumb/x86-32/RISC-V32, ELF64/RISC-V64, explicit raw mappings, PE32/PE32+ and little-endian thin32/64 or validated universal Mach-O containers now use the same native engine. Analysis runs in C++ through JNI and exposes disassembly, MintIR, pseudo-C, control-flow graphs, functions, and diagnostics in a touch-oriented UI. Legacy DEX/APK parsing is present but is not the development priority.
 
-The project is an independent, Ghidra-inspired implementation. It does not embed Ghidra, Sleigh, LLVM, or Unicorn, and it is no longer a mock-data simulator. Mint is currently a `0.4 preview`: the core pipeline is functional, but format, architecture, type-recovery, and control-structure coverage are narrower than a desktop reverse-engineering suite.
+The project is an independent, Ghidra-inspired implementation. It does not embed Ghidra, Sleigh, LLVM, or Unicorn, and it is no longer a mock-data simulator. Mint is currently a `0.5 Preview`: the core pipeline is functional, but format, architecture, type-recovery, and control-structure coverage are narrower than a desktop reverse-engineering suite.
 
 The [now-to-production roadmap](now-to-production-roadmap.md) defines the implementation work, acceptance evidence and release gates required for a working 1.0. Preview version numbers do not determine production readiness.
 
