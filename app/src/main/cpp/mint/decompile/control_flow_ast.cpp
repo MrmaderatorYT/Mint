@@ -58,7 +58,7 @@ public:
     Builder(const SsaFunction& function, ControlFlowAst* out) : f_(function), out_(*out) {}
     Status run();
 private:
-    u32 node(ControlFlowAstKind kind) { if (out_.nodes.size() >= kMaxNodes) { okay_ = false; return kNoAstNode; } ControlFlowAstNode value; value.kind = kind; out_.nodes.push_back(std::move(value)); return static_cast<u32>(out_.nodes.size() - 1); }
+    u32 node(ControlFlowAstKind kind) { if (out_.nodes.size() >= kMaxNodes) { okay_ = false; limited_ = true; return kNoAstNode; } ControlFlowAstNode value; value.kind = kind; out_.nodes.push_back(std::move(value)); return static_cast<u32>(out_.nodes.size() - 1); }
     u32 sequence() { return node(ControlFlowAstKind::kSequence); }
     void child(u32 parent, u32 value) { if (parent >= out_.nodes.size() || value >= out_.nodes.size()) { okay_ = false; return; } out_.nodes[parent].children.push_back(value); }
     u32 transfer(u32 from, u32 target, ControlFlowAstKind kind) { auto id = node(kind); if (id != kNoAstNode) { out_.nodes[id].from = from; out_.nodes[id].target = target; } return id; }
@@ -78,7 +78,7 @@ private:
     void block(u32 parent, u32 index);
     const SsaInsn* terminator(u32 id) const { const auto& b = f_.blocks[id]; return b.insnCount ? &f_.insns[b.firstInsn + b.insnCount - 1] : nullptr; }
     const SsaFunction& f_; ControlFlowAst& out_; Graph graph_, preds_; Dom dom_, post_;
-    std::map<u32, Loop> loops_; u64 work_ = 0; bool okay_ = true;
+    std::map<u32, Loop> loops_; u64 work_ = 0; bool okay_ = true, limited_ = false;
 };
 bool Builder::validate() {
     graph_.resize(f_.blocks.size()); preds_.resize(f_.blocks.size());
@@ -168,7 +168,7 @@ u32 Builder::arm(u32 from, u32 target, u32 stop, const Region& body, const Regio
     return result;
 }
 u32 Builder::region(u32 start, u32 stop, const Region& allowed, u32 activeLoop, unsigned depth) {
-    const auto result = sequence(); if (depth > 64) { okay_ = false; return result; }
+    const auto result = sequence(); if (depth > 64) { okay_ = false; limited_ = true; return result; }
     for (u32 current = start; current != stop && current != kNoBlock && okay_;) {
         if (++work_ > kMaxWork || !allowed.count(current)) { okay_ = false; break; }
         auto natural = loops_.find(current);
@@ -203,7 +203,11 @@ u32 Builder::region(u32 start, u32 stop, const Region& allowed, u32 activeLoop, 
             if (finish == activeLoop || finish == kNoBlock || !allowed.count(finish)) current = kNoBlock; else current = finish;
             continue;
         }
-        if (next.empty()) { if (!term || (term->op != MintOp::kReturn&&term->op!=MintOp::kTailCall)) child(result, transfer(current, kNoBlock, ControlFlowAstKind::kGoto)); break; }
+        if (next.empty()) {
+            if (!term || (term->op != MintOp::kReturn && term->op != MintOp::kTailCall && term->op != MintOp::kTrap))
+                child(result, transfer(current, kNoBlock, ControlFlowAstKind::kGoto));
+            break;
+        }
         if (next.size() != 1 || (term && term->op == MintOp::kReturn)) { okay_ = false; break; }
         const auto target = next.front(); child(result, transfer(current, target, ControlFlowAstKind::kEdge));
         if (target == activeLoop) { child(result, transfer(current, target, ControlFlowAstKind::kContinue)); break; }
@@ -215,13 +219,26 @@ u32 Builder::region(u32 start, u32 stop, const Region& allowed, u32 activeLoop, 
 }
 void Builder::fallback(const std::string& reason) {
     out_ = {}; out_.diagnostics.push_back(reason); out_.blockOwner.assign(f_.blocks.size(), kNoAstNode); okay_ = true;
+    out_.budgetExhausted = limited_ || work_ > kMaxWork;
     out_.root = node(ControlFlowAstKind::kFallback);
     for (u32 index = 0; index < f_.blocks.size(); ++index) {
         block(out_.root, index); const auto& next = graph_[index]; const auto* term = terminator(index);
-        if (term && (term->op == MintOp::kReturn||term->op==MintOp::kTailCall)) continue;
+        if (term && (term->op == MintOp::kReturn || term->op == MintOp::kTailCall || term->op == MintOp::kTrap)) continue;
         if (term && term->op == MintOp::kCondBranch) {
+            const auto takenTarget = conditionalSuccessor(f_, f_.blocks[index], *term, true);
+            if (next.size() == 1 && takenTarget != kNoBlock && f_.blocks[takenTarget].start == f_.blocks[index].end) {
+                child(out_.root, transfer(index, takenTarget, ControlFlowAstKind::kEdge));
+                child(out_.root, transfer(index, takenTarget, ControlFlowAstKind::kGoto));
+                continue;
+            }
             const auto branch = node(ControlFlowAstKind::kIf); if (branch == kNoAstNode) break; out_.nodes[branch].block = index; out_.nodes[branch].condition = {index, term->use[0], false};
-            for (size_t arm = 0; arm < 2; ++arm) { const auto body = sequence(); const auto target = arm < next.size() ? next[arm] : kNoBlock; if (target != kNoBlock) child(body, transfer(index, target, ControlFlowAstKind::kEdge)); child(body, transfer(index, target, ControlFlowAstKind::kGoto)); child(branch, body); }
+            for (bool taken : {true, false}) {
+                const auto body = sequence();
+                const auto target = conditionalSuccessor(f_, f_.blocks[index], *term, taken);
+                if (target != kNoBlock) child(body, transfer(index, target, ControlFlowAstKind::kEdge));
+                child(body, transfer(index, target, ControlFlowAstKind::kGoto));
+                child(branch, body);
+            }
             child(out_.root, branch);
         } else if (term && term->op == MintOp::kBranchInd && !next.empty()) {
             const auto branch = node(ControlFlowAstKind::kSwitch); if (branch == kNoAstNode) break; out_.nodes[branch].block = index; out_.nodes[branch].condition = {index, term->use[0], false};
@@ -271,6 +288,22 @@ bool validateAst(const ControlFlowAst& ast) {
     return std::find(state.begin(), state.end(), 0) == state.end() && std::find(blocks.begin(), blocks.end(), false) == blocks.end();
 }
 }  // namespace
+u32 conditionalSuccessor(const SsaFunction& function, const SsaBlock& block,
+                         const SsaInsn& term, bool taken) {
+    if (block.successors.size() == 2) return block.successors[taken ? 0 : 1];
+    if (block.successors.size() != 1) return kNoBlock;
+    const u32 target = block.successors.front();
+    if (target >= function.blocks.size()) return kNoBlock;
+    const Address start = function.blocks[target].start;
+    if (term.use[1] < function.values.size()) {
+        const auto& value = function.values[term.use[1]];
+        if (value.def == SsaDef::kConstant) {
+            if (start == value.storage.offset) return taken ? target : kNoBlock;
+        }
+    }
+    return !taken && start == block.end ? target : kNoBlock;
+}
+
 Status buildControlFlowAst(const SsaFunction& function, ControlFlowAst* out) {
     if (!out) return bad("null AST output"); ControlFlowAst candidate; auto status = Builder(function, &candidate).run();
     if (status.ok() && !validateAst(candidate)) return bad("internal AST ownership validation failed");
@@ -302,9 +335,16 @@ Status emitControlFlowAst(const ControlFlowAst& ast, std::ostream& out, const Co
                     else out << indent << "case 0x" << std::hex << arm.targetAddress << std::dec << "ULL: ";
                     out<<"{\n"; emit(arm.body, depth + 1); out << indent << "    break;\n" << indent << "}\n";
                 }
-                out << indent << "default: goto unresolved_indirect;\n" << indent << "}\n"; break;
+                if (cb.unresolved) {
+                    out << indent << "default:\n";
+                    cb.unresolved(node.block, indent + "    ", true);
+                } else out << indent << "default: goto unresolved_indirect;\n";
+                out << indent << "}\n"; break;
             case ControlFlowAstKind::kContinue: out << indent << "continue;\n"; break;
-            case ControlFlowAstKind::kBreak: case ControlFlowAstKind::kGoto: out << indent << "goto " << target(node.target) << ";\n"; break;
+            case ControlFlowAstKind::kBreak: case ControlFlowAstKind::kGoto:
+                if (node.target == kNoBlock && cb.unresolved) cb.unresolved(node.from, indent, false);
+                else out << indent << "goto " << target(node.target) << ";\n";
+                break;
         }
     };
     if (!ast.structured) out << "    /* AST fallback: original labelled CFG; no unproven nesting. */\n";

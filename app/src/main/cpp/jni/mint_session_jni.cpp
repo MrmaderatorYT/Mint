@@ -487,6 +487,28 @@ Java_com_ccs_mint_core_MintSession_nativeDecompiledC(JNIEnv* env, jclass, jlong 
     return mint::jni::toJava(env, session->decompiledCFor(static_cast<Address>(address)));
 }
 
+JNIEXPORT jobjectArray JNICALL
+Java_com_ccs_mint_core_MintSession_nativeDecompileView(JNIEnv* env, jclass, jlong handle,
+                                                      jlong address) {
+    auto* session = asSession(handle);
+    if (!session) return nullptr;
+    std::string anchors;
+    const std::string body = session->decompileReportFor(static_cast<Address>(address)).text(&anchors);
+    jclass stringClass = env->FindClass("java/lang/String");
+    if (!stringClass) return nullptr;
+    jobjectArray view = env->NewObjectArray(2, stringClass, nullptr);
+    env->DeleteLocalRef(stringClass);
+    if (!view) return nullptr;
+    for (int index = 0; index < 2; ++index) {
+        jstring value = mint::jni::toJava(env, index == 0 ? body : anchors);
+        if (!value) return nullptr;
+        env->SetObjectArrayElement(view, index, value);
+        env->DeleteLocalRef(value);
+        if (env->ExceptionCheck()) return nullptr;
+    }
+    return view;
+}
+
 JNIEXPORT jstring JNICALL
 Java_com_ccs_mint_core_MintSession_nativeFunctionCfg(JNIEnv* env, jclass, jlong handle,
                                                      jlong address) {

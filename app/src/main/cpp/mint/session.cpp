@@ -193,37 +193,57 @@ std::string Session::irTextFor(Address address) {
 }
 
 std::string Session::decompiledCFor(Address address) {
-    if (!analyzed_) return {};
+    auto result = decompileReportFor(address);
+    if (!result.cSource.empty()) return std::move(result.cSource);
+    return result.diagnostics.empty() ? std::string{} : result.diagnostics.front().reason;
+}
+
+DecompileReport Session::decompileReportFor(Address address) {
+    const auto failure = [](const Status& status, const char* stage) {
+        DecompileReport report;
+        report.noteFailure(status, stage);
+        return report;
+    };
+    if (!analyzed_) return failure(Status::error(ErrorCode::kNotFound, "analysis is unavailable"), "Decompilation");
     notifyPluginEvent(MINT_EVENT_BEFORE_DECOMPILE,address,"requested pseudo-C");
 
     if (isDexLike()) {
         const u32 index = dexMethodIndex(address);
-        if (index >= dex_.methods().size()) return {};
+        if (index >= dex_.methods().size())
+            return failure(Status::error(ErrorCode::kNotFound, "no analyzed method at this address"), "Decompilation");
         IrFunction ir;
         Status status = liftDalvik(dex_.methods()[index], &ir);
-        if (!status.ok()) return "decompiler lifting failed: " + status.toString();
+        if (!status.ok()) return failure(status, "decompiler lifting failed");
         DecompileResult result;
         const DeobfuscationResult obfuscation = deobfuscate(&ir);
         status = decompileIr(ir, &result);
-        if (!status.ok()) return "decompiler failed: " + status.toString();
+        if (!status.ok()) return failure(status, "decompiler failed");
+        const auto sourceBytes = result.cSource.size();
+        result.report.note(DecompileStatus::kPartial, "Dalvik lifting models only selected instructions", address);
         if (!obfuscation.findings.empty()) {
             result.cSource = "/* OLLVM findings: " + std::to_string(obfuscation.findings.size()) +
                              ", dispatcher blocks: " + std::to_string(obfuscation.unroll.dispatcherBlocks) +
                              " */\n" + result.cSource;
         }
-        return result.cSource;
+        result.report.sourcePrefixBytes = result.cSource.size() - sourceBytes;
+        result.report.sourceRanges.clear(); // Dalvik uses a different listing address space.
+        result.report.cSource = std::move(result.cSource);
+        return std::move(result.report);
     }
 
     const Function* function = analyzer_.functionContaining(address);
     if (function == nullptr) function = analyzer_.functionAt(address);
-    if (function == nullptr) return {};
+    if (function == nullptr)
+        return failure(Status::error(ErrorCode::kNotFound, "no analyzed function at this address"), "Decompilation");
+    if (function->instructions.empty() && analyzer_.stats().reachedInstructionLimit)
+        return failure(Status::error(ErrorCode::kTooLarge, "function discovery instruction limit reached"), "Decompilation");
     if (!lifter_.ready()) {
         const Status status = lifter_.open(image_.arch());
-        if (!status.ok()) return "decompiler: no lifter for " + std::string(archName(image_.arch()));
+        if (!status.ok()) return failure(status, "decompiler: no lifter");
     }
     IrFunction ir;
     Status status = lifter_.liftFunction(*function, image_.memory(), &ir);
-    if (!status.ok()) return "decompiler lifting failed: " + status.toString();
+    if (!status.ok()) return failure(status, "decompiler lifting failed");
     JumpTableRecovery recovery;
     recoverJumpTables(image_, ir, &recovery);
     augmentIrCfg(&ir, recovery);
@@ -239,7 +259,26 @@ std::string Session::decompiledCFor(Address address) {
         [this](const std::string& type,DataTypeLayout* layout) {return program_.types().resolve(type,layout);},
         [this](Address entry) {return program_.locals(entry);},
         decompilerMemoryFunctions());
-    if (!status.ok()) return "decompiler failed: " + status.toString();
+    if (!status.ok()) return failure(status, "decompiler failed");
+    if (function->incomplete) {
+        if (analyzer_.stats().reachedInstructionLimit) {
+            result.report.note(DecompileStatus::kBudgetExhausted,
+                "Function is incomplete and discovery reached its instruction limit", function->entry);
+        } else if (function->undecodableSites) {
+            result.report.note(DecompileStatus::kPartial, "Discovery encountered undecodable bytes", function->entry);
+        } else {
+            result.report.note(DecompileStatus::kPartial, "Discovery could not follow every control-flow path", function->entry);
+        }
+    }
+    if (const auto found = analyzer_.indirectFlowReports().find(function->entry);
+        found != analyzer_.indirectFlowReports().end()) {
+        for (const auto& site : found->second.sites) {
+            if (!site.call && !site.complete && !site.reason.empty())
+                result.report.note(found->second.converged ? DecompileStatus::kPartial : DecompileStatus::kBudgetExhausted,
+                    site.reason, site.address);
+        }
+    }
+    const auto sourceBytes = result.cSource.size();
     std::string userComment=program_.get(function->entry,"comment");
     if (!userComment.empty()) {
         size_t at=0; while ((at=userComment.find("*/",at))!=std::string::npos) {userComment.replace(at,2,"* /");at+=3;}
@@ -264,7 +303,9 @@ std::string Session::decompiledCFor(Address address) {
         else result.cSource="/* C type export unavailable; consult the Data Type Manager. */\n"+result.cSource;
     }
     notifyPluginEvent(MINT_EVENT_AFTER_DECOMPILE,address,"pseudo-C available");
-    return result.cSource;
+    result.report.sourcePrefixBytes = result.cSource.size() - sourceBytes;
+    result.report.cSource = std::move(result.cSource);
+    return std::move(result.report);
 }
 
 std::string Session::cfgTextFor(Address address) {

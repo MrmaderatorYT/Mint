@@ -1,5 +1,7 @@
 #include "mint/session.h"
+#include "program_fresh_oracle.h"
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <vector>
@@ -7,9 +9,15 @@
 using namespace mint;
 namespace {
 unsigned checks=0;
-void require(bool value,const char* text){++checks;if(!value){std::cerr<<"interprocedural Session: "<<text<<'\n';std::exit(1);}}
-std::string temporary(){std::string path="/private/tmp/mint-memory-session-XXXXXX";int fd=mkstemp(path.data());require(fd>=0,"owned temporary");close(fd);return path;}
+void require(bool value,const std::string& text){++checks;if(!value){std::cerr<<"interprocedural Session: "<<text<<'\n';std::exit(1);}}
+std::string temporary(){auto path=(std::filesystem::temp_directory_path()/"mint-memory-session-XXXXXX").string();int fd=mkstemp(path.data());require(fd>=0,"owned temporary");close(fd);return path;}
 struct Files {std::string binary=temporary(),project=temporary();Files(){unlink(project.c_str());}~Files(){unlink(binary.c_str());unlink(project.c_str());unlink((project+".analysis").c_str());}};
+void compareFresh(Session& session, const Files& files, const char* step) {
+    const auto status = testing::matchesFreshAnalysis(session, files.project, [&](Session& oracle) {
+        return oracle.openRawPath(files.binary, Arch::kAArch64, 0x1000, 0x1000);
+    });
+    require(status.ok(), std::string(step) + " matches full analysis: " + status.toString());
+}
 void hiddenRegisterPaths(){
     Files files;
     // x20 is read only by the callee, so it has no ordinary caller SSA use.
@@ -68,18 +76,23 @@ void recursiveFreshness(bool mutual){
         text=session.decompiledCFor(0x1000);
     }
     require(text.find("0 proven read-only calls")!=std::string::npos&&text.find("1 selective write calls")!=std::string::npos&&text.find("0 exact store/load dependencies")!=std::string::npos,"recursive writes reach ordinary decompiler without stale purity");
+    compareFresh(session, files, "recursive writer patch");
     require(session.undoEdit(false).ok(),"undo recursive member write");
     text=session.decompiledCFor(0x1000);
     require(text.find("1 proven read-only calls")!=std::string::npos&&text.find("1 exact store/load dependencies")!=std::string::npos,"undo rebuilds recursive dependencies from effective bytes");
+    compareFresh(session, files, "recursive writer undo");
     require(session.undoEdit(true).ok(),"redo recursive member write");
     text=session.decompiledCFor(0x1000);
     require(text.find("1 selective write calls")!=std::string::npos&&text.find("0 exact store/load dependencies")!=std::string::npos,"redo reapplies recursive write effects");
+    compareFresh(session, files, "recursive writer redo");
     Session reopened;require(reopened.openRawPath(files.binary,Arch::kAArch64,0x1000,0x1000).ok()&&reopened.attachProject(files.project).ok()&&reopened.analyze().ok(),"reopen patched recursive project");
     text=reopened.decompiledCFor(0x1000);
     require(text.find("0 proven read-only calls")!=std::string::npos&&text.find("1 selective write calls")!=std::string::npos&&text.find("0 exact store/load dependencies")!=std::string::npos,"persistent recursive project rebuilds patched effect summaries");
+    compareFresh(reopened, files, "reopened recursive write effects");
     require(reopened.editAnnotation(patch,"patch","40 00 3f d6").ok(),"replace recursive member write with opaque indirect call");
     text=reopened.decompiledCFor(0x1000);
     require(text.find("0 proven read-only calls")!=std::string::npos&&text.find("0 selective write calls")!=std::string::npos&&text.find("1 alias barriers")!=std::string::npos&&text.find("0 exact store/load dependencies")!=std::string::npos,"unknown effects anywhere in recursive component remain a barrier");
+    compareFresh(reopened, files, "opaque recursive call patch");
 }
 void recursiveFramesRemainUnknown(){
     Files files;

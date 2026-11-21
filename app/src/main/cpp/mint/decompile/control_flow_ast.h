@@ -30,6 +30,7 @@ struct ControlFlowAst {
     std::vector<u32> blockOwner; // Every original block owns exactly one kBlock.
     std::vector<std::string> diagnostics;
     bool structured = false;
+    bool budgetExhausted = false;
     size_t ifCount = 0, loopCount = 0, switchCount = 0;
 };
 
@@ -52,7 +53,12 @@ struct ControlFlowAstCallbacks {
     std::function<std::string(u32)> indirectTarget;
     std::function<std::string(u32)> label;
     std::function<std::string(SsaId)> value; // Captured table index, when proved.
+    // Optional terminal renderer, including a switch's defensive default.
+    std::function<void(u32, const std::string&, bool)> unresolved;
 };
+
+// In an incomplete CFG the only present edge need not be the taken edge.
+u32 conditionalSuccessor(const SsaFunction&, const SsaBlock&, const SsaInsn&, bool taken);
 // Proven table mappings dispatch on the captured index and retain every case,
 // including repeated targets. Other indirect flow dispatches on computed target
 // addresses. Unmatched values stay unresolved. Loop exits use the original label,

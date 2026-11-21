@@ -258,6 +258,68 @@ IrFunction singleBlock(Arch arch, const std::string& name) {
 void instruction(IrFunction& ir, MintOp op, Varnode dest = Varnode::invalid(), Varnode a = Varnode::invalid(), Varnode b = Varnode::invalid()) {
     IrInsn insn; insn.op = op; insn.dest = dest; insn.a = a; insn.b = b; insn.address = 0x1000 + ir.insns.size() * 4; ir.insns.push_back(insn); ++ir.blocks[0].insnCount;
 }
+void decompileReport() {
+    auto ir = singleBlock(Arch::kAArch64, "partial_transfer");
+    ir.blocks[0].end = 0x1004;
+    instruction(ir, MintOp::kBranchInd, {}, Varnode::reg(arm64::kXn(0), 8));
+    DecompileResult result;
+    require(decompileIr(ir, &result).ok(), "decompile unresolved transfer");
+    require(result.report.status == DecompileStatus::kPartial, "unresolved transfer produces partial status");
+    require(result.cSource.find("return 0;") == std::string::npos &&
+            result.cSource.find("transfer target") != std::string::npos &&
+            result.cSource.find("__builtin_trap();") != std::string::npos,
+            "computed target remains visible and never returns a fabricated value");
+
+    ir = singleBlock(Arch::kAArch64, "defined_zero");
+    ir.blocks[0].end = 0x1008;
+    instruction(ir, MintOp::kCopy, Varnode::reg(arm64::kXn(0), 8), Varnode::constant(0, 8));
+    instruction(ir, MintOp::kReturn, {}, Varnode::reg(arm64::kXn(30), 8));
+    require(decompileIr(ir, &result).ok() && result.report.status == DecompileStatus::kComplete &&
+            result.cSource.find("return 0x0;") != std::string::npos,
+            "real return zero survives complete decompilation");
+    result.report.sourcePrefixBytes = 10;
+    result.report.cSource = "/* tag */\n" + result.cSource;
+    std::string anchors;
+    const auto displayed = result.report.text(&anchors);
+    std::istringstream rows(anchors);
+    size_t first, last;
+    Address start, end;
+    require(bool(rows >> first >> last >> std::hex >> start >> end) && start == 0x1000 && end == 0x1008,
+            "folded return carries the machine block range");
+    const auto returnAt = displayed.find("return 0x0;");
+    const auto returnLine = static_cast<size_t>(std::count(displayed.begin(), displayed.begin() + returnAt, '\n'));
+    require(first <= returnLine && returnLine <= last, "source range matches the displayed line after headers");
+
+    // If only the fallthrough was recovered, the taken path must still stop.
+    ir = singleBlock(Arch::kAArch64, "partial_conditional");
+    ir.blocks[0].end = 0x1008;
+    ir.tempCount = 1;
+    const auto condition = Varnode::temp(0, 1);
+    instruction(ir, MintOp::kEqual, condition, Varnode::reg(arm64::kXn(0), 8),
+                Varnode::constant(0, 8));
+    instruction(ir, MintOp::kCondBranch, {}, condition, Varnode::constant(0x2000, 8));
+    ir.blocks[0].successors = {1};
+    IrBlock fall;
+    fall.id = 1;
+    fall.start = 0x1008;
+    fall.end = 0x100c;
+    fall.firstInsn = 2;
+    fall.insnCount = 1;
+    fall.predecessors = {0};
+    ir.blocks.push_back(fall);
+    IrInsn ret;
+    ret.op = MintOp::kReturn;
+    ret.a = Varnode::reg(arm64::kXn(30), 8);
+    ret.address = 0x1008;
+    ir.insns.push_back(ret);
+    require(decompileIr(ir, &result).ok() && result.report.status == DecompileStatus::kPartial,
+            "missing taken branch produces partial status");
+    const auto stop = result.cSource.find("__builtin_trap();");
+    const auto otherwise = result.cSource.find("else {");
+    const auto resolved = result.cSource.find("goto block_1;");
+    require(stop < otherwise && otherwise < resolved && resolved != std::string::npos,
+            "only the fallthrough goes to the recovered successor");
+}
 void identity(Arch arch) {
     auto ir = singleBlock(arch, "identity_" + std::to_string(static_cast<unsigned>(arch)));
     const auto incoming = Varnode::reg(arch == Arch::kAArch64 ? arm64::kXn(0) : x86::kRdi, 8);
@@ -349,7 +411,7 @@ void executableLoop() {
 }  // namespace
 int main(int argc, char** argv) {
     cFixtures << "#include <stdint.h>\n#include <stdbool.h>\n";
-    structured(); fallbacks(); indexedSwitches(); native(Arch::kAArch64); native(Arch::kX86_64); identity(Arch::kAArch64); identity(Arch::kX86_64); narrowReturn(Arch::kArm32); narrowReturn(Arch::kRiscV32); declaredFields(); executableLoop();
+    structured(); fallbacks(); indexedSwitches(); native(Arch::kAArch64); native(Arch::kX86_64); identity(Arch::kAArch64); identity(Arch::kX86_64); narrowReturn(Arch::kArm32); narrowReturn(Arch::kRiscV32); declaredFields(); executableLoop(); decompileReport();
     cFixtures << "\n#ifdef MINT_AST_GENERATED_MAIN\nint main(void) {\n"
         "    uint64_t memory[3] = {3, 1, 0};\n"
         "    if (generated_loop_semantics(memory) != 2 || memory[0] != 1 || memory[2] != 11) return 1;\n"

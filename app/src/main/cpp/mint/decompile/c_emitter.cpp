@@ -1,4 +1,5 @@
 #include "mint/decompile/c_emitter.h"
+#include "mint/decompile/decompiler.h"
 #include "mint/decompile/tail_call.h"
 #include "mint/ir/interprocedural_types.h"
 #include "mint/ir/memory_analysis.h"
@@ -167,14 +168,22 @@ private:
 }  // namespace
 
 std::string emitC(const SsaFunction& function, const ControlFlowStructure& structure,
-                  const CEmitterOptions& options) {
+                  const CEmitterOptions& options, DecompileReport* report) {
     std::ostringstream out;
+    const auto note = [&](DecompileStatus status, const char* reason, Address address) {
+        if (report) report->note(status, reason, address);
+    };
+    const auto noteLimit = [&](const Status& status, const char* stage) {
+        if (report && status.code() == ErrorCode::kTooLarge) report->noteFailure(status, stage);
+    };
     ExprBuilder expr(function);
     StackAnalysis stack;
     MemoryAnalysis memory;
     const auto memoryStatus=analyzeMemory(function,&memory,options.memoryFunctions);
     const Status stackStatus = options.recoverStackVariables
         ? analyzeStackMemory(function, &stack) : Status::success();
+    noteLimit(memoryStatus, "Memory analysis");
+    noteLimit(stackStatus, "Stack analysis");
 
     std::vector<std::vector<u32>> graph(function.blocks.size());
     for (size_t i = 0; i < function.blocks.size(); ++i) {
@@ -186,11 +195,18 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
     ControlFlowAst ast;
     const Status astStatus = options.useAST ? buildControlFlowAst(function, &ast)
         : Status::error(ErrorCode::kUnsupported, "AST structuring disabled");
+    noteLimit(astStatus, "Control-flow structuring");
+    if (ast.budgetExhausted)
+        note(DecompileStatus::kBudgetExhausted, "Control-flow structuring reached a work, depth or size limit", function.entry);
 
     TypeRecovery types;
     InterproceduralTypeOptions typeOptions;
     typeOptions.prototypes=options.prototypes;typeOptions.typeLayouts=options.typeLayouts;
-    recoverInterproceduralTypes(function,&types,memoryStatus.ok()?&memory:nullptr,options.memoryFunctions,typeOptions);
+    const Status typeStatus = recoverInterproceduralTypes(function, &types,
+        memoryStatus.ok() ? &memory : nullptr, options.memoryFunctions, typeOptions);
+    noteLimit(typeStatus, "Type recovery");
+    if (types.interproceduralLimited)
+        note(DecompileStatus::kBudgetExhausted, "Interprocedural type evidence did not finish within its bounds", function.entry);
     auto kindOf = [&](SsaId id) {
         return id < types.values.size() ? types.values[id].kind : RecoveredTypeKind::kUnknown;
     };
@@ -219,6 +235,8 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
     userPrototype.byteOrder=function.byteOrder;
     AbiModel functionAbi;
     const Status abiStatus=userPrototype.valid() ? buildAbiModel(function.arch,userPrototype,&functionAbi,options.typeLayouts) : Status::error(ErrorCode::kNotFound,"no authoritative ABI");
+    if (userPrototype.valid() && !abiStatus.ok())
+        note(DecompileStatus::kPartial, "Declared calling convention could not be mapped", function.entry);
     DataTypeManager builtinLayouts(function.arch==Arch::kArm32||function.arch==Arch::kThumb||function.arch==Arch::kX86_32||function.arch==Arch::kRiscV32?4:8);
     const auto declaredLayout=[&](const std::string& type,DataTypeLayout* layout){return options.typeLayouts?options.typeLayouts(localTypeExpression(type),layout):builtinLayouts.resolve(localTypeExpression(type),layout);};
     const auto compositeLayout=[](const DataTypeLayout& layout){return layout.kind==DataTypeKind::kStruct||layout.kind==DataTypeKind::kUnion||layout.kind==DataTypeKind::kArray;};
@@ -707,7 +725,32 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
         }
     };
 
+    const auto emitUnresolved = [&](u32 id, const std::string& indent, bool switchDefault) {
+        const auto& block = function.blocks[id];
+        const auto* term = block.insnCount ? &function.insns[block.firstInsn + block.insnCount - 1] : nullptr;
+        // An indexed table has a proved domain. Its defensive default is not
+        // a real path of the original program.
+        if (switchDefault && term && !term->switchCases.empty()) {
+            out << indent << "__builtin_unreachable(); /* outside proven switch domain */\n";
+            return;
+        }
+        const char* reason = term && term->op == MintOp::kBranchInd ? "Unresolved indirect transfer"
+            : term && term->op == MintOp::kBranch ? "Branch leaves the recovered function"
+            : term && term->op == MintOp::kCondBranch ? "Missing conditional successor"
+            : "Missing continuation after recovered block";
+        note(DecompileStatus::kPartial, reason, term ? term->address : block.start);
+        out << indent << "/* " << reason << " */\n";
+        if (term && !switchDefault && (term->op == MintOp::kBranchInd || term->op == MintOp::kBranch))
+            out << indent << "(void)(" << expr.value(term->use[0]) << "); /* transfer target */\n";
+        out << indent << "__builtin_trap(); /* stop at the edge of the recovered code */\n";
+    };
+
+    const auto addSourceRange = [&](size_t first, size_t end, const SsaBlock& block) {
+        if (report && report->sourceRanges.size() < 8192 && block.start < block.end)
+            report->sourceRanges.push_back({first, end, block.start, block.end});
+    };
     auto emitBlockStatements = [&](const SsaBlock& block, bool controlFlow) {
+        const auto first = static_cast<size_t>(out.tellp());
         if (controlFlow) out << "\n" << blockLabel(block.id) << ":;\n";
         for (u32 i = 0; i < block.insnCount; ++i) {
             const u32 index = block.firstInsn + i;
@@ -731,6 +774,7 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
                     TailCallContract contract;
                     const bool typed=direct&&buildTailCallContract(function.arch,function.byteOrder,userPrototype,calleePrototype,options.typeLayouts,&contract).ok()&&validateTailCallInputs(function,insn,contract,memoryStatus.ok()?&memory:nullptr);
                     if(!typed){
+                        note(DecompileStatus::kPartial, "Tail transfer ABI or argument values could not be proven", insn.address);
                         out<<"    op_tail_transfer("<<expr.value(insn.use[0])<<");\n    __builtin_unreachable();\n";
                         continue;
                     }
@@ -767,6 +811,8 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
                         const bool floating=userPrototype.valid() && abiStatus.ok() && functionAbi.result.pieces.size()==1 && functionFloatingResult;
                         out << "    return " << (floating ? "op_abi_float_result("+expr.value(value)+", "+std::to_string(functionAbi.result.pieces[0].width)+")" : userPrototype.valid() ? "("+returnType+")("+expr.value(value)+")" : expr.value(value)) << ";\n";
                     } else {
+                        if (returnsValue)
+                            note(DecompileStatus::kPartial, "Return value could not be proven for the ABI", insn.address);
                         out << (returnsValue ? "    return op_undefined(); /* no proven ABI return value */\n" : "    return;\n");
                     }
                     continue;
@@ -774,33 +820,40 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
                 case MintOp::kBranch: {
                     const u32 target =
                         block.successors.empty() ? kNoBlock : block.successors.front();
-                    if (target != kNoBlock) emitEdgeCopies(block, target);
-                    out << "    goto "
-                        << (target == kNoBlock ? "unresolved_indirect" : blockLabel(target))
-                        << ";\n";
+                    if (target == kNoBlock) emitUnresolved(block.id, "    ", false);
+                    else {
+                        emitEdgeCopies(block, target);
+                        out << "    goto " << blockLabel(target) << ";\n";
+                    }
                     continue;
                 }
                 case MintOp::kCondBranch: {
-                    const u32 taken =
-                        block.successors.empty() ? kNoBlock : block.successors.front();
-                    const u32 fall =
-                        block.successors.size() > 1 ? block.successors.back() : kNoBlock;
+                    const u32 taken = conditionalSuccessor(function, block, insn, true);
+                    const u32 fall = conditionalSuccessor(function, block, insn, false);
+                    if (block.successors.size() == 1 && taken != kNoBlock && function.blocks[taken].start == block.end) {
+                        emitEdgeCopies(block, taken);
+                        out << "    goto " << blockLabel(taken) << ";\n";
+                        continue;
+                    }
                     // Edge copies have to sit inside each arm: a copy emitted before
                     // the test would run on both paths.
                     out << "    if (" << expr.value(insn.use[0]) << ") {\n";
-                    if (taken != kNoBlock) emitEdgeCopies(block, taken);
-                    out << "        goto "
-                        << (taken == kNoBlock ? "unresolved_indirect" : blockLabel(taken))
-                        << ";\n    } else {\n";
-                    if (fall != kNoBlock) emitEdgeCopies(block, fall);
-                    out << "        goto "
-                        << (fall == kNoBlock ? "unresolved_indirect" : blockLabel(fall))
-                        << ";\n    }\n";
+                    if (taken == kNoBlock) emitUnresolved(block.id, "        ", false);
+                    else {
+                        emitEdgeCopies(block, taken);
+                        out << "        goto " << blockLabel(taken) << ";\n";
+                    }
+                    out << "    } else {\n";
+                    if (fall == kNoBlock) emitUnresolved(block.id, "        ", false);
+                    else {
+                        emitEdgeCopies(block, fall);
+                        out << "        goto " << blockLabel(fall) << ";\n";
+                    }
+                    out << "    }\n";
                     continue;
                 }
                 case MintOp::kBranchInd:
-                    out << "    goto unresolved_indirect;  /* " << expr.value(insn.use[0])
-                        << " */\n";
+                    emitUnresolved(block.id, "    ", false);
                     continue;
                 case MintOp::kAtomicStore:
                     out << "    __atomic_store_n((uint" << unsigned(widthOf(insn.use[1]))*8 << "_t*)(uintptr_t)(" << expr.value(insn.use[0]) << "), " << expr.value(insn.use[1]) << ", __ATOMIC_RELEASE);\n";
@@ -869,6 +922,8 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
                     AbiModel calleeAbi;
                     calleePrototype.byteOrder=function.byteOrder;
                     const auto calleeStatus=calleePrototype.valid() ? buildAbiModel(function.arch,calleePrototype,&calleeAbi,options.typeLayouts) : Status::error(ErrorCode::kNotFound,"unknown callee ABI");
+                    if (!calleeStatus.ok()) note(DecompileStatus::kPartial,
+                        insn.op == MintOp::kCallInd ? "Indirect call signature is unknown" : "Call signature is unverified", insn.address);
                     size_t argumentIndex=0;
                     if(calleeStatus.ok()) {
                         for(size_t i=0;i<calleeAbi.parameters.size();++i) {
@@ -1011,9 +1066,11 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
                     // Reaching here ends the program, so nothing after it in this
                     // block can run — but the label stays, because another edge may
                     // still target the block.
-                    out << "    op_trap();\n";
+                    out << "    op_trap();\n    __builtin_unreachable();\n";
                     continue;
                 case MintOp::kIntrinsic:
+                    note(DecompileStatus::kPartial, insn.intrinsicId
+                        ? "Instruction semantics are unmodeled" : "Instruction could not be lifted", insn.address);
                     out << "    /* unmodelled instruction #" << insn.intrinsicId << " */\n";
                     continue;
                 default:
@@ -1038,6 +1095,9 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
             emitEdgeCopies(block, block.successors.front());
             out << "    goto " << blockLabel(block.successors.front()) << ";\n";
         }
+        if (controlFlow && !ends && block.successors.empty()) emitUnresolved(block.id, "    ", false);
+        const auto end = static_cast<size_t>(out.tellp());
+        if (end > first) addSourceRange(first, end, block);
     };
 
     bool emittedAst = false;
@@ -1045,10 +1105,16 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
         ControlFlowAstCallbacks callbacks;
         callbacks.block = [&](u32 id) { emitBlockStatements(function.blocks[id], false); };
         callbacks.edge = [&](u32 from, u32 target) { emitEdgeCopies(function.blocks[from], target); };
-        callbacks.condition = [&](u32 id) { const auto& block = function.blocks[id]; return expr.value(function.insns[block.firstInsn + block.insnCount - 1].use[0]); };
+        callbacks.condition = [&](u32 id) {
+            const auto& block = function.blocks[id];
+            const auto position = static_cast<size_t>(out.tellp());
+            addSourceRange(position, position, block);
+            return expr.value(function.insns[block.firstInsn + block.insnCount - 1].use[0]);
+        };
         callbacks.indirectTarget = callbacks.condition;
         callbacks.value = [&](SsaId value) { return expr.value(value); };
         callbacks.label = blockLabel;
+        callbacks.unresolved = emitUnresolved;
         if (options.includeComments) for (const auto& diagnostic : ast.diagnostics) out << "    /* " << diagnostic << " */\n";
         emittedAst = emitControlFlowAst(ast, out, callbacks).ok();
     }
@@ -1057,8 +1123,7 @@ std::string emitC(const SsaFunction& function, const ControlFlowStructure& struc
         for (const auto& block : function.blocks) emitBlockStatements(block, true);
     }
 
-    out << "\nunresolved_indirect:;\n";
-    out << (returnsValue ? "    return 0;\n}\n" : "    return;\n}\n");
+    out << "}\n";
     return out.str();
 }
 

@@ -1,9 +1,6 @@
-Mint 0.5 Preview
+Mint 0.6 Preview
 
-• Improved memory analysis through supported recursive function groups.
-• Added pointer and field-layout evidence across supported AArch64 calls.
-• Recovered more x86-64 PIC switches, including verified tail-call cases.
-• Displayed return handler(...) when calling conventions and arguments are proven.
-• Added regression coverage for patches, undo/redo and project reopening.
-
-Support remains bounded; unknown cases retain conservative fallbacks.
+• Recover more x86-64 switch cases in optimized ELF64 binaries.
+• See when decompilation is partial and why.
+• Tap a mapped Pseudo-C line to open its instructions. Back restores your scroll position.
+• Get clearer project save errors, with added checks for interrupted saves and damaged analysis caches.

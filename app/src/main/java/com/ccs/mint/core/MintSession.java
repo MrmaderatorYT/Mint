@@ -189,6 +189,13 @@ public final class MintSession implements Closeable {
         return nativeDecompiledC(handle, address);
     }
 
+    /** Pseudo-C with its status, and listing ranges keyed by output line. */
+    @NonNull
+    public String[] decompileView(long address) {
+        checkOpen();
+        return nativeDecompileView(handle, address);
+    }
+
     /** Compact CFG rows: {@code blockId start end successorId...}. */
     @NonNull
     public String cfg(long address) {
@@ -408,6 +415,7 @@ public final class MintSession implements Closeable {
     private static native String nativeFunctionIr(long handle, long address);
 
     private static native String nativeDecompiledC(long handle, long address);
+    private static native String[] nativeDecompileView(long handle, long address);
 
     private static native String nativeFunctionCfg(long handle, long address);
 

@@ -1,7 +1,9 @@
 #include "mint/session.h"
+#include "program_fresh_oracle.h"
 
 #include <cstdlib>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <unistd.h>
 #include <vector>
@@ -9,14 +11,20 @@
 using namespace mint;
 namespace {
 unsigned checks=0;
-void require(bool value,const char* label){++checks;if(!value){std::cerr<<"interprocedural type Session: "<<label<<'\n';std::exit(1);}}
-std::string temporary(){std::string path="/private/tmp/mint-type-session-XXXXXX";const int fd=mkstemp(path.data());require(fd>=0,"owned temporary file");close(fd);return path;}
+void require(bool value,const std::string& label){++checks;if(!value){std::cerr<<"interprocedural type Session: "<<label<<'\n';std::exit(1);}}
+std::string temporary(){auto path=(std::filesystem::temp_directory_path()/"mint-type-session-XXXXXX").string();const int fd=mkstemp(path.data());require(fd>=0,"owned temporary file");close(fd);return path;}
 struct Files {
     std::string binary=temporary(),project=temporary();
     Files(){unlink(project.c_str());}
     ~Files(){unlink(binary.c_str());unlink(project.c_str());unlink((project+".analysis").c_str());}
 };
 void open(Session& session,const Files& files){require(session.openRawPath(files.binary,Arch::kAArch64,0x1000,0x1000).ok()&&session.attachProject(files.project).ok()&&session.analyze().ok(),"open persistent type fixture");}
+void compareFresh(Session& session, const Files& files, const char* step) {
+    const auto status = testing::matchesFreshAnalysis(session, files.project, [&](Session& oracle) {
+        return oracle.openRawPath(files.binary, Arch::kAArch64, 0x1000, 0x1000);
+    });
+    require(status.ok(), std::string(step) + " matches full analysis: " + status.toString());
+}
 void shape(const std::string& text,bool shifted){
     require(text.find("Interprocedural type evidence:")!=std::string::npos,"ordinary pseudo-C reports interprocedural type evidence");
     require(text.find("layout via")!=std::string::npos&&text.find("field_0")!=std::string::npos&&text.find("field_10")!=std::string::npos,"callee observations join the caller's single local field");
@@ -56,15 +64,23 @@ void propagatedLayouts(bool transitive){
     auto text=session.decompiledCFor(0x1000);shape(text,false);memoryContract(text,transitive);
     require(session.editAnnotation(leafEntry,"patch","02 0c 40 f9").ok(),"move callee field access from +8 to +24");
     text=session.decompiledCFor(0x1000);shape(text,true);memoryContract(text,transitive);
+    compareFresh(session, files, "callee field patch");
     require(session.undoEdit(false).ok(),"undo callee field patch");shape(session.decompiledCFor(0x1000),false);
+    compareFresh(session, files, "field patch undo");
     require(session.undoEdit(true).ok(),"redo callee field patch");shape(session.decompiledCFor(0x1000),true);
+    compareFresh(session, files, "field patch redo");
     Session reopened;open(reopened,files);shape(reopened.decompiledCFor(0x1000),true);
+    compareFresh(reopened, files, "reopened patched type evidence");
 
     require(reopened.editAnnotation(leafEntry,"prototype","uint64_t(uint64_t scalar)").ok(),"declare authoritative scalar callee input");
     text=reopened.decompiledCFor(0x1000);noImportedShape(text,"authoritative scalar callee declaration blocks inferred pointer fields");memoryContract(text,transitive);
+    compareFresh(reopened, files, "callee prototype edit");
     require(reopened.undoEdit(false).ok(),"undo callee scalar declaration");shape(reopened.decompiledCFor(0x1000),true);
+    compareFresh(reopened, files, "callee prototype undo");
     require(reopened.undoEdit(true).ok(),"redo callee scalar declaration");noImportedShape(reopened.decompiledCFor(0x1000),"redo reinstates authoritative callee suppression");
+    compareFresh(reopened, files, "callee prototype redo");
     Session declared;open(declared,files);noImportedShape(declared.decompiledCFor(0x1000),"callee declaration and inference suppression survive reopen");
+    compareFresh(declared, files, "reopened callee prototype");
 
     require(reopened.undoEdit(false).ok(),"restore inferred callee input before caller override");
     require(reopened.editAnnotation(0x1000,"prototype","uint64_t(uint64_t scalar, uint64_t value)").ok(),"declare authoritative scalar caller inputs");
@@ -83,6 +99,7 @@ void propagatedLayouts(bool transitive){
     text=callerDeclared.decompiledCFor(0x1000);
     require(text.find("Packet* packet")!=std::string::npos&&text.find("->head")!=std::string::npos,"named authoritative fields retain their existing decompiler rendering");
     noImportedShape(text,"inferred field names do not replace authoritative named layout");
+    compareFresh(callerDeclared, files, "user type and caller prototype edit");
 }
 }
 int main(){propagatedLayouts(false);propagatedLayouts(true);std::cout<<checks<<" interprocedural type Session checks passed\n";}

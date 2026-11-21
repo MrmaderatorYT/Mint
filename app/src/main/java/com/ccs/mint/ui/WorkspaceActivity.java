@@ -134,6 +134,22 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private long listingAddress;
     private long pendingAddress = -1;
     private NavigationHistory history;
+    private SourceListing sourceListing;
+    private SourceListing restoreSourceScroll;
+
+    private static final class SourceListing {
+        final long entry, previousAddress, start, end;
+        final int scrollX, scrollY;
+
+        SourceListing(long entry, long previousAddress, long start, long end, int scrollX, int scrollY) {
+            this.entry = entry;
+            this.previousAddress = previousAddress;
+            this.start = start;
+            this.end = end;
+            this.scrollX = scrollX;
+            this.scrollY = scrollY;
+        }
+    }
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable progressPoll = new Runnable() {
         @Override public void run() {
@@ -159,6 +175,17 @@ public final class WorkspaceActivity extends AppCompatActivity {
     @Override
     protected void onCreate(@Nullable Bundle state) {
         super.onCreate(state);
+        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() {
+                if (navigateBack()) return;
+                setEnabled(false);
+                try {
+                    getOnBackPressedDispatcher().onBackPressed();
+                } finally {
+                    setEnabled(true);
+                }
+            }
+        });
         model = new ViewModelProvider(this).get(WorkspaceViewModel.class);
         worker = model.worker();
         history = model.navigationHistory();
@@ -517,6 +544,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
 
     private void resetOpeningView(@NonNull Uri uri) {
         ++viewGeneration;
+        sourceListing = null;
+        restoreSourceScroll = null;
         session = null;
         empty.setVisibility(View.GONE);
         content.setVisibility(View.VISIBLE);
@@ -709,6 +738,9 @@ public final class WorkspaceActivity extends AppCompatActivity {
      */
     private void showPane() {
         ++viewGeneration;
+        if (pane != Pane.DISASM || selected == null ||
+                (sourceListing != null && selected.entry != sourceListing.entry)) sourceListing = null;
+        if (pane != Pane.C) restoreSourceScroll = null;
         if(session!=null)busy(false);
         final boolean isList = pane == Pane.FUNCTIONS || pane == Pane.DISASM;
         list.setVisibility(isList ? View.VISIBLE : View.GONE);
@@ -808,7 +840,12 @@ public final class WorkspaceActivity extends AppCompatActivity {
         final long start;
         final long stop;
         final int cap;
-        if (function == null) {
+        final SourceListing range = sourceListing;
+        if (range != null) {
+            start = range.start;
+            stop = range.end;
+            cap = PROGRAM_LISTING_LIMIT;
+        } else if (function == null) {
             // listingAddress survives a jump out of a function, so a program listing
             // resumes where the user was rather than at the top of the image.
             start = listingAddress;
@@ -826,6 +863,10 @@ public final class WorkspaceActivity extends AppCompatActivity {
             final List<Line> lines = new ArrayList<>();
             try {
                 if (active == null) return;
+                if (range != null) {
+                    lines.add(new Line(String.format(Locale.US, "Pseudo-C source range [0x%x, 0x%x)",
+                            range.start, range.end), null, -1, null));
+                }
                 long[] address = new long[LISTING_LIMIT];
                 int[] size = new int[LISTING_LIMIT];
                 int[] flow = new int[LISTING_LIMIT];
@@ -1111,19 +1152,40 @@ public final class WorkspaceActivity extends AppCompatActivity {
         final long requestGeneration = viewGeneration;
         worker.execute(() -> {
             String body;
+            String anchors = "";
             try {
                 if (active == null) throw new IllegalStateException("session is closed");
-                body = ir ? active.functionIr(function.entry)
-                        : active.decompiledC(function.entry);
+                if (ir) body = active.functionIr(function.entry);
+                else {
+                    final String[] view = active.decompileView(function.entry);
+                    body = view[0];
+                    anchors = view[1];
+                }
             } catch (RuntimeException e) {
                 body = (ir ? "IR" : "decompilation") + " failed: " + e.getMessage();
             }
             final CharSequence result = highlighter.code(
                     body == null || body.isEmpty() ? "(empty)" : body);
+            final String sourceAnchors = anchors;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed() || active != session || requestGeneration != viewGeneration) return;
                 busy(false);
-                text.setText(linkedCode(result));
+                final CharSequence linked = linkedCode(result);
+                text.setText(ir ? linked : linkedSourceRanges(linked, sourceAnchors, function.entry));
+                final SourceListing restore = restoreSourceScroll;
+                restoreSourceScroll = null;
+                if (!ir && restore != null && restore.entry == function.entry) {
+                    text.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener() {
+                        @Override public boolean onPreDraw() {
+                            text.getViewTreeObserver().removeOnPreDrawListener(this);
+                            if (requestGeneration == viewGeneration && active == session) {
+                                ((View) text.getParent()).scrollTo(restore.scrollX, 0);
+                                textScroll.scrollTo(0, restore.scrollY);
+                            }
+                            return true;
+                        }
+                    });
+                }
             });
         });
     }
@@ -1159,6 +1221,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
     }
 
     private void select(@NonNull FunctionRow row) {
+        sourceListing = null;
         selected = row;
         listingAddress = row.entry;
         pendingAddress = row.entry;
@@ -1181,6 +1244,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         jumpTo(address,Pane.DISASM);
     }
     private void jumpTo(long address,int destinationPane) {
+        sourceListing = null;
         FunctionRow row = findFunction(address);
         if (row == null) {
             selected = null;
@@ -1202,20 +1266,28 @@ public final class WorkspaceActivity extends AppCompatActivity {
         selectPane(destinationPane);
     }
 
-    @Override
-    public void onBackPressed() {
+    private boolean navigateBack() {
+        if (pane == Pane.DISASM && sourceListing != null && selected != null
+                && selected.entry == sourceListing.entry) {
+            restoreSourceScroll = sourceListing;
+            listingAddress = sourceListing.previousAddress;
+            sourceListing = null;
+            model.rememberSelection(selected.entry, listingAddress);
+            selectPane(Pane.C);
+            return true;
+        }
         if (history.canGoBack()) {
             jumpTo(history.back());
-            return;
+            return true;
         }
         // Out of history but still inside a function: back should surface the whole
         // program before it leaves the app. Otherwise following a call chain to its
         // end and pressing back closes Mint, which is never what was meant.
         if (selected != null) {
             clearSelection();
-            return;
+            return true;
         }
-        super.onBackPressed();
+        return false;
     }
 
     private void busy(boolean value) {
@@ -1751,6 +1823,53 @@ public final class WorkspaceActivity extends AppCompatActivity {
             }catch(NumberFormatException ignored){}
         }
         return result;
+    }
+
+    private CharSequence linkedSourceRanges(CharSequence code, String anchors, long entry) {
+        if (anchors.isEmpty()) return code;
+        final android.text.SpannableStringBuilder linked = new android.text.SpannableStringBuilder(code);
+        final String plain = code.toString();
+        int line = 0;
+        int offset = 0;
+        for (String row : anchors.split("\n")) {
+            final String[] fields = row.split(" ");
+            if (fields.length != 4) continue;
+            final int first = Integer.parseInt(fields[0]);
+            final int last = Integer.parseInt(fields[1]);
+            final long start = Long.parseUnsignedLong(fields[2], 16);
+            final long end = Long.parseUnsignedLong(fields[3], 16);
+            if (first < line) continue;
+            while (line <= last && offset < plain.length()) {
+                final int newline = plain.indexOf('\n', offset);
+                final int lineEnd = newline == -1 ? plain.length() : newline;
+                if (line >= first && offset < lineEnd && !plain.substring(offset, lineEnd).trim().isEmpty()) {
+                    // Preserve existing call/constant links. The rest of the
+                    // statement opens the machine range that contributed to it.
+                    int cursor = offset;
+                    while (cursor < lineEnd) {
+                        final int next = linked.nextSpanTransition(cursor, lineEnd, ClickableSpan.class);
+                        if (linked.getSpans(cursor, next, ClickableSpan.class).length == 0) {
+                            linked.setSpan(new ClickableSpan() {
+                                @Override public void onClick(@NonNull View widget) {
+                                    if (pane != Pane.C || selected == null || selected.entry != entry) return;
+                                    sourceListing = new SourceListing(entry, listingAddress, start, end,
+                                            ((View) text.getParent()).getScrollX(), textScroll.getScrollY());
+                                    selectPane(Pane.DISASM);
+                                }
+
+                                @Override public void updateDrawState(@NonNull android.text.TextPaint paint) {
+                                    // Keep syntax colours and existing symbol-link emphasis.
+                                }
+                            }, cursor, next, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                        }
+                        cursor = next;
+                    }
+                }
+                offset = lineEnd + 1;
+                ++line;
+            }
+        }
+        return linked;
     }
 
     private void showTypeManager() {

@@ -26,7 +26,7 @@ void command(Session& session,const std::string& line,bool allowEdits=false) {
     if(op=="summary")std::cout<<session.memoryBlocksText();
     else if(op=="functions")for(const auto& fn:session.analyzer().functions())std::cout<<"0x"<<std::hex<<fn.entry<<std::dec<<"\t"<<session.displayNameAt(fn.entry)<<"\t"<<functionOriginName(fn.origin)<<"\n";
     else if(op=="listing")for(const auto& row:session.programListing(address(arg),256))std::cout<<"0x"<<std::hex<<row.address<<std::dec<<"\t"<<row.text<<"\t"<<row.comment<<"\n";
-    else if(op=="decompile")std::cout<<session.decompiledCFor(address(arg));
+    else if(op=="decompile")std::cout<<session.decompileReportFor(address(arg)).text();
     else if(op=="ir")std::cout<<session.irTextFor(address(arg));
     else if(op=="cfg")std::cout<<session.cfgTextFor(address(arg));
     else if(op=="refs")std::cout<<session.referencesText(address(arg));

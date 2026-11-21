@@ -12,6 +12,8 @@
 
 namespace mint {
 
+struct DecompileReport;
+
 struct CEmitterOptions {
     bool includeComments = true;
     bool foldExpressions = true;
@@ -45,6 +47,6 @@ struct CEmitterOptions {
 };
 
 std::string emitC(const SsaFunction& function, const ControlFlowStructure& structure,
-                  const CEmitterOptions& options = {});
+                  const CEmitterOptions& options = {}, DecompileReport* report = nullptr);
 
 }  // namespace mint

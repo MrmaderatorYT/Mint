@@ -1,0 +1,42 @@
+{
+  "schema": 1,
+  "targets": {
+    "aarch64": {"triple": "aarch64-linux-android28", "abi": "AAPCS64", "elf_machine": 183, "mint_arch": "arm64"},
+    "x86_64": {"triple": "x86_64-linux-android28", "abi": "SysV AMD64", "elf_machine": 62, "mint_arch": "x86-64"}
+  },
+  "limits": {"max_file_bytes": 262144, "analysis_command_seconds": 30},
+  "compiler_flags": ["-std=c11", "-O2", "-g", "-gdwarf-4", "-fdebug-compilation-dir=.", "-fdebug-prefix-map=${NDK_TOOLCHAIN}=ndk", "-fno-stack-protector", "-fuse-ld=lld", "-Wl,--build-id=none"],
+  "strip_flags": ["--strip-all"],
+  "programs": [
+    {
+      "id": "workspace-demo",
+      "source": "examples/demo.c",
+      "origin": "Mint's bundled Android workspace demo library, rebuilt from its original source",
+      "license": "GPL-3.0-only",
+      "elf_type": 3,
+      "flags": ["-fPIC", "-shared", "-fvisibility=default", "-Wl,-z,max-page-size=16384"],
+      "expect": {
+        "functions": ["checksum", "header_is_valid", "kind_name", "add_wide", "closer_to_zero", "names_match"],
+        "multi_block": ["checksum", "header_is_valid"],
+        "calls": [["names_match", "memcmp"]],
+        "debug_type": {"name": "Header", "size": 24}
+      }
+    },
+    {
+      "id": "record-reader",
+      "source": "quality/corpus/record_reader.c",
+      "origin": "Original Mint corpus sample for counting records of a selected category",
+      "license": "GPL-3.0-only",
+      "elf_type": 2,
+      "flags": ["-ffreestanding", "-fno-builtin", "-fno-vectorize", "-fno-slp-vectorize", "-fno-unroll-loops", "-fno-pic", "-fno-pie", "-nostdlib", "-static", "-Wl,-e,record_entry", "-Wl,--image-base=0x10000"],
+      "expect": {
+        "functions": ["record_entry", "count_category"],
+        "multi_block": ["count_category"],
+        "loops": ["count_category"],
+        "calls": [["record_entry", "count_category"]],
+        "entry": "record_entry",
+        "debug_type": {"name": "Record", "size": 8}
+      }
+    }
+  ]
+}

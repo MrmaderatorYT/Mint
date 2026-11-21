@@ -14,12 +14,40 @@
 
 namespace mint {
 
+enum class DecompileStatus { kComplete, kPartial, kUnsupported, kBudgetExhausted, kError };
+
+struct DecompileDiagnostic {
+    DecompileStatus status;
+    std::string reason;
+    Address address;
+};
+
+struct DecompileSourceRange {
+    size_t firstByte, endByte;
+    Address start, end; // Half-open machine-code range for the emitted text.
+};
+
+struct DecompileReport {
+    DecompileStatus status = DecompileStatus::kComplete;
+    std::vector<DecompileDiagnostic> diagnostics;
+    std::string cSource;
+    std::vector<DecompileSourceRange> sourceRanges;
+    size_t sourcePrefixBytes = 0;
+
+    void note(DecompileStatus status, std::string reason, Address address = kNoAddress);
+    void noteFailure(const Status& failure, const char* stage);
+    // Optional tabular listing anchors for the UI. Line numbers are zero-based
+    // in the formatted text, including the diagnostic and declaration headers.
+    std::string text(std::string* listingAnchors = nullptr) const;
+};
+
 struct DecompileResult {
     SsaFunction ssa;
     ControlFlowStructure structure;
     std::string cSource;
     NormalizeStats normalize;
     SsaBuildStats ssaStats;
+    DecompileReport report;
 };
 
 /// Resolves a code address to a symbol name, or returns empty when there is none.

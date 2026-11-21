@@ -10,8 +10,18 @@
 #include <cstring>
 #include <algorithm>
 #include <tuple>
+#ifdef MINT_HOST_TEST_PROGRAM_SAVE
+#include "program_save_test_hook.h"
+#endif
 
 namespace mint {
+#ifdef MINT_HOST_TEST_PROGRAM_SAVE
+namespace {
+thread_local testing::ProgramSaveHooks programSaveHooks;
+}
+void testing::setProgramSaveHooks(ProgramSaveHooks hooks) { programSaveHooks = hooks; }
+#endif
+
 Status Program::open(const std::string& path, const std::string& source) {
     State loaded;
     std::ifstream input(path,std::ios::binary);
@@ -68,18 +78,52 @@ Status Program::save(const State& state) {
         if (data.size()>16*1024*1024) return Status::error(ErrorCode::kTooLarge,"project exceeds 16 MiB");
     }
     std::string temporary = path_+".tmp.XXXXXX";
-    int fd = mkstemp(temporary.data());
-    if (fd<0) return Status::error(ErrorCode::kIoError,"cannot create project transaction");
-    size_t written=0; bool ok=true;
-    while (written<data.size()) {
-        const auto n=write(fd,data.data()+written,data.size()-written);
-        if (n<0 && errno==EINTR) continue;
-        if (n<=0) {ok=false;break;} written+=static_cast<size_t>(n);
+    const int fd = mkstemp(temporary.data());
+    auto ioError = [](const char* stage, int error) {
+        return Status::error(ErrorCode::kIoError,
+            std::string("project transaction: ") + stage + ": " + std::strerror(error));
+    };
+    if (fd < 0) return ioError("create temporary file", errno);
+
+    fcntl(fd, F_SETFD, FD_CLOEXEC);
+    Status status;
+    size_t written = 0;
+#ifdef MINT_HOST_TEST_PROGRAM_SAVE
+    const auto writeBytes = programSaveHooks.write ? programSaveHooks.write : ::write;
+#else
+    const auto writeBytes = ::write;
+#endif
+    while (written < data.size()) {
+        const auto n = writeBytes(fd, data.data() + written, data.size() - written);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) {
+            status = ioError("write temporary file", n == 0 ? EIO : errno);
+            break;
+        }
+        written += static_cast<size_t>(n);
     }
-    if (ok) ok=fsync(fd)==0;
-    if (close(fd)!=0) ok=false;
-    if (ok) ok=std::rename(temporary.c_str(),path_.c_str())==0;
-    if (!ok) {std::remove(temporary.c_str());return Status::error(ErrorCode::kIoError,"cannot commit project transaction");}
+    if (status.ok() && fsync(fd) != 0) status = ioError("sync temporary file", errno);
+    if (close(fd) != 0 && status.ok()) status = ioError("close temporary file", errno);
+#ifdef MINT_HOST_TEST_PROGRAM_SAVE
+    if (status.ok() && programSaveHooks.beforeRename) programSaveHooks.beforeRename();
+#endif
+    if (status.ok() && std::rename(temporary.c_str(), path_.c_str()) != 0)
+        status = ioError("publish project", errno);
+    if (!status.ok()) {
+        std::remove(temporary.c_str());
+        return status;
+    }
+
+    // Rename is the commit point. Persist the directory entry when the
+    // filesystem allows it. A sync failure after publication cannot roll back
+    // the edit, so the live state must still advance to the committed file.
+    const auto slash = path_.find_last_of('/');
+    const auto parent = slash == std::string::npos ? "." : slash == 0 ? "/" : path_.substr(0, slash);
+    const int directory = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory >= 0) {
+        fsync(directory);
+        close(directory);
+    }
     return Status::success();
 }
 Status Program::edit(Address address, const std::string& kind, const std::string& value) {

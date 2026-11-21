@@ -17,8 +17,9 @@ struct X86SwitchRecoveryOptions {
 };
 // Narrow ELF64/x86-64 PIC signed-rel32 switch recognizer. A native unsigned
 // CMP/JA or CMP/JBE guard must directly enter the sole-predecessor dispatcher.
-// Only an explicit 32-bit copy after a 32-bit guard, or an unchanged 64-bit
-// guarded index, establishes the indexed address. Every table byte is uniquely
+// A 32-bit guard needs an explicit 32-bit copy after CMP or inherently
+// zero-extended index defined in the guard block by a supported instruction.
+// A 64-bit guard needs the unchanged index. Every table byte is uniquely
 // mapped, immutable and file backed; targets are independently decoded.
 // A result with fullyDiscovered=false is an INTERNAL DISCOVERY PROPOSAL only:
 // it must not complete a CFG or authorize exported metadata. Re-run after all

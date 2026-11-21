@@ -19,7 +19,8 @@ void require(bool condition,const std::string& label){++checks;if(!condition){st
 void okay(const Status& status,const std::string& label){require(status.ok(),label+": "+status.toString());}
 template<class T>void put(std::vector<u8>& bytes,size_t offset,T value){require(offset+sizeof(value)<=bytes.size(),"fixture write is bounded");std::memcpy(bytes.data()+offset,&value,sizeof(value));}
 ByteView view(const std::vector<u8>& bytes){return ByteView(bytes.data(),bytes.size());}
-enum class Variant {kNormal,kNoGuard,kBypass,kChangedIndex,kShortTable,kWritable,kBadTarget,kMiddleTarget,kTooMany,kWideJbe,kLeaFirst,kReenter};
+enum class Variant {kNormal,kNoGuard,kBypass,kChangedIndex,kShortTable,kWritable,kBadTarget,kMiddleTarget,kTooMany,kWideJbe,kLeaFirst,kReenter,
+    kCopyElided,kCopyElidedChangedIndex,kCopyElidedUnknownHigh,kCopyElidedClobberedHigh,kCopyElidedBypassedDefinition};
 struct Fixture {std::vector<u8> bytes;Address branch=0,guard=0x1000;};
 Fixture fixture(Variant variant=Variant::kNormal){
     Fixture result;result.bytes.resize(0x50c);auto& bytes=result.bytes;
@@ -30,6 +31,14 @@ Fixture fixture(Variant variant=Variant::kNormal){
     size_t at=0x200;auto emit=[&](std::initializer_list<u8> sequence){for(auto byte:sequence)bytes[at++]=byte;};
     size_t bypass=0;
     if(variant==Variant::kBypass){emit({0x85,0xf6,0x74,0});bypass=at-1;}
+    const bool copyElided=variant==Variant::kCopyElided||variant==Variant::kCopyElidedChangedIndex||
+        variant==Variant::kCopyElidedUnknownHigh||variant==Variant::kCopyElidedClobberedHigh||variant==Variant::kCopyElidedBypassedDefinition;
+    if(variant==Variant::kCopyElidedBypassedDefinition)emit({0x85,0xd2,0x74,0x05}); // test edx,edx; je CMP
+    if(copyElided&&variant!=Variant::kCopyElidedUnknownHigh) {
+        emit({0x31,0xf7}); // xor edi,esi clears the upper half while computing the index
+        emit({0x48,0x89,0xf0}); // mov rax,rsi is independent of the index
+    }
+    if(variant==Variant::kCopyElidedClobberedHigh)emit({0x48,0x89,0xd7}); // mov rdi,rdx
     result.guard=0x1000+at-0x200;
     size_t guardJump=0;
     if(variant!=Variant::kNoGuard){
@@ -40,12 +49,13 @@ Fixture fixture(Variant variant=Variant::kNormal){
         if(variant==Variant::kWideJbe){emit({0xe9,0,0,0,0});put<u32>(bytes,at-4,static_cast<u32>(0x280-at));} // default fallthrough
     }
     const auto dispatch=at;
-    if(variant!=Variant::kWideJbe&&variant!=Variant::kLeaFirst)emit({0x89,0xf8}); // explicit zero extension after the guard
+    if(!copyElided&&variant!=Variant::kWideJbe&&variant!=Variant::kLeaFirst)emit({0x89,0xf8}); // explicit zero extension after the guard
     if(variant==Variant::kChangedIndex)emit({0xff,0xc0}); // inc eax
+    if(variant==Variant::kCopyElidedChangedIndex)emit({0xff,0xc7}); // inc edi after the guard breaks the range proof
     const auto lea=at;emit({0x48,0x8d,0x0d,0,0,0,0}); // lea rcx,[rip+table]
     put<u32>(bytes,lea+3,static_cast<u32>(0x2000-(0x1000+lea-0x200+7)));
     if(variant==Variant::kLeaFirst)emit({0x89,0xf8});
-    emit({0x48,0x63,0x04,static_cast<u8>(variant==Variant::kWideJbe?0xb9:0x81),0x48,0x01,0xc8}); // signed rel32 load; add table base
+    emit({0x48,0x63,0x04,static_cast<u8>(copyElided||variant==Variant::kWideJbe?0xb9:0x81),0x48,0x01,0xc8}); // signed rel32 load; add table base
     result.branch=0x1000+at-0x200;emit({0xff,0xe0}); // jmp rax
     if(guardJump)bytes[guardJump]=static_cast<u8>((variant==Variant::kWideJbe?dispatch:0x280)-(guardJump+1));
     if(bypass)bytes[bypass]=static_cast<u8>(dispatch-(bypass+1));
@@ -80,7 +90,8 @@ void positiveAndBounds(){
     for(auto variant:{Variant::kWideJbe,Variant::kLeaFirst}){const auto supported=fixture(variant);ElfImage native;okay(native.load(view(supported.bytes)),"load supported guard/dispatcher ordering");CodeAnalyzer analyzed;okay(analyzed.analyze(native,analysisOptions()),"analyze supported guard/dispatcher ordering");const auto& entry=entryFunction(analyzed);const auto* proven=switchAt(entry,supported.branch);require(proven&&!entry.incomplete&&proven->switchCases.size()==3&&proven->targets==std::vector<Address>({0x10a0,0x10b0}),"CMP64/JBE and LEA-before-MOV preserve exact case recovery");require(proven->selectorWidth==(variant==Variant::kWideJbe?8:4),"captured selector width follows the actual native guard");}
 }
 void rejectedInputs(){
-    for(auto variant:{Variant::kNoGuard,Variant::kBypass,Variant::kChangedIndex,Variant::kShortTable,Variant::kWritable,Variant::kBadTarget,Variant::kMiddleTarget,Variant::kTooMany,Variant::kReenter}){
+    for(auto variant:{Variant::kNoGuard,Variant::kBypass,Variant::kChangedIndex,Variant::kShortTable,Variant::kWritable,Variant::kBadTarget,Variant::kMiddleTarget,Variant::kTooMany,Variant::kReenter,
+        Variant::kCopyElidedChangedIndex,Variant::kCopyElidedUnknownHigh,Variant::kCopyElidedClobberedHigh,Variant::kCopyElidedBypassedDefinition}){
         const auto input=fixture(variant);ElfImage image;okay(image.load(view(input.bytes)),"load negative rel32 fixture");CodeAnalyzer analyzer;okay(analyzer.analyze(image,analysisOptions()),"analyze unsupported switch evidence");const auto& function=entryFunction(analyzer);
         require(function.incomplete&&!switchAt(function,input.branch),"absent/bypassed guard, changed index or invalid/bounded table cannot complete the CFG (variant "+std::to_string(static_cast<unsigned>(variant))+")");
     }
@@ -127,7 +138,49 @@ void sessionLifecycle(){
     okay(session.editAnnotation(0x2000,"patch",hex32(static_cast<u32>(Address{0x1001}-0x2000))),"patch table to middle of known instruction");require(entryFunction(session.analyzer()).incomplete&&!switchAt(entryFunction(session.analyzer()),input.branch),"invalid table overlay cannot reuse previously proved switch semantics");fresh("invalid target patch");
     const auto invalid=snapshot(session);okay(session.undoEdit(false),"undo invalid target patch");require(snapshot(session)==patched,"invalid-target undo re-proves original valid cases ("+session.analysisStatusText()+")");okay(session.undoEdit(true),"redo invalid target patch");require(snapshot(session)==invalid,"invalid-target redo preserves conservative incomplete analysis");fresh("invalid target redo");
 }
-void compilerFixture(const std::string& path){
+void copyElidedLifecycle(){
+    TemporaryDirectory temporary;
+    const auto source=temporary.file("copy-elided.elf"),project=temporary.file("program.mint");
+    const auto input=fixture(Variant::kCopyElided);
+    writeFile(source,input.bytes);
+    Session session;
+    open(session,source,project);
+    const auto* jump=switchAt(entryFunction(session.analyzer()),input.branch);
+    require(jump&&jump->switchCases.size()==3&&jump->selectorWidth==4,"32-bit index definition before CMP permits the four-instruction dispatcher");
+    const auto complete=snapshot(session);
+    require(complete.find("proven table indices")!=std::string::npos,"copy-elided switch reaches the normal pseudo-C path");
+    bool dependency=false;
+    for(const auto& item:session.analyzer().indirectFlowReports())
+        for(const auto& site:item.second.sites)
+            if(site.address==input.branch)
+                for(const auto& range:site.dependencies)dependency|=range.start<=0x1000&&range.end>input.guard;
+    require(dependency,"switch proof depends on pre-CMP index definition bytes");
+    okay(session.editAnnotation(0x1001,"patch","fe"),"retarget XOR to esi without changing its length or flow");
+    require(entryFunction(session.analyzer()).incomplete&&!switchAt(entryFunction(session.analyzer()),input.branch),"patching the zero-extension witness invalidates its switch");
+    const auto invalidated=snapshot(session);
+    auto compareToFresh=[&](const std::string& expected,const std::string& label){
+        Session oracle;
+        const auto overlay=temporary.file(label+".mint");
+        writeFile(overlay,readFile(project));
+        okay(oracle.openPath(source),"open independent ELF for "+label);
+        okay(oracle.attachProject(overlay),"attach independent Program for "+label);
+        okay(oracle.reanalyze(),"run fresh full analysis for "+label);
+        require(snapshot(oracle)==expected,label+" agrees with fresh full analysis");
+    };
+    compareToFresh(invalidated,"index definition patch");
+    okay(session.undoEdit(false),"restore the zero-extending XOR");
+    require(snapshot(session)==complete,"undo re-proves the copy-elided switch");
+    {
+        Session reopened;
+        open(reopened,source,project);
+        const auto restored=snapshot(reopened);
+        require(restored==complete,"reopen revalidates the copy-elided switch");
+        compareToFresh(restored,"copy-elided switch reopen");
+    }
+    okay(session.undoEdit(true),"redo patch to index definition");
+    require(snapshot(session)==invalidated,"redo invalidates the copy-elided switch again");
+}
+void compilerFixture(const std::string& path,bool copyElided){
     Session session;okay(session.openPath(path),"open compiler-generated PIC switch");
     okay(session.analyze(),"analyze compiler-generated PIC switch");
     const auto* symbol=session.image().findSymbol("pic_switch");
@@ -135,6 +188,14 @@ void compilerFixture(const std::string& path){
     const auto* function=session.analyzer().functionAt(symbol->value);
     require(function&&!function->incomplete,"real Clang rel32 switch has complete discovered case coverage");
     require(std::any_of(function->resolvedIndirectJumps.begin(),function->resolvedIndirectJumps.end(),[](const auto& jump){return jump.switchCases.size()>=6;}),"real compiler fixture exposes selector case mapping");
+    if(copyElided) {
+        const auto resolved=std::find_if(function->resolvedIndirectJumps.begin(),function->resolvedIndirectJumps.end(),
+            [](const auto& jump){return jump.switchCases.size()>=6&&jump.selectorWidth==4;});
+        require(resolved!=function->resolvedIndirectJumps.end(),"compiler retained the 32-bit guard");
+        const auto block=std::find_if(function->cfg.blocks().begin(),function->cfg.blocks().end(),
+            [&](const auto& item){return item.contains(resolved->branch);});
+        require(block!=function->cfg.blocks().end()&&block->insnCount==4,"compiler dispatch has LEA, MOVSXD, ADD, JMP only");
+    }
     const auto c=session.decompiledCFor(symbol->value);
     require(c.find("proven table indices")!=std::string::npos,"ordinary compiler-fixture decompilation emits an indexed switch");
     for(unsigned n=0;n<6;++n)
@@ -142,4 +203,11 @@ void compilerFixture(const std::string& path){
             "each compiler-produced case label and body survives ordinary pseudo-C emission");
 }
 }
-int main(int argc,char** argv){positiveAndBounds();rejectedInputs();sessionLifecycle();for(int n=1;n<argc;++n)compilerFixture(argv[n]);std::cout<<checks<<" x86 PIC switch checks passed\n";}
+int main(int argc,char** argv){
+    if(argc==3&&std::string(argv[1])=="--copy-elided")compilerFixture(argv[2],true);
+    else {
+        positiveAndBounds();rejectedInputs();sessionLifecycle();copyElidedLifecycle();
+        for(int n=1;n<argc;++n)compilerFixture(argv[n],false);
+    }
+    std::cout<<checks<<" x86 PIC switch checks passed\n";
+}

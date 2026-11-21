@@ -142,13 +142,20 @@ public:
         const Address accepted=branch->id==X86_INS_JA?branch->address+branch->size:static_cast<Address>(branch->operands.operands[0].imm);
         if(accepted!=dispatch.start||guard.successors.size()!=2||!edge(guard.id,dispatch.id,
             branch->id==X86_INS_JA?EdgeKind::kNotTaken:EdgeKind::kTaken)||!guardedEdge(guard.id,dispatch.id))return false;
-        if(compared.size==4) {
-            if(dispatch.insnCount!=5)return false;
+        Address proofStart=compare->address;
+        if(compared.size==4&&dispatch.insnCount==5) {
             const auto* copy=detail(instructions[begin+(leaFirst?1:0)]);
             if(!copy||copy->id!=X86_INS_MOV||!plain(copy->operands)||copy->operands.op_count!=2||
                reg(copy->operands.operands[0],4)!=index||reg(copy->operands.operands[1],4)!=guarded||
                (leaFirst&&base==guarded))return false;
-        } else if(compared.size!=8||dispatch.insnCount!=4||index!=guarded)return false;
+        } else {
+            if(dispatch.insnCount!=4||index!=guarded)return false;
+            if(compared.size==4) {
+                const auto* definition=indexZeroExtension(guard,index);
+                if(!definition)return false;
+                proofStart=definition->address;
+            } else if(compared.size!=8)return false;
+        }
         Address table;
         if(!addSigned(lea->address+lea->size,l.operands[1].mem.disp,&table))return false;
         const u32 count=static_cast<u32>(bound.imm)+1;
@@ -190,7 +197,7 @@ public:
         }
         if(prepared.jump.targets.size()<2)return false;
         prepared.fullyDiscovered=owned&&complete(prepared.jump)&&!function_.undecodableSites;
-        prepared.dependencies.push_back({compare->address,branch->address+branch->size});
+        prepared.dependencies.push_back({proofStart,branch->address+branch->size});
         prepared.dependencies.push_back({dispatch.start,dispatch.end});
         prepared.dependencies.push_back({table,table+length});
         *result=std::move(prepared);return true;
@@ -215,6 +222,26 @@ private:
         if(!cs_disasm_iter(handle_,&pointer,&length,&address,scratch_)||!scratch_->detail||scratch_->id!=record.id||scratch_->size!=record.size)return nullptr;
         Detail value;value.id=scratch_->id;value.address=record.address;value.size=record.size;value.operands=scratch_->detail->x86;
         return &details_.emplace(record.address,value).first->second;
+    }
+    const Detail* indexZeroExtension(const BasicBlock& guard,int index) {
+        // AMD64 CMP r32 examines only the low half. Prove that the same
+        // physical index consumed by the 64-bit address has zero upper bits.
+        // Scan a suffix of this block only, so every path executing CMP also
+        // executes the definition. Each accepted instruction unconditionally
+        // writes just its explicit GPR destination (and possibly flags).
+        for(size_t n=guard.insnCount-2;n>0;--n) {
+            const auto* instruction=detail(code_.instructions()[guard.firstInsn+n-1]);
+            if(!instruction||!plain(instruction->operands)||instruction->operands.op_count!=2)return nullptr;
+            switch(instruction->id) {
+                case X86_INS_MOV:case X86_INS_LEA:case X86_INS_XOR:break;
+                default:return nullptr;
+            }
+            const auto& destination=instruction->operands.operands[0];
+            const auto written=reg(destination,destination.size);
+            if(written<0)return nullptr;
+            if(written==index)return destination.size==4?instruction:nullptr;
+        }
+        return nullptr;
     }
     bool edge(u32 from,u32 to,EdgeKind kind)const {
         for(const auto& e:expected_.blocks()[from].successors)if(e.target==to&&e.kind==kind)return true;

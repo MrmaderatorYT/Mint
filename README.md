@@ -6,7 +6,7 @@
 
 Mint is an offline binary-analysis and decompilation workspace **running on Android**. Its primary purpose is reversing native binaries, not Android APK application analysis. The original targets are ELF64/AArch64 and ELF64/x86-64; ELF32/ARM/Thumb/x86-32/RISC-V32, ELF64/RISC-V64, explicit raw mappings, PE32/PE32+ and little-endian thin32/64 or validated universal Mach-O containers now use the same native engine. Analysis runs in C++ through JNI and exposes disassembly, MintIR, pseudo-C, control-flow graphs, functions, and diagnostics in a touch-oriented UI. Legacy DEX/APK parsing is present but is not the development priority.
 
-The project is an independent, Ghidra-inspired implementation. It does not embed Ghidra, Sleigh, LLVM, or Unicorn, and it is no longer a mock-data simulator. Mint is currently a `0.5 Preview`: the core pipeline is functional, but format, architecture, type-recovery, and control-structure coverage are narrower than a desktop reverse-engineering suite.
+The project is an independent, Ghidra-inspired implementation. It does not embed Ghidra, Sleigh, LLVM, or Unicorn, and it is no longer a mock-data simulator. Mint is currently a `0.6 Preview`: the core pipeline is functional, but format, architecture, type-recovery, and control-structure coverage are narrower than a desktop reverse-engineering suite.
 
 The [now-to-production roadmap](now-to-production-roadmap.md) defines the implementation work, acceptance evidence and release gates required for a working 1.0. Preview version numbers do not determine production readiness.
 
@@ -399,7 +399,7 @@ Regression coverage includes RISC-V width/order/register-alias matrices, AArch64
 
 ## Early ELF64/x86-64 PIC switches
 
-Discovery recognizes a narrow little-endian ELF64/x86-64 dispatcher: unsigned `CMP reg, N` immediately followed by `JA` (accepted fallthrough) or `JBE` (accepted taken edge), a RIP-relative `LEA` table base, `MOVSXD` of `[base + index*4]`, `ADD target, base`, and `JMP target`. A 32-bit guard additionally requires an explicit 32-bit register copy in the dispatcher to establish zero extension of the exact guarded index; the copy and LEA may appear in either safe order. A 64-bit guard uses the unchanged 64-bit index. The dispatcher has one predecessor and exactly these four/five instructions. Intervening operations, signed guards, other load/scale/relative-base conventions and copy-elided 32-bit patterns remain unsupported.
+Discovery recognizes a narrow little-endian ELF64/x86-64 dispatcher: unsigned `CMP reg, N` immediately followed by `JA` (accepted fallthrough) or `JBE` (accepted taken edge), a RIP-relative `LEA` table base, `MOVSXD` of `[base + index*4]`, `ADD target, base`, and `JMP target`. A 32-bit guard requires a zero-extended index. This can come from an explicit 32-bit copy in the dispatcher, or from an unconditional 32-bit write to the same register in the guard block. The copy-elided proof walks a suffix of that block containing only plain register-destination `MOV`, `LEA`, or `XOR`, and stops at an unsupported instruction, a partial-register write, or a 64-bit write to the index. A 64-bit guard uses the unchanged 64-bit index. The dispatcher has one predecessor and exactly these four/five instructions. Changes to the index after the guard, signed guards, and other load/scale/relative-base conventions remain unsupported.
 
 The accepted guard edge must dominate the dispatcher. Checking an adjacent CMP alone is insufficient: the analysis reconstructs control flow from current instructions and repeats the proof after discovering all case bodies. Proposed targets are internal discovery seeds only. Any newly exposed bypass, unknown indirect exit, undecodable body, missing edge or exhausted discovery budget prevents publication of a complete switch. Direct tail exits from case bodies are accepted only with the native frame proof below. The existing eight-round indirect-flow discovery loop supplies convergence and its conservative fallback; no second independent discovery engine is introduced.
 
@@ -416,13 +416,14 @@ case 2ULL:
     return 0x2a0;
 case 1ULL:
     return 0x2b0;
-default: goto unresolved_indirect;
+default:
+    __builtin_unreachable(); /* outside proven switch domain */
 }
 ```
 
 Swapping the first two entries leaves the same two CFG targets but changes the grouped labels to 1/2 and the other label to 0. Regression comparisons include that semantic change.
 
-Code/table patches re-prove dependent functions; changing case order matters even if the unique target set is unchanged. Unresolved x86 dispatchers are rechecked even without a complete dependency set, so repairing a previously invalid table can rediscover cases. Undo/redo follows the same path. Cached targets are only a candidate CFG: restore discards saved selector/label metadata and reconstructs it from the effective bytes. Native regressions compare listing, IR, pseudo-C, CFGs, references and statistics with fresh full analysis. `x86_pic_switch` includes negative guards, modified indices, signed negative offsets, duplicate targets, incomplete/writable tables, invalid targets and resource limits. `control_flow_ast` also compiles and executes generated C to check selector capture and shared case edge effects. With `MINT_HOST_CORPUS=ON`, `x86_pic_switch_compiler_corpus` adds real freestanding Clang/LLD `-O2` and `-O3` ELF fixtures; their machine code is inspected, never executed.
+Code/table patches re-prove dependent functions; changing case order matters even if the unique target set is unchanged. Unresolved x86 dispatchers are rechecked even without a complete dependency set, so repairing a previously invalid table can rediscover cases. Undo/redo follows the same path. Cached targets are only a candidate CFG: restore discards saved selector/label metadata and reconstructs it from the effective bytes. Native regressions compare listing, IR, pseudo-C, CFGs, references and statistics with fresh full analysis. `x86_pic_switch` includes negative guards, modified indices, signed negative offsets, duplicate targets, incomplete/writable tables, invalid targets and resource limits. `control_flow_ast` also compiles and executes generated C to check selector capture and shared case edge effects. With `MINT_HOST_CORPUS=ON`, the switch tests inspect freestanding Clang/LLD `-O2` and `-O3` ELFs. `x86_pic_switch_copy_elided_corpus` checks that the optimized `switch (selector ^ salt)` fixture uses a 32-bit guard and a four-instruction dispatcher and that all six case labels and bodies reach pseudo-C.
 
 ```sh
 cmake --build build/hosttest --target mint_x86_switch_test mint_control_flow_ast_test -j6
@@ -457,6 +458,16 @@ Native-state limits are 8,192 normalized instructions, 32,768 values/phis, 512 b
 cmake --build build/hosttest --target mint_tail_call_state_test mint_tail_call_ir_test mint_x86_tail_call_test -j6
 ctest --test-dir build/hosttest --output-on-failure -R '^(tail_call_.*|x86_tail_.*)$'
 ```
+
+## Decompilation status and listing navigation
+
+The Android Pseudo-C pane and `mint_headless FILE decompile ADDRESS` start with the same `Decompilation status` comment. `complete` means the decompiler reported no supported-stage limitations for this result. `partial` reports gaps such as unresolved transfers, unmodeled instructions or unverified call signatures. `unsupported` identifies a stage that cannot handle the input, `budget-exhausted` identifies an observed resource limit, and `error` identifies a failed request or invalid result. The diagnostic lines name the reason and include a machine address when available. These statuses describe the individual decompilation, including conservative fallbacks. They are not a source-level equivalence guarantee.
+
+Unresolved terminal paths show the target expression when known to the IR, followed by a marked stop in the generated output. The stop is a pseudo-C boundary marker. Proven table switches mark their out-of-domain default unreachable. Genuine machine returns still emit their return values.
+
+Tap a mapped statement in Android Pseudo-C to open the corresponding machine block's address range in the listing. The block range allows for folded operations and multiple IR statements per instruction. Existing symbol and address links are available within those statements. Back from this range returns to the same function and scroll position in Pseudo-C. Unmapped text, such as type headers and diagnostics, has no machine range.
+
+The first [production corpus](quality/corpus/README.md) provides reproducible ELF64 fixtures with a generated manifest and checked analysis properties. Stateful host tests compare edited projects with independent full analysis and check interrupted writes, ENOSPC, and corrupt-cache recovery. After installing matching Android debug and instrumentation APKs, run `app/src/androidTest/run_process_death.sh` to check recovery across an actual process kill using a private test project.
 
 ## Release signing
 

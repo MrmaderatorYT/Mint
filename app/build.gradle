@@ -26,8 +26,8 @@ android {
         applicationId "com.ccs.mint"
         minSdk 26
         targetSdk 36
-        versionCode 5
-        versionName "0.5 Preview"
+        versionCode 6
+        versionName "0.6 Preview"
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
 

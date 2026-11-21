@@ -133,6 +133,7 @@ public:
     std::string irTextFor(Address address);
     /// Full on-demand SSA/pseudo-C view for the selected function.
     std::string decompiledCFor(Address address);
+    DecompileReport decompileReportFor(Address address);
     /// A compact, line-oriented CFG representation consumed by the Android
     /// graph view. One line is `id start end successor...`.
     std::string cfgTextFor(Address address);
