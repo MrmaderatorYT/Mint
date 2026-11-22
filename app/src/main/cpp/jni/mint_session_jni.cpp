@@ -599,6 +599,53 @@ Java_com_ccs_mint_core_MintSession_nativeUndo(JNIEnv* env,jclass,jlong handle,jb
     if (!status.ok()) mint::jni::throwIllegalState(env,status.toString());
 }
 JNIEXPORT jstring JNICALL
+Java_com_ccs_mint_core_MintSession_nativePatchReviewBytes(JNIEnv* env, jclass, jlong handle,
+                                                         jlong address, jint length) {
+    auto* session = asSession(handle);
+    if (!session || length <= 0 || length > 1024) return mint::jni::toJava(env, "");
+    const auto& image = session->image();
+    std::vector<mint::u8> bytes(static_cast<size_t>(length));
+    if (!image.memory().read(static_cast<Address>(address), bytes.data(), bytes.size()))
+        return mint::jni::toJava(env, "");
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result;
+    for (const auto byte : bytes) {
+        if (!result.empty()) result += ' ';
+        result += digits[byte >> 4];
+        result += digits[byte & 15];
+    }
+    return mint::jni::toJava(env, result);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_ccs_mint_core_MintSession_nativeCanonicalAddress(JNIEnv*, jclass, jlong handle, jlong address) {
+    const auto* session = asSession(handle);
+    return session ? static_cast<jlong>(session->image().canonicalAddress(static_cast<Address>(address))) : address;
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_ccs_mint_core_MintSession_nativeProgramRevision(JNIEnv*, jclass, jlong handle) {
+    const auto* session = asSession(handle);
+    return session ? static_cast<jlong>(session->program().revision()) : -1;
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_com_ccs_mint_core_MintSession_nativeFunctionRangeAt(JNIEnv* env, jclass, jlong handle, jlong address) {
+    const auto* session = asSession(handle);
+    if (!session) return nullptr;
+    const auto& analyzer = session->analyzer();
+    const auto at = static_cast<Address>(address);
+    const auto* function = analyzer.functionAt(at);
+    if (!function) function = analyzer.functionContaining(at);
+    if (!function) return nullptr;
+    const jlong range[] = {static_cast<jlong>(function->entry), static_cast<jlong>(function->lowAddress),
+                          static_cast<jlong>(function->highAddress)};
+    jlongArray result = env->NewLongArray(3);
+    if (result) env->SetLongArrayRegion(result, 0, 3, range);
+    return result;
+}
+
+JNIEXPORT jstring JNICALL
 Java_com_ccs_mint_core_MintSession_nativeAnnotation(JNIEnv* env,jclass,jlong handle,jlong address,jstring kind) {
     auto* session=asSession(handle);
     return mint::jni::toJava(env,session ? session->annotation(static_cast<Address>(address),mint::jni::fromJava(env,kind)) : "");

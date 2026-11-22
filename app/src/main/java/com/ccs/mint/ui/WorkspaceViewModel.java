@@ -2,7 +2,9 @@ package com.ccs.mint.ui;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.database.Cursor;
 import android.net.Uri;
+import android.provider.OpenableColumns;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -10,7 +12,12 @@ import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
 import androidx.lifecycle.ViewModel;
 
+import com.ccs.mint.R;
 import com.ccs.mint.core.MintSession;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
 
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -45,6 +52,9 @@ public final class WorkspaceViewModel extends ViewModel {
     private final AtomicBoolean cancelRequested = new AtomicBoolean();
 
     private volatile MintSession session;
+    // Held only while the document picker is open, including rotation.
+    String pendingPseudoCExport;
+    WorkspaceActivity.PatchReview pendingReviewedExport;
     private volatile MintSession opening;
     private volatile String name;
     private volatile int progress;
@@ -59,7 +69,7 @@ public final class WorkspaceViewModel extends ViewModel {
     private long selectedAddress = -1;
     private long listingAddress;
     private int pane = Pane.FUNCTIONS;
-    private String claimedViewIntent;
+    private boolean initialLaunchHandled;
     private final NavigationHistory navigationHistory = new NavigationHistory();
 
     @NonNull
@@ -114,18 +124,11 @@ public final class WorkspaceViewModel extends ViewModel {
         }
     }
 
-    /**
-     * Claims an ACTION_VIEW data URI once for this ViewModel lifetime. Android
-     * may deliver the same Intent again after configuration change; reopening
-     * that URI would start a second native analysis of the same file.
-     */
-    public boolean claimViewIntent(@NonNull Uri uri) {
-        final String key = uri.toString();
-        synchronized (workspaceLock) {
-            if (key.equals(claimedViewIntent)) return false;
-            claimedViewIntent = key;
-            return true;
-        }
+    /** Do not replay the launch after rotation, especially a request to clone. */
+    boolean claimInitialLaunch() {
+        if (initialLaunchHandled) return false;
+        initialLaunchHandled = true;
+        return true;
     }
 
     public int progress() {
@@ -143,82 +146,152 @@ public final class WorkspaceViewModel extends ViewModel {
                 .putLong("listing",listingAddress).putInt("pane",pane).apply();
     }
 
-    public void restoreLast(@NonNull Context context) {
-        if (session != null || generation.get() != 0) return;
-        String path = context.getSharedPreferences("projects",Context.MODE_PRIVATE).getString("last",null);
-        if (path == null) return;
-        java.io.File binary = new java.io.File(path);
-        if (!binary.isFile()) return;
-        SharedPreferences preferences = context.getSharedPreferences(
-                "project-" + binary.getParentFile().getName(), Context.MODE_PRIVATE);
+    @Nullable
+    static String lastProjectId(Context context) {
         try {
-            String architecture = preferences.getString("raw_arch", null);
-            RawImportConfig restored = architecture == null ? null : new RawImportConfig(architecture,
-                    preferences.getLong("raw_base", 0), preferences.getLong("raw_entry", 0));
-            // Missing/corrupt raw metadata must not silently reopen a raw
-            // Program under automatic format detection or a different ISA.
-            if (binary.getParentFile().getName().contains("-raw-") && restored == null) {
-                throw new IllegalArgumentException("Saved raw import configuration is missing");
-            }
-            if (restored != null && !binary.getParentFile().getName().endsWith(restored.projectSuffix())) {
-                throw new IllegalArgumentException("Saved raw configuration does not match the project mapping");
-            }
-            openInternal(context, Uri.fromFile(binary), restored, binary, false);
-        } catch (RuntimeException exception) {
-            state.postValue(new State(Phase.FAILED, "input.bin", "Cannot restore raw project: " + exception.getMessage()));
+            String path = context.getSharedPreferences("projects", Context.MODE_PRIVATE).getString("last", null);
+            if (path == null) return null;
+            return projectId(ProjectStore.requirePrivateInput(context, new File(path)));
+        } catch (IOException | ClassCastException ignored) {
+            return null;
         }
     }
 
-    public void open(@NonNull Context context, @NonNull Uri uri) {
-        open(context, uri, null);
+    @Nullable
+    static String lastProjectName(Context context) {
+        String id = lastProjectId(context);
+        if (id == null) return null;
+        try {
+            return projectPreferences(context, id).getString("name", null);
+        } catch (ClassCastException ignored) {
+            return null;
+        }
+    }
+
+    @Nullable
+    String openedProjectId() {
+        State current = state.getValue();
+        File binary = binaryFile;
+        return current != null && current.phase == Phase.READY && binary != null ? projectId(binary) : null;
+    }
+
+    void openSavedProject(Context context, String id) {
+        openInternal(context, (application, cancel) -> {
+            File binary = ProjectStore.findProject(application, id);
+            SharedPreferences preferences = projectPreferences(application, id);
+            String architecture = preferences.getString("raw_arch", null);
+            RawImportConfig config = architecture == null ? null : new RawImportConfig(architecture,
+                    preferences.getLong("raw_base", 0), preferences.getLong("raw_entry", 0));
+            // A missing or inconsistent mapping cannot be reopened by guessing its format.
+            if ((id.contains("-raw-") || id.contains("-macho-")) && config == null) {
+                throw new IOException("Saved import configuration is missing");
+            }
+            if (config != null && !id.endsWith(config.projectSuffix())) {
+                throw new IOException("Saved raw configuration does not match the project mapping");
+            }
+            return new OpenInput(binary, config, preferences.getString("name", "input.bin"), null);
+        });
     }
 
     /** Null configuration performs native container detection; non-null is explicit raw. */
     public void open(@NonNull Context context, @NonNull Uri uri, @Nullable RawImportConfig config) {
-        openInternal(context, uri, config, null, false);
+        openInternal(context, (application, cancel) -> new OpenInput(
+                ProjectStore.importBinary(application, uri, cancel, config), config,
+                displayName(application, uri), null));
+    }
+
+    void openClone(Context context, Uri uri) {
+        openInternal(context, (application, cancel) -> new OpenInput(
+                ProjectStore.importClone(application, uri, cancel, null), null,
+                MintActivity.localized(application).getString(R.string.binary_clone_name,
+                        displayName(application, uri)), null));
+    }
+
+    void openLesson(Context context, String id, String asset) {
+        openInternal(context, (application, cancel) -> new OpenInput(
+                ProjectStore.importLesson(application, id, asset, cancel), null,
+                asset.substring(asset.lastIndexOf('/') + 1), null));
     }
 
     public void importProjectArchive(@NonNull Context context, @NonNull Uri uri) {
-        openInternal(context, uri, null, null, true);
+        openInternal(context, (application, cancel) -> {
+            try (InputStream input = application.getContentResolver().openInputStream(uri)) {
+                if (input == null) throw new IOException("Cannot read project archive");
+                ProjectArchive.Restored restored = ProjectArchive.restore(input,
+                        new File(application.getFilesDir(), "projects"), cancel, (directory, metadata) -> {
+                            String path = new File(directory, "input.bin").getAbsolutePath();
+                            try (MintSession validation = metadata.raw == null ? MintSession.open(path) : metadata.raw.open(path)) {
+                                validation.attachProject(new File(directory, "program.mint").getAbsolutePath());
+                            }
+                        });
+                return new OpenInput(restored.binary, restored.metadata.raw, restored.metadata.name, restored.metadata);
+            }
+        });
     }
 
-    private void openInternal(@NonNull Context context, @NonNull Uri uri, @Nullable RawImportConfig config,
-                              @Nullable java.io.File existingBinary, boolean archive) {
+    private static String projectId(File binary) {
+        return binary.getParentFile().getName();
+    }
+
+    private static SharedPreferences projectPreferences(Context context, String id) {
+        return context.getSharedPreferences("project-" + id, Context.MODE_PRIVATE);
+    }
+
+    private static String displayName(Context context, Uri uri) {
+        if ("content".equals(uri.getScheme())) {
+            try (Cursor cursor = context.getContentResolver().query(uri,
+                    new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                if (cursor != null && cursor.moveToFirst()) {
+                    int column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                    String name = column < 0 ? null : cursor.getString(column);
+                    if (name != null && !name.trim().isEmpty()) return name;
+                }
+            } catch (RuntimeException ignored) {
+                // Some providers supply a readable stream without document metadata.
+            }
+        }
+        String name = uri.getLastPathSegment();
+        return name == null || name.isEmpty() ? "input.bin" : name;
+    }
+
+    private interface InputSource {
+        OpenInput prepare(Context context, AtomicBoolean cancel) throws Exception;
+    }
+
+    private static final class OpenInput {
+        final File binary;
+        final RawImportConfig config;
+        final String name;
+        final ProjectArchive.Metadata restoredArchive;
+
+        OpenInput(File binary, RawImportConfig config, String name, ProjectArchive.Metadata restoredArchive) {
+            this.binary = binary;
+            this.config = config;
+            this.name = name;
+            this.restoredArchive = restoredArchive;
+        }
+    }
+
+    private void openInternal(Context context, InputSource source) {
         final Context application = context.getApplicationContext();
         final long token = generation.incrementAndGet();
         cancelRequested.set(false);
         progress = 5;
-        state.postValue(new State(Phase.OPENING, uri.getLastPathSegment(), null));
+        state.postValue(new State(Phase.OPENING, null, null));
         openTask = worker.submit(() -> {
             MintSession opened = null;
-            String error = null;
-            String displayName = uri.getLastPathSegment();
+            String displayName = null;
             try {
-                RawImportConfig actualConfig = config;
-                ProjectArchive.Metadata restoredMetadata = null;
-                java.io.File binary;
-                if (archive) {
-                    try (java.io.InputStream input = application.getContentResolver().openInputStream(uri)) {
-                        if (input == null) throw new java.io.IOException("Cannot read project archive");
-                        ProjectArchive.Restored restored = ProjectArchive.restore(input,
-                                new java.io.File(application.getFilesDir(), "projects"), cancelRequested, (directory, metadata) -> {
-                                    String path = new java.io.File(directory, "input.bin").getAbsolutePath();
-                                    try (MintSession validation = metadata.raw == null ? MintSession.open(path) : metadata.raw.open(path)) {
-                                        validation.attachProject(new java.io.File(directory, "program.mint").getAbsolutePath());
-                                    }
-                                });
-                        binary = restored.binary;
-                        restoredMetadata = restored.metadata;
-                        actualConfig = restoredMetadata.raw;
-                        displayName = restoredMetadata.name;
-                    }
-                } else binary = existingBinary == null ? ProjectStore.importBinary(application,uri,cancelRequested,config) :
-                        ProjectStore.requirePrivateInput(application, existingBinary);
-                if (cancelRequested.get() || token != generation.get()) throw new java.io.IOException("import cancelled");
-                SharedPreferences preferences = application.getSharedPreferences("project-"+binary.getParentFile().getName(),Context.MODE_PRIVATE);
-                if ("input.bin".equals(displayName)) displayName = preferences.getString("name",displayName);
+                OpenInput input = source.prepare(application, cancelRequested);
+                File binary = input.binary;
+                RawImportConfig actualConfig = input.config;
+                ProjectArchive.Metadata restoredMetadata = input.restoredArchive;
+                displayName = input.name;
+                if (cancelRequested.get() || token != generation.get()) throw new IOException("import cancelled");
+                String id = projectId(binary);
+                SharedPreferences preferences = projectPreferences(application, id);
                 opened = actualConfig == null ? MintSession.open(binary.getAbsolutePath()) : actualConfig.open(binary.getAbsolutePath());
-                opened.attachProject(new java.io.File(binary.getParentFile(),"program.mint").getAbsolutePath());
+                opened.attachProject(new File(binary.getParentFile(), "program.mint").getAbsolutePath());
                 opening = opened;
                 if (cancelRequested.get()) opened.cancelAnalysis();
                 progress = 10;
@@ -228,7 +301,8 @@ public final class WorkspaceViewModel extends ViewModel {
                     opened = null;
                     if (token == generation.get()) state.postValue(new State(Phase.CANCELED, displayName, null));
                 } else {
-                    SharedPreferences.Editor projectEditor = preferences.edit().putString("name",displayName);
+                    SharedPreferences.Editor projectEditor = preferences.edit().putString("name", displayName)
+                            .putLong("last_opened", System.currentTimeMillis());
                     if (actualConfig == null) projectEditor.remove("raw_arch").remove("raw_base").remove("raw_entry");
                     else projectEditor.putString("raw_arch",actualConfig.architecture)
                             .putLong("raw_base",actualConfig.baseAddress).putLong("raw_entry",actualConfig.entryAddress);
@@ -236,7 +310,7 @@ public final class WorkspaceViewModel extends ViewModel {
                             .putLong("listing", restoredMetadata.listing).putInt("pane", restoredMetadata.pane);
                     // Configuration must be durable before replacing the live
                     // session or updating the cold-start project pointer.
-                    if (!projectEditor.commit()) throw new java.io.IOException("cannot save project configuration");
+                    if (!projectEditor.commit()) throw new IOException("cannot save project configuration");
                     MintSession previous = session;
                     session = opened;
                     name = displayName;
@@ -253,11 +327,14 @@ public final class WorkspaceViewModel extends ViewModel {
                         pane = preferences.getInt("pane",Pane.FUNCTIONS);
                         navigationHistory.clear();
                     }
-                    application.getSharedPreferences("projects",Context.MODE_PRIVATE).edit().putString("last",binary.getAbsolutePath()).apply();
+                    if (!ProjectStore.isLessonProject(id)) {
+                        application.getSharedPreferences("projects", Context.MODE_PRIVATE).edit()
+                                .putString("last", binary.getAbsolutePath()).apply();
+                    }
                     state.postValue(new State(Phase.READY, displayName, null));
                 }
             } catch (Exception exception) {
-                error = exception.getMessage();
+                String error = exception.getMessage();
                 if (opened != null) opened.close();
                 if (token == generation.get()) {
                     state.postValue(new State(

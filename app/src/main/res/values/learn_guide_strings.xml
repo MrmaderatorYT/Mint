@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="lesson_workspace_reference">What does each tab show?</string>
+    <string name="lesson_guide">Lesson guide</string>
+    <string name="lesson_step">Step %1$d of %2$d</string>
+    <string name="lesson_previous">Previous</string>
+    <string name="lesson_next">Next</string>
+    <string name="lesson_show_panel">Show %1$s</string>
+    <string name="lesson_check_patch">Check patch</string>
+    <string name="lesson_patch_success">The replacement instruction matches the exercise.</string>
+    <string name="lesson_patch_missing">The instruction hasn’t changed to the expected form. Open the patch editor and apply the replacement from the hint.</string>
+    <string name="lesson_choose_answer">Choose an answer</string>
+    <string name="lesson_catalog_progress">%1$d of %2$d lessons completed</string>
+    <string name="lesson_catalog_intro">A binary stores instructions and data. These lessons show how to read both in Mint. Open the Lesson guide in each practice project for a short walkthrough, a question, and a hands-on exercise.</string>
+    <string name="lesson_guide_unavailable">The guide for this example is unavailable. Reopen the example from Learn.</string>
+    <string name="lesson_completed">Completed</string>
+    <string name="lesson_practice_title">Try it yourself</string>
+    <string name="lesson_open_patch">Open patch editor</string>
+    <string name="lesson_back_to_catalog">Back to lessons</string>
+    <string name="lesson_continue_hint">Open Lesson guide again to continue.</string>
+    <string name="lesson_show_references">Show references to the text</string>
+
+    <string name="lesson_arithmetic_title">Read your first function</string>
+    <string name="lesson_arithmetic_summary">Follow a score from input to return. Change one instruction and compare the result.</string>
+    <string name="lesson_arithmetic_first">Disasm lists machine instructions in address order. A register holds a value inside the processor. In scale_score, w0 holds the input score. lsl shifts its bits left once, doubling the value within 32 bits. add adds 3. ret returns to the caller, with the result in w0.</string>
+    <string name="lesson_arithmetic_second">Pseudo-C translates the instructions into a C-like explanation. Follow the input through the shift and addition to the return value. Register names may become variables.</string>
+    <string name="lesson_arithmetic_third">A basic block is a sequence of instructions with one entry and no jump in the middle. The control-flow graph (CFG) shows blocks as boxes. This function runs in one block from the shift to ret.</string>
+    <string name="lesson_arithmetic_exercise">Before patching, what does scale_score return for an input of 4?</string>
+    <string name="lesson_arithmetic_hint">A patch replaces instruction bytes in your practice copy. Try changing the bonus from 3 to 5. Open the patch editor and enter add w0, w0, #5. Preview the bytes, apply the patch, and inspect the comparison.</string>
+    <string name="lesson_arithmetic_answer_a">7</string>
+    <string name="lesson_arithmetic_answer_b">11</string>
+    <string name="lesson_arithmetic_answer_c">8</string>
+    <string name="lesson_arithmetic_correct">The shift doubles 4 to 8. Adding 3 gives 11.</string>
+    <string name="lesson_arithmetic_wrong">Do the shift first. Then add the bonus to the doubled value.</string>
+
+    <string name="lesson_branch_title">Follow a decision</string>
+    <string name="lesson_branch_summary">Read a comparison and see how one decision creates two paths.</string>
+    <string name="lesson_branch_first">cmp compares the score in w0 with 8. b.lt jumps to the block for level 1 if the score is lower. Otherwise the next instruction starts the block for level 2.</string>
+    <string name="lesson_branch_second">In Pseudo-C, look for the condition that compares the input with 8. Trace the return value for each path. The order and shape of the conditions may differ from the assembly.</string>
+    <string name="lesson_branch_third">The CFG has one decision block and two return blocks. Each arrow shows a possible next block. Follow the jump for scores below 8 and the other arrow for scores of 8 or more.</string>
+    <string name="lesson_branch_exercise">In the original function, which level does a score of exactly 8 get?</string>
+    <string name="lesson_branch_hint">Try moving the cutoff to 10. In the patch editor, enter cmp w0, #10. Preview and apply. Check how the condition changes in Patch comparison.</string>
+    <string name="lesson_branch_answer_a">Level 2</string>
+    <string name="lesson_branch_answer_b">Level 1</string>
+    <string name="lesson_branch_answer_c">Level 8</string>
+    <string name="lesson_branch_correct">8 is equal to the cutoff, so b.lt does not jump and the function returns 2.</string>
+    <string name="lesson_branch_wrong">b.lt means jump only when the score is lower. Compare 8 with 8.</string>
+
+    <string name="lesson_records_title">Read and write memory</string>
+    <string name="lesson_records_summary">Learn what an address points to and which instruction changes memory.</string>
+    <string name="lesson_records_first">x0 holds the address of a pair of 32-bit numbers. ldp reads them into w1 and w2. add combines the values. str writes the result to the first slot, and mov places it in the return register w0.</string>
+    <string name="lesson_records_second">Look for two loads and one store in Pseudo-C. The second slot starts four bytes after the first because each value is 32 bits. The store targets the first slot.</string>
+    <string name="lesson_records_third">The CFG shows one block. Inside it, the loads happen before the arithmetic, then the store changes the caller’s memory. The ret exits the block after the result is ready.</string>
+    <string name="lesson_records_exercise">Which instruction writes a value back to memory?</string>
+    <string name="lesson_records_hint">Try subtracting the second number from the first. In the patch editor, enter sub w1, w1, w2. Preview and apply. The store still writes to the first slot.</string>
+    <string name="lesson_records_answer_a">ldp</string>
+    <string name="lesson_records_answer_b">add</string>
+    <string name="lesson_records_answer_c">str</string>
+    <string name="lesson_records_correct">str means store register. It writes w1 to the address in x0.</string>
+    <string name="lesson_records_wrong">Look for the instruction that copies a register value to an address. ldp reads from memory, and add only changes a register.</string>
+
+    <string name="lesson_loop_title">Trace a loop</string>
+    <string name="lesson_loop_summary">Follow a counter and find the arrow that takes execution back for another pass.</string>
+    <string name="lesson_loop_first">repeat_add sets the total in w0 to 0 and the counter in w1 to 3. Each pass adds 2 to the total and subtracts 1 from the counter. b.ne jumps back while the counter is nonzero.</string>
+    <string name="lesson_loop_second">In Pseudo-C, find the two variables that change on every pass. One collects the total and the other controls how many passes remain. The return uses the total.</string>
+    <string name="lesson_loop_third">Trace three parts in the CFG. Setup initializes the values, the loop body updates them, and the exit returns the total. The arrow back to the loop body marks the repetition.</string>
+    <string name="lesson_loop_exercise">What does the original function return after three passes?</string>
+    <string name="lesson_loop_hint">Try five passes. In the patch editor, enter mov w1, #5. Preview and apply, then check the new starting counter.</string>
+    <string name="lesson_loop_answer_a">3</string>
+    <string name="lesson_loop_answer_b">6</string>
+    <string name="lesson_loop_answer_c">2</string>
+    <string name="lesson_loop_correct">Three passes add 2 each, starting from 0, so the total is 6.</string>
+    <string name="lesson_loop_wrong">Start at 0. Add 2 each time the body runs and keep the counter separate from the total.</string>
+
+    <string name="lesson_calls_title">Follow a function call</string>
+    <string name="lesson_calls_summary">See how a caller passes a value to a helper and uses its result.</string>
+    <string name="lesson_calls_first">boost_score first saves the address it needs to return to. bl calls score_bonus with the input in w0. The helper doubles the value in w0 and returns. Back in boost_score, add adds 1 before the function restores what it saved and returns.</string>
+    <string name="lesson_calls_second">Look in Pseudo-C for the call to score_bonus and the following addition. Mint marks this view partial because it has limited information about the helper’s inputs and result. Use Disasm to verify how the two functions pass the value in w0.</string>
+    <string name="lesson_calls_third">The call graph shows how functions connect. Its boxes are whole functions. Follow the arrow from boost_score to score_bonus. It shows which function makes the call and which function receives it.</string>
+    <string name="lesson_calls_exercise">What does the original boost_score return when its input is 4?</string>
+    <string name="lesson_calls_hint">Try changing the extra 1 to 4. In the patch editor, enter add w0, w0, #4. Preview and apply. The call to the helper stays the same.</string>
+    <string name="lesson_calls_answer_a">5</string>
+    <string name="lesson_calls_answer_b">8</string>
+    <string name="lesson_calls_answer_c">9</string>
+    <string name="lesson_calls_correct">score_bonus doubles 4 to 8. boost_score adds 1 after the call, giving 9.</string>
+    <string name="lesson_calls_wrong">First find the value returned by score_bonus. Then apply the addition in boost_score.</string>
+
+    <string name="lesson_strings_title">Find text and its references</string>
+    <string name="lesson_strings_summary">Find an embedded label and trace the instruction that uses its address.</string>
+    <string name="lesson_strings_first">In label_address, adr puts the address of a label into x0 and ret returns that address. The text itself lives in a data region elsewhere in the binary.</string>
+    <string name="lesson_strings_second">Strings lists recognizable text stored as bytes in the binary. Find Mint practice label. The address next to it identifies where the bytes start.</string>
+    <string name="lesson_strings_third">Xrefs are cross-references. They link a site that uses an address to its destination. Look for the link from the adr in label_address to the address of the text.</string>
+    <string name="lesson_strings_exercise">What does label_address return?</string>
+    <string name="lesson_strings_hint">Find Mint practice label in Strings, then use Xrefs to trace which instruction references its address. An address tells you where to read the text.</string>
+    <string name="lesson_strings_answer_a">The address of the label</string>
+    <string name="lesson_strings_answer_b">The number of letters</string>
+    <string name="lesson_strings_answer_c">The first letter</string>
+    <string name="lesson_strings_correct">adr computes the address of the bytes, and ret returns it in x0.</string>
+    <string name="lesson_strings_wrong">Follow x0 from adr to ret. Think about where the text bytes are stored.</string>
+</resources>

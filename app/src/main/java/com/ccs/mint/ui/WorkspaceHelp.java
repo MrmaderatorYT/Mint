@@ -42,6 +42,14 @@ final class WorkspaceHelp {
     private WorkspaceHelp() {}
 
     static void show(Context context) {
+        show(context, -1);
+    }
+
+    static void showViews(Context context) {
+        show(context, 1);
+    }
+
+    private static void show(Context context, int expandedGroup) {
         String[] topics = context.getResources().getStringArray(R.array.help_topics);
         final BottomSheetDialog sheet = new BottomSheetDialog(context);
         ScrollView scroll = new ScrollView(context);
@@ -55,15 +63,17 @@ final class WorkspaceHelp {
         List<LinearLayout> sections = new ArrayList<>();
         List<MaterialButton> headings = new ArrayList<>();
         for (int group = 0; group < GROUPS.length; ++group) {
+            boolean expanded = group == expandedGroup;
             LinearLayout items = column(context);
-            items.setVisibility(View.GONE);
+            items.setVisibility(expanded ? View.VISIBLE : View.GONE);
             sections.add(items);
             String label = context.getString(GROUP_TITLES[group]);
             MaterialButton heading = new MaterialButton(context, null,
                     com.google.android.material.R.attr.materialButtonOutlinedStyle);
-            heading.setText(label + "  ▾");
+            heading.setText(label + (expanded ? "  ▴" : "  ▾"));
             heading.setContentDescription(label);
-            ViewCompat.setStateDescription(heading, context.getString(R.string.help_collapsed));
+            ViewCompat.setStateDescription(heading,
+                    context.getString(expanded ? R.string.help_expanded : R.string.help_collapsed));
             headings.add(heading);
             heading.setOnClickListener(view -> {
                 boolean expand = items.getVisibility() != View.VISIBLE;

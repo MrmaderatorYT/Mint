@@ -18,16 +18,16 @@
         <service android:name=".plugin.SandboxPluginService"
             android:exported="false" android:isolatedProcess="true"
             android:process=":mint_plugin_sandbox" />
+        <activity android:name=".ui.WorkspaceActivity" android:exported="false" />
         <activity
-            android:name=".ui.WorkspaceActivity"
+            android:name=".ui.WelcomeActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- So a file manager can hand a library straight to the workspace
-                 instead of making the user find it again through the picker. -->
+            <!-- Forward a file manager's read grant to the workspace. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
 

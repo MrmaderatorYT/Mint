@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="patch_assemble_at">Assemble at 0x%1$x</string>
+    <string name="patch_assemble_help">Enter instructions and preview the encoded bytes before applying the patch.</string>
+    <string name="patch_preview">Preview</string>
+    <string name="patch_confirm_title">Confirm assembly patch</string>
+    <string name="patch_apply">Apply patch</string>
+    <string name="patch_encoding_changed">Assembly changed. Preview the encoded bytes again.</string>
+    <string name="patch_assembly_source">Assembly</string>
+    <string name="patch_preview_instruction">Undo, redo, and patched-copy export are available after applying the patch.</string>
+    <plurals name="patch_replaced_bytes">
+        <item quantity="one">This replaces %d byte.</item>
+        <item quantity="other">This replaces %d bytes.</item>
+    </plurals>
+    <string name="patch_at_address">Patch at 0x%1$x</string>
+    <string name="patch_no_function">No analyzed function at this address.</string>
+    <string name="patch_function_span">Function 0x%1$x · original listing span</string>
+    <string name="patch_before_bytes">− Before: %1$s</string>
+    <string name="patch_after_bytes">+ After: %1$s</string>
+    <string name="patch_decompilation_status">Decompilation: %1$s → %2$s</string>
+    <string name="patch_status_unavailable">unavailable</string>
+    <string name="patch_status_complete">complete</string>
+    <string name="patch_status_partial">partial</string>
+    <string name="patch_status_unsupported">unsupported</string>
+    <string name="patch_status_budget">budget exhausted</string>
+    <string name="patch_comparison_unavailable">Comparison unavailable or capture limit reached.</string>
+    <string name="patch_no_changes">No changes.</string>
+    <string name="patch_diff_legend">− Before  ·  + After</string>
+    <string name="patch_diff_limit">Changed span shown as one block (diff limit).</string>
+    <string name="patch_review_expired">Patch review expired. Review the changes before exporting.</string>
+    <string name="patch_review_stale">Project changed after this review. Review the changes again.</string>
+    <string name="patch_workspace_changed">Workspace changed. Open the patch dialog again.</string>
+    <string name="patch_comparison_title">Patch comparison</string>
+    <string name="patch_close">Close</string>
+    <string name="patch_undo">Undo this patch</string>
+    <string name="patch_export_copy">Export reviewed copy</string>
+    <string name="patch_no_picker">No document picker is available.</string>
+    <string name="address_rename_symbol">Rename symbol</string>
+    <string name="address_comment">Comment</string>
+    <string name="address_bookmark">Bookmark</string>
+    <string name="address_define_data">Define data — type expression or cstring</string>
+    <string name="address_prototype">Function prototype: uint64_t(int32_t count, void* buffer)</string>
+    <string name="address_define_function">Define function entry — code</string>
+    <string name="address_patch_hex">Patch hex bytes — 1f 20 03 d5</string>
+    <string name="address_references">References</string>
+    <string name="address_show_pseudo_c">Show in Pseudo-C</string>
+    <string name="address_empty_override">Empty value removes the override</string>
+    <string name="address_save">Save</string>
+</resources>

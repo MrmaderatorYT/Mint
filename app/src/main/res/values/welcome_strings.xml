@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="welcome_back">Back to Welcome</string>
+    <string name="welcome_open">Open from device</string>
+    <string name="welcome_clone">Clone binary</string>
+    <string name="welcome_clone_info">Create a separate Mint project from a file so you can edit it independently.</string>
+    <string name="welcome_learn_info">Practice reading and patching built-in examples.</string>
+    <string name="welcome_import_options">Import options</string>
+    <string name="welcome_resume">Continue %1$s</string>
+    <string name="welcome_saved">Saved projects</string>
+    <string name="welcome_saved_empty">Open or clone a binary to create a project.</string>
+    <string name="welcome_saved_entry">%1$s\n%2$s</string>
+    <string name="welcome_no_picker">No document picker is available on this device.</string>
+
+    <string name="learn_title">Learn</string>
+    <string name="learn_open_example">Open %1$s</string>
+</resources>

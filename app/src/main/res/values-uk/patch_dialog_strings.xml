@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="patch_assemble_at">Асемблер за адресою 0x%1$x</string>
+    <string name="patch_assemble_help">Введіть інструкції та перегляньте закодовані байти перед застосуванням патча.</string>
+    <string name="patch_preview">Переглянути</string>
+    <string name="patch_confirm_title">Підтвердження патча асемблером</string>
+    <string name="patch_apply">Застосувати патч</string>
+    <string name="patch_encoding_changed">Кодування інструкцій змінилося. Перегляньте байти ще раз.</string>
+    <string name="patch_assembly_source">Асемблер</string>
+    <string name="patch_preview_instruction">Після застосування патч можна відкотити, повторити або експортувати змінену копію.</string>
+    <plurals name="patch_replaced_bytes">
+        <item quantity="one">Ця дія замінить %d байт.</item>
+        <item quantity="few">Ця дія замінить %d байти.</item>
+        <item quantity="many">Ця дія замінить %d байтів.</item>
+        <item quantity="other">Ця дія замінить %d байта.</item>
+    </plurals>
+    <string name="patch_at_address">Патч за адресою 0x%1$x</string>
+    <string name="patch_no_function">За цією адресою немає проаналізованої функції.</string>
+    <string name="patch_function_span">Функція 0x%1$x · початковий діапазон інструкцій</string>
+    <string name="patch_before_bytes">− До: %1$s</string>
+    <string name="patch_after_bytes">+ Після: %1$s</string>
+    <string name="patch_decompilation_status">Декомпіляція: %1$s → %2$s</string>
+    <string name="patch_status_unavailable">недоступно</string>
+    <string name="patch_status_complete">завершено</string>
+    <string name="patch_status_partial">частково</string>
+    <string name="patch_status_unsupported">не підтримується</string>
+    <string name="patch_status_budget">ліміт вичерпано</string>
+    <string name="patch_comparison_unavailable">Порівняння недоступне або досягнуто ліміту знімка.</string>
+    <string name="patch_no_changes">Без змін.</string>
+    <string name="patch_diff_legend">− До  ·  + Після</string>
+    <string name="patch_diff_limit">Досягнуто ліміту порівняння. Змінений діапазон показано одним блоком.</string>
+    <string name="patch_review_expired">Порівняння патча застаріло. Перегляньте зміни перед експортом.</string>
+    <string name="patch_review_stale">Після порівняння проєкт змінився. Перегляньте зміни ще раз.</string>
+    <string name="patch_workspace_changed">Робоча область змінилася. Відкрийте вікно патча ще раз.</string>
+    <string name="patch_comparison_title">Порівняння патча</string>
+    <string name="patch_close">Закрити</string>
+    <string name="patch_undo">Відкотити патч</string>
+    <string name="patch_export_copy">Експортувати копію</string>
+    <string name="patch_no_picker">Вибір файлів недоступний.</string>
+    <string name="address_rename_symbol">Перейменувати символ</string>
+    <string name="address_comment">Коментар</string>
+    <string name="address_bookmark">Закладка</string>
+    <string name="address_define_data">Визначити дані — вираз типу або cstring</string>
+    <string name="address_prototype">Прототип функції: uint64_t(int32_t count, void* buffer)</string>
+    <string name="address_define_function">Визначити точку входу функції</string>
+    <string name="address_patch_hex">Замінити шістнадцяткові байти — 1f 20 03 d5</string>
+    <string name="address_references">Посилання</string>
+    <string name="address_show_pseudo_c">Показати в псевдо-C</string>
+    <string name="address_empty_override">Порожнє значення скидає перевизначення</string>
+    <string name="address_save">Зберегти</string>
+</resources>

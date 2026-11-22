@@ -1,5 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="return_to_welcome">Повернутися на стартовий екран</string>
+    <string name="binary_clone_name">Копія %1$s</string>
+    <string name="assemble_patch_here">Патч асемблером</string>
+    <string name="project_actions">Дії з проєктом</string>
+    <string name="app_name">Mint</string>
+    <string name="focus">Зосередженість</string>
+    <string name="relax">Відпочинок</string>
+    <string name="atmosphere">Атмосфера</string>
+    <string name="start">Запустити</string>
+    <string name="pause">Призупинити</string>
+    <string name="scene_deep">Глибина</string>
+    <string name="scene_flow">Потік</string>
+    <string name="scene_calm">Спокій</string>
+    <string name="switch_scene">Змінити звукову сцену</string>
+    <string name="open_binary">Відкрити бінарний файл</string>
+    <string name="open_binary_short">Відкрити</string>
+    <string name="empty_hint">Виберіть бінарний файл для аналізу. Аналіз виконується на цьому пристрої.</string>
+    <string name="filter_hint">Фільтрувати за назвою або адресою</string>
+    <string name="pane_functions">Функції</string>
+    <string name="pane_disasm">Асемблер</string>
+    <string name="pane_ir">IR</string>
+    <string name="pane_c">Pseudo-C</string>
+    <string name="pane_graph">Граф</string>
+    <string name="pane_writes">Записи в пам’ять</string>
+    <string name="pane_xrefs">Посилання</string>
+    <string name="xrefs_hint">Виберіть функцію, щоб переглянути її перехресні посилання. Загальний граф викликів доступний на вкладці «Граф».</string>
+    <string name="pane_strings">Рядки</string>
+    <string name="pane_log">Журнал</string>
+    <string name="cancel_analysis">Зупинити</string>
+    <string name="licences">Ліцензії відкритого ПЗ</string>
     <string name="beta_title">Відкрите бета-тестування</string>
     <string name="beta_message">Цей додаток знаходиться у фазі відкритого бета-тестування.
         Деякі функції можуть не працювати або працювати некоректно.\n\nБудемо вдячні за
@@ -8,4 +38,8 @@
     <string name="beta_feedback">Написати</string>
     <string name="beta_subject">Mint %1$s — фідбек</string>
     <string name="beta_no_mail">Поштовий застосунок не знайдено. Пишіть на %1$s</string>
+    <string name="viewing_function">Перегляд %1$s</string>
+    <string name="clear_function">Показати всю програму</string>
+    <string name="overview_hint">Виберіть функцію на вкладці «Функції», щоб переглянути її IR або псевдокод. Без вибраної функції вкладки показують всю програму.</string>
+    <string name="call_graph_empty">Граф викликів порожній, бо Mint не розпізнав прямих викликів. Непрямі виклики до цього графа не входять.</string>
 </resources>

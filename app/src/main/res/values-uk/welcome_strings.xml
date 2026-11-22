@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="welcome_back">Назад на стартовий екран</string>
+    <string name="welcome_open">Відкрити з пристрою</string>
+    <string name="welcome_clone">Клонувати бінарний файл</string>
+    <string name="welcome_clone_info">Створіть окремий проєкт Mint із файла, щоб редагувати його незалежно.</string>
+    <string name="welcome_learn_info">Читайте й патчіть вбудовані приклади.</string>
+    <string name="welcome_import_options">Параметри імпорту</string>
+    <string name="welcome_resume">Продовжити %1$s</string>
+    <string name="welcome_saved">Збережені проєкти</string>
+    <string name="welcome_saved_empty">Відкрийте або клонуйте бінарний файл, щоб створити проєкт.</string>
+    <string name="welcome_saved_entry">%1$s\n%2$s</string>
+    <string name="welcome_no_picker">На цьому пристрої немає засобу вибору файлів.</string>
+
+    <string name="learn_title">Навчання</string>
+    <string name="learn_open_example">Відкрити приклад «%1$s»</string>
+</resources>

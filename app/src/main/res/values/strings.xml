@@ -1,4 +1,7 @@
 <resources>
+    <string name="return_to_welcome">Return to start screen</string>
+    <string name="binary_clone_name">Copy of %1$s</string>
+    <string name="assemble_patch_here">Assemble patch</string>
     <string name="project_actions">Project actions</string>
     <string name="app_name">Mint</string>
     <string name="focus">Focus</string>
@@ -26,7 +29,6 @@
     <string name="pane_log">Log</string>
     <string name="cancel_analysis">Stop</string>
     <string name="licences">Open-source licences</string>
-    <string name="try_example">Open the bundled example</string>
     <string name="beta_title">Open beta</string>
     <string name="beta_message">Mint is in open beta. Some features may be missing or
         behave incorrectly.\n\nAny feedback is welcome — bug reports, files that fail

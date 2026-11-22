@@ -6,7 +6,7 @@
 
 Mint is an offline binary-analysis and decompilation workspace **running on Android**. Its primary purpose is reversing native binaries, not Android APK application analysis. The original targets are ELF64/AArch64 and ELF64/x86-64; ELF32/ARM/Thumb/x86-32/RISC-V32, ELF64/RISC-V64, explicit raw mappings, PE32/PE32+ and little-endian thin32/64 or validated universal Mach-O containers now use the same native engine. Analysis runs in C++ through JNI and exposes disassembly, MintIR, pseudo-C, control-flow graphs, functions, and diagnostics in a touch-oriented UI. Legacy DEX/APK parsing is present but is not the development priority.
 
-The project is an independent, Ghidra-inspired implementation. It does not embed Ghidra, Sleigh, LLVM, or Unicorn, and it is no longer a mock-data simulator. Mint is currently a `0.6 Preview`: the core pipeline is functional, but format, architecture, type-recovery, and control-structure coverage are narrower than a desktop reverse-engineering suite.
+The project is an independent, Ghidra-inspired implementation. It does not embed Ghidra, Sleigh, LLVM, or Unicorn, and it is no longer a mock-data simulator. Mint is currently a `0.7 Preview`: the core pipeline is functional, but format, architecture, type-recovery, and control-structure coverage are narrower than a desktop reverse-engineering suite.
 
 The [now-to-production roadmap](now-to-production-roadmap.md) defines the implementation work, acceptance evidence and release gates required for a working 1.0. Preview version numbers do not determine production readiness.
 
@@ -25,7 +25,7 @@ The [now-to-production roadmap](now-to-production-roadmap.md) defines the implem
 - APK/DEX parsing through the same Android file picker used for ELF files.
 - Heuristic OLLVM, crypto, anti-tamper, packer, and string-recovery components.
 - SQLite-backed cache/query components, plus a portable user Program overlay and versioned derived native analysis snapshots independent of system SQLite availability.
-- SHA-256-keyed private projects with saved annotations and last-workspace restoration.
+- Private projects keyed by SHA-256, independent binary clones, and a list of saved workspaces.
 - Persistent user symbols, comments, bookmarks, code/data decisions, explicit function entries, type definitions, supported authoritative target-ABI prototypes, guarded local bindings and byte patches; transactional edits with bounded session undo/redo.
 - Unified code/data listing with bytes, and global symbol/comment/string/byte-pattern search.
 - Program-owned memory block view and bidirectional reference index: direct-flow, relocations, constant-SSA reads/writes, and separately labeled literal/address candidates. Unknown aliasing is not guessed.
@@ -38,9 +38,17 @@ The [now-to-production roadmap](now-to-production-roadmap.md) defines the implem
 
 ## Android workspace
 
+Mint starts on the Welcome screen. **Open from device** imports a binary for analysis and reopens its existing project when the bytes match. **Clone binary** makes a separate Mint project with its own edits. **Saved projects** reopens prior work, and **Import options** provides raw mappings, Mach-O slice selection, and project archive restoration. Use the Home button in the workspace header to return to Welcome.
+
+**Language** on Welcome switches the app between English and Ukrainian. English is the default, and Mint remembers the selection for future launches. Analysis output uses its original technical notation.
+
+The assembly editor and patch preview highlight instruction syntax. The patch comparison marks the previous and replacement bytes and changed code lines, with separate sections for disassembly and Pseudo-C.
+
+**Learn** guides beginners through six AArch64 examples covering arithmetic, branches, memory accesses, loops, calls, and embedded text. Each example keeps its edits in a dedicated practice project. The guide explains the corresponding listing, pseudo-C, graph, strings, and references and links to the relevant views. Each lesson checks an answer, and the five code exercises open the patch editor at the target instruction and check the replacement bytes. The catalog saves completed lessons. [Lesson sources and build instructions](examples/learn/README.md)
+
 The **?** button in the workspace opens a built-in Ukrainian/English guide with questions, explanations and illustrative screen examples. The guide works before opening a binary and does not use project data.
 
-The main screen is implemented by `WorkspaceActivity` and provides these panels:
+`WorkspaceActivity` provides these panels:
 
 - **Functions** — discovered functions and symbols.
 - **Disasm** — paged disassembly with tappable branch targets and back navigation.
@@ -49,7 +57,7 @@ The main screen is implemented by `WorkspaceActivity` and provides these panels:
 - **CFG** — the real control-flow graph rather than placeholder nodes.
 - **Log** — loader and analysis diagnostics.
 
-Analysis runs outside the UI thread, reports progress, and can be cancelled. `WorkspaceViewModel` retains the native session, selected address, active pane, listing position, and consumed `ACTION_VIEW` intent across activity recreation, so rotating the device does not restart analysis or discard navigation state. System-bar and display-cutout insets are handled in portrait and landscape.
+Analysis runs outside the UI thread, reports progress, and can be cancelled. `WorkspaceViewModel` retains the native session, selected address, active pane, listing position, and whether the launch request has been handled. On rotation the workspace reuses the session and a clone request produces a single project. System-bar and display-cutout insets are handled in portrait and landscape.
 
 Long functions are loaded in pages instead of being silently truncated at 4,096 instructions. A finite page limit remains as a safety guard and is reported in the UI when reached.
 

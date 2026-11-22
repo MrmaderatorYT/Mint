@@ -37,7 +37,7 @@ Preview може бути скільки потрібно: `0.5-preview`, `0.20-
 
 ### 2.2. Матриця підтримки, яку треба зафіксувати
 
-- [ ] **SCOPE-01:** Створити машинозчитувану матрицю `format × target ISA/mode × byte order × ABI × operation`. Для кожної комбінації окремо вказати loader, listing, CFG, lifting, decompile, interpreter, assembler/patching, debug import та external debugging.
+- [x] **SCOPE-01:** Створити машинозчитувану матрицю `format × target ISA/mode × byte order × ABI × operation`. Для кожної комбінації окремо вказати loader, listing, CFG, lifting, decompile, interpreter, assembler/patching, debug import та external debugging. [Матриця для baseline 0.6](docs/production/support-matrix.json).
 - [ ] **SCOPE-02:** Для кожної клітинки визначити `production`, `experimental` або `unsupported`, конкретні обмеження, відповідальний набір тестів і останній release evidence. Наявність декодера не означає production decompiler.
 - [ ] **SCOPE-03:** Обов’язкове ядро 1.0: ELF64/AArch64 little-endian з AAPCS64 та ELF64/x86-64 little-endian з SysV64, stripped/unstripped executable/shared libraries і типові Android/Linux toolchains. Raw-аналіз цих ISA має бути придатним до роботи за явно заданих mappings/entry/ABI; системні метадані raw не вгадуються.
 - [ ] **SCOPE-04:** Для вже наявних ARM/Thumb, x86-32, RV32/RV64, big-endian AArch64, PE та Mach-O виконати окрему кваліфікацію. Рекомендована ціль — production для заявлених native browsing/analysis сценаріїв, з точними межами ABI та декомпіляції. До завершення кваліфікації вони залишаються явно experimental; це не дозволяє ігнорувати crash, втрату даних або небезпечну обробку файла.
@@ -304,7 +304,7 @@ Marketplace, кілька language bindings та portable sandbox не є умо
 
 ### Найближчий етап після 0.5 Preview
 
-Починаємо з **PROD-001**. Для кожного основного сценарію фіксуємо заявлену підтримку, результати поточних перевірок і відомі дефекти P0/P1. Зберігаємо звіт із ревізією коду, конфігурацією збірки та результатами, які можна повторити.
+**PROD-001 закрито для ревізії `d607c10` (0.6 Preview).** Збережено [матрицю підтримки](docs/production/support-matrix.json), [інвентар дій і сценарії приймання](docs/production/acceptance-journeys.md), [виміряний baseline](quality/releases/0.6-preview/report.md) та [реєстр P0/P1](docs/production/known-issues.md). Звіт містить пройдені й провалені перевірки, а також перевірки, заблоковані відсутністю пристрою. Кваліфікація 1.0 лишається відкритою.
 
 Після baseline фокусуємося на трьох результатах:
 
@@ -324,7 +324,7 @@ Marketplace, кілька language bindings та portable sandbox не є умо
 
 ### Пакети задач до production
 
-1. **PROD-001:** Зафіксувати support matrix й inventory всіх shipping actions; повний baseline run на поточному коді; зареєструвати P0/P1. Результат — дані та конкретні дефекти, не ще один загальний план.
+1. **PROD-001:** Зафіксувати support matrix й inventory всіх shipping actions, виконати baseline run на поточному коді та зареєструвати P0/P1. **Виконано для 0.6 Preview.** [Результати і відтворення](quality/releases/0.6-preview/report.md).
 2. **PROD-002:** Єдиний analysis status/diagnostic contract, включно з unknown terminal transfers і budget exhaustion, через native/JNI/UI/headless.
 3. **PROD-003:** Stateful Program fault-injection та incremental/full/cache equivalence harness, включно з останніми SCC/type/switch/tail-call механізмами.
 4. **PROD-004:** CI entry point, corpus manifest та independent semantic execution harness для контрольованих compiler fixtures.

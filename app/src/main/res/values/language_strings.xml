@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="mint_language">Language</string>
+    <string name="mint_language_current">Language · %1$s</string>
+    <string name="mint_language_english" translatable="false">English</string>
+    <string name="mint_language_ukrainian" translatable="false">Українська</string>
+</resources>

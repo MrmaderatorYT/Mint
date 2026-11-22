@@ -1,0 +1,1400 @@
+{
+  "schema_version": 1,
+  "baseline": {
+    "release": "0.6 Preview",
+    "commit": "d607c10a886c37fc94cc9bf64aeddaec77a6a920",
+    "version_code": 6
+  },
+  "status_contract": {
+    "production": "Qualified and accepted for the stated 1.0 contract. This baseline does not assign this status.",
+    "experimental": "Available within stated bounds. Shipping the operation in a preview does not establish production qualification.",
+    "unsupported": "The operation or the claimed ABI semantics are unavailable for this cell."
+  },
+  "row_contract": {
+    "scope": "candidate_1_0 identifies a mandatory format/ISA/ABI tuple named by the roadmap. Operation-level acceptance is defined by the release journeys, and row scope does not qualify every operation. secondary is available for separate qualification. outside_1_0 remains out of the baseline 1.0 contract unless explicitly accepted.",
+    "cell": "Apply row operations to every element of target_abis. Resolve each operation through its capability for the status, limits and evidence. A typed ABI rejection does not remove loader, listing or other applicable native features.",
+    "byte_order": "Byte order refers to target data, not the Android host, the universal Mach-O outer table or A64 instruction bytes. A64 instructions are little-endian in both data orders.",
+    "default": "Unlisted format/ISA/byte-order tuples and unlisted typed ABI semantics are unsupported. An accepted container or instruction stream does not imply its ABI is modeled.",
+    "evidence": "Suite names identify coverage and rerun entry points. A source or suite reference alone does not imply this combination was executed in the latest release; release_observation distinguishes known preview evidence from unverified qualification.",
+    "debug": "External debug imports require a persistent compatible Program. An unverified acknowledgement never bypasses an actual mismatch.",
+    "explicit_prototypes": "Named ABIs describe the input program; explicit per-function prototypes can select another compatible convention independently of the default image ABI. For example, raw x86-64 accepts explicit Windows64 storage."
+  },
+  "android_host": {
+    "application_id": "com.ccs.mint",
+    "min_api": 26,
+    "target_api": 36,
+    "packaged_abis": [
+      "arm64-v8a",
+      "x86_64"
+    ],
+    "release_observation": "0.6 APK/AAB were verified with both host ABIs. Pixel 7a smoke used ARM64. Packaging x86_64 does not establish x86_64 Android device acceptance.",
+    "source": "app/build.gradle"
+  },
+  "operations": {
+    "load": "Recognize the container and construct bounded image mappings.",
+    "listing": "Browse decoded instructions and mapped data.",
+    "cfg": "Discover routines and flow with explicit incomplete edges.",
+    "lift": "Lift modeled semantics to MintIR with explicit fallbacks.",
+    "decompile": "Emit SSA-backed pseudo-C and report limitations.",
+    "interpreter": "Interpret modeled MintIR using the native engine in a controlled host harness.",
+    "typed_abi_storage": "Model storage for authoritative prototypes under the named ABI.",
+    "assembler": "Assemble bounded instructions in the selected target mode.",
+    "patch_export": "Apply a bounded Program patch and export a new binary copy.",
+    "debug_import": "Read embedded or explicitly selected, verified external debug metadata.",
+    "external_debug": "Connect to an existing supported RSP/DAP endpoint and map image addresses explicitly."
+  },
+  "capabilities": {
+    "native_listing": {
+      "status": "experimental",
+      "limits": "Seven built-in modes; Capstone output is limited by decoding coverage and listing budgets.",
+      "source": "app/src/main/cpp/mint/disasm/disassembler.cpp",
+      "suites": [
+        "native_isa",
+        "native_compiler_corpus",
+        "PlatformDeviceTest"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "native_cfg": {
+      "status": "experimental",
+      "limits": "No speculative edge for unknown/partial indirect targets. Bounded finite sets, instruction/recovery rounds and discovery resources. Default finite-set bounds are 32 values, 128 merged byte dependencies, 256 dataflow iterations and four million work steps per function. Native discovery attempts at most eight recovery/discovery rounds.",
+      "source": "app/src/main/cpp/mint/analysis/code_analyzer.cpp",
+      "suites": [
+        "indirect_flow",
+        "control_flow_ast",
+        "native_compiler_corpus"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "native_lift": {
+      "status": "experimental",
+      "limits": "ISA families vary. Unsupported semantics remain explicit intrinsics.",
+      "source": "app/src/main/cpp/mint/ir",
+      "suites": [
+        "native_isa",
+        "floating_atomic_semantics",
+        "native_compiler_corpus"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "native_c": {
+      "status": "experimental",
+      "limits": "Typed ABI/alias/region evidence is bounded. Unknown status and terminal transfer stay explicit.",
+      "source": "app/src/main/cpp/mint/decompile/decompiler.cpp",
+      "suites": [
+        "control_flow_ast",
+        "type_recovery_semantics",
+        "feature_demo"
+      ],
+      "release_observation": "0.6 headless and Pixel 7a Pseudo-C status/navigation smoke; no exhaustive per-target result."
+    },
+    "native_ir_execution": {
+      "status": "experimental",
+      "limits": "Native host test harness for modeled IR semantics. No general Android workspace/headless emulation action, process emulation, or proof about unsupported intrinsics.",
+      "source": "app/src/main/cpp/mint/interp/executor.cpp",
+      "suites": [
+        "native_isa",
+        "floating_atomic_semantics",
+        "native_compiler_corpus"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "native_assembler": {
+      "status": "experimental",
+      "limits": "Implemented scalar syntax; no complete ISA assembler, object linker, arbitrary relaxation or unproven interworking.",
+      "source": "app/src/main/cpp/mint/patch/assembler.cpp",
+      "suites": [
+        "assembler"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "native_patch": {
+      "status": "experimental",
+      "limits": "Validated file-backed writes to an overlay. Export creates a copy; no insertion, arbitrary metadata rebuild, or patch of virtual zero-fill.",
+      "source": "app/src/main/cpp/mint/loader/image_patch.cpp",
+      "suites": [
+        "program_platform",
+        "program_cache",
+        "program_recovery",
+        "ProjectArchiveDeviceTest"
+      ],
+      "release_observation": "0.6 verifies fault recovery and incremental-vs-full on controlled fixtures."
+    },
+    "native_debug": {
+      "status": "experimental",
+      "limits": "Existing numeric endpoint and explicit map-image. Varies by advertised RSP/DAP capabilities and register layout; no guessed ASLR mapping and no portable RSP stack unwind. No comprehensive real-server qualification.",
+      "source": "app/src/main/cpp/mint/debug/debugger.cpp",
+      "suites": [
+        "debugger_protocols",
+        "debugger_portability"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "native_debug_be": {
+      "status": "experimental",
+      "limits": "Explicit target data byte order used for known RSP PC registers. Same bounded endpoint and image mapping requirements as native_debug.",
+      "source": "app/src/main/cpp/mint/debug/debugger.cpp",
+      "suites": [
+        "debugger_portability"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "dwarf_import": {
+      "status": "experimental",
+      "limits": "Supported DWARF 2–5, representable types/locations and identity-checked compatible external ELF, compressed and selected split forms. Unsupported records defer; unmatched identities fail.",
+      "source": "app/src/main/cpp/mint/external_debug_session.cpp",
+      "suites": [
+        "dwarf",
+        "external_debug",
+        "external_debug_integration",
+        "ProjectArchiveDeviceTest"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "dwarf_import_be": {
+      "status": "experimental",
+      "limits": "AArch64 big-endian data with compatible external ELF. Available identity and byte-order mismatches fail. Support is bounded to implemented DWARF forms.",
+      "source": "app/src/main/cpp/mint/external_debug_session.cpp",
+      "suites": [
+        "dwarf",
+        "big_endian_external_4_64",
+        "big_endian_external_5_64"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "pdb_import": {
+      "status": "experimental",
+      "limits": "Selected PDB7/CodeView and OMAPFROM evidence linked to the PE image. No general type servers or Windows debug layout parity.",
+      "source": "app/src/main/cpp/mint/debug/pdb_reader.cpp",
+      "suites": [
+        "pdb_program_integration",
+        "pdb_omap_mapping",
+        "codeview_source_lines"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "debug_raw": {
+      "status": "experimental",
+      "limits": "No embedded sections or image identity. A compatible external debug object requires matching architecture, width and byte order, and explicit unverified acknowledgement when no identity evidence exists. No raw symbol/mapping relocation is inferred.",
+      "source": "app/src/main/cpp/mint/external_debug_session.cpp",
+      "suites": [
+        "external_debug"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "macho_debug": {
+      "status": "unsupported",
+      "limits": "No qualified Mach-O/dSYM UUID binding. The external reader accepts supported ELF debug objects and PE-bound PDB, not general dSYM imports.",
+      "source": "app/src/main/cpp/mint/external_debug_session.cpp",
+      "suites": [
+        "external_debug"
+      ],
+      "release_observation": "No release qualification."
+    },
+    "elf64_load": {
+      "status": "experimental",
+      "limits": "ELF64 executables and shared libraries, including stripped variants. Implemented relocation/PLT/unwind metadata, not a process loader.",
+      "source": "app/src/main/cpp/mint/loader/elf_image.cpp",
+      "suites": [
+        "native_loaders",
+        "native_compiler_corpus",
+        "production_elf64_corpus"
+      ],
+      "release_observation": "0.6 compiler corpus validated 8 AArch64/x86-64 ELF64 across debug/stripped and shared/executable variants."
+    },
+    "elf64_be_load": {
+      "status": "experimental",
+      "limits": "AArch64 big-endian ELF64 data, little-endian A64 instructions. Other big-endian ELF64 ISAs unsupported.",
+      "source": "app/src/main/cpp/mint/loader/elf_image.cpp",
+      "suites": [
+        "big_endian",
+        "big_endian_compiler_corpus"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "elf32_load": {
+      "status": "experimental",
+      "limits": "Little-endian ET_EXEC/ET_DYN and bounded ET_REL synthetic mappings. Instruction relocations are metadata, not linked bytes.",
+      "source": "app/src/main/cpp/mint/loader/elf32_image.cpp",
+      "suites": [
+        "elf32",
+        "native_compiler_corpus",
+        "PlatformDeviceTest"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "pe32_load": {
+      "status": "experimental",
+      "limits": "i386 PE32 only. Preferred image VAs, supported import/export/delay-import/relocation inventory. No general rebase.",
+      "source": "app/src/main/cpp/mint/loader/pe_image.cpp",
+      "suites": [
+        "native_loaders",
+        "pe32",
+        "loader_depth"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "pe64_load": {
+      "status": "experimental",
+      "limits": "x86-64 and AArch64 PE32+ at preferred VAs. Supported import/relocation/runtime function/CodeView metadata; no general Windows loader or exception runtime.",
+      "source": "app/src/main/cpp/mint/loader/pe_image.cpp",
+      "suites": [
+        "native_loaders",
+        "loader_depth",
+        "pdb_program_integration"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "macho_load": {
+      "status": "experimental",
+      "limits": "Little-endian thin Mach-O only. Some dyld bind/rebase/export/chained fixup and compact unwind encodings; layout can be incomplete.",
+      "source": "app/src/main/cpp/mint/loader/macho_image.cpp",
+      "suites": [
+        "native_loaders",
+        "program_platform",
+        "loader_depth"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "macho_fat_load": {
+      "status": "experimental",
+      "limits": "Validated outer slice table with one supported little-endian slice selected. Explicit architecture selection retains distinct project identity.",
+      "source": "app/src/main/cpp/mint/loader/macho_image.cpp",
+      "suites": [
+        "native_loaders",
+        "program_platform",
+        "loader_depth"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "macho_fat_patch": {
+      "status": "experimental",
+      "limits": "Only selected-slice mapped bytes are patched. Whole-container export retains other slices unchanged.",
+      "source": "app/src/main/cpp/mint/loader/image_patch.cpp",
+      "suites": [
+        "program_platform",
+        "native_loaders"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "raw_load": {
+      "status": "experimental",
+      "limits": "Explicit ISA/mode, in-range aligned base/entry and single executable mapping. No automatic fallback to raw or synthesized system metadata.",
+      "source": "app/src/main/cpp/mint/loader/elf_image.cpp",
+      "suites": [
+        "program_platform",
+        "native_isa",
+        "PlatformDeviceTest"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "raw_be_load": {
+      "status": "experimental",
+      "limits": "Explicit AArch64 big-endian data only. Data order is part of raw project identity.",
+      "source": "app/src/main/cpp/mint/loader/elf_image.cpp",
+      "suites": [
+        "big_endian",
+        "program_platform"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "aapcs64": {
+      "status": "experimental",
+      "limits": "Authoritative GP/FP, documented stack spill/hidden return and bounded aggregate storage. No complete unnamed variadics or automatic aggregate recovery.",
+      "source": "app/src/main/cpp/mint/analysis/abi_model.cpp",
+      "suites": [
+        "analysis_depth",
+        "aapcs_aggregate_storage",
+        "aapcs_aggregate_compiler_corpus"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "sysv64": {
+      "status": "experimental",
+      "limits": "Supported declarations and bounded scalar call recovery. Typed tail-call emission needs compatible declarations and proven simple register arguments.",
+      "source": "app/src/main/cpp/mint/analysis/abi_model.cpp",
+      "suites": [
+        "analysis_depth",
+        "interprocedural_prototypes",
+        "x86_tail_calls"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "windows64": {
+      "status": "experimental",
+      "limits": "AMD64 Windows64 declarations with shadow space. Automatic Windows prototype inference is disabled.",
+      "source": "app/src/main/cpp/mint/analysis/abi_model.cpp",
+      "suites": [
+        "analysis_depth",
+        "native_loaders",
+        "pdb_program_integration"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "windows_arm64": {
+      "status": "unsupported",
+      "limits": "PE32+ loader accepts ARM64; the Windows64 ABI matcher is x86-64 only. Generic AAPCS64 storage does not establish a Windows ARM64 ABI.",
+      "source": "app/src/main/cpp/mint/analysis/abi_model.cpp",
+      "suites": [],
+      "release_observation": "No release qualification."
+    },
+    "cdecl_stdcall": {
+      "status": "experimental",
+      "limits": "32-bit stack storage for supported authoritative declarations. Automatic recovery of stack call arguments is limited.",
+      "source": "app/src/main/cpp/mint/analysis/abi_model.cpp",
+      "suites": [
+        "pe32",
+        "analysis_depth",
+        "interprocedural_prototypes"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "aapcs32": {
+      "status": "experimental",
+      "limits": "Select the base/soft-float convention for proven binaries only. VFP hard-float packing/backfill is unavailable; lifting some VFP opcodes does not implement its ABI.",
+      "source": "app/src/main/cpp/mint/analysis/abi_model.cpp",
+      "suites": [
+        "native_isa",
+        "analysis_depth",
+        "arm_vfp_semantics"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "aapcs32_vfp": {
+      "status": "unsupported",
+      "limits": "Explicitly rejected by the ABI model; loader, listing and scalar analysis can still open the image.",
+      "source": "app/src/main/cpp/mint/analysis/abi_model.cpp",
+      "suites": [
+        "analysis_depth"
+      ],
+      "release_observation": "No release qualification."
+    },
+    "riscv_abi": {
+      "status": "experimental",
+      "limits": "RV32/RV64 integer and F/D storage for supported declarations and composites. ELF flags select the default; raw uses integer default unless explicitly overridden.",
+      "source": "app/src/main/cpp/mint/analysis/abi_model.cpp",
+      "suites": [
+        "riscv_calling_conventions",
+        "riscv_abi_compiler_corpus"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "riscv_eq": {
+      "status": "unsupported",
+      "limits": "E/Q flag values are recognized as unsupported ABI names; full E/Q storage is not implemented.",
+      "source": "app/src/main/cpp/mint/loader/elf_image.cpp",
+      "suites": [
+        "riscv_calling_conventions"
+      ],
+      "release_observation": "No release qualification."
+    },
+    "mach_arm_abi": {
+      "status": "experimental",
+      "limits": "Generic AAPCS models only; Darwin-specific platform ABI differences are not qualified.",
+      "source": "app/src/main/cpp/mint/analysis/abi_model.cpp",
+      "suites": [
+        "analysis_depth",
+        "program_platform"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "mach_x86_abi": {
+      "status": "experimental",
+      "limits": "Generic SysV AMD64 or cdecl32 model as applicable. Darwin-specific ABI exceptions and complete platform qualification remain pending.",
+      "source": "app/src/main/cpp/mint/analysis/abi_model.cpp",
+      "suites": [
+        "analysis_depth",
+        "program_platform"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "cfg_a64": {
+      "status": "experimental",
+      "limits": "Bounded native discovery, AArch64 linear sweep fallback, supported PIC tables and finite-set indirect flow. Unknown/disagreeing targets remain partial.",
+      "source": "app/src/main/cpp/mint/analysis/code_analyzer.cpp",
+      "suites": [
+        "indirect_flow",
+        "control_flow_ast",
+        "production_elf64_corpus"
+      ],
+      "release_observation": "0.6 production-corpus fixtures verify discovered functions, call targets and loop CFG."
+    },
+    "cfg_x64": {
+      "status": "experimental",
+      "limits": "Bounded ELF64 PIC signed-rel32 switches with proven guards/index, groups of labels, verified direct tail cases. Unproven bounds/targets and unsupported patterns fall back.",
+      "source": "app/src/main/cpp/mint/analysis/x86_switch_recovery.cpp",
+      "suites": [
+        "x86_pic_switch",
+        "x86_pic_switch_copy_elided_corpus",
+        "x86_tail_call_compiler_corpus"
+      ],
+      "release_observation": "0.6 optimized Clang O2 fixture and negative index/upper-bit tests passed."
+    },
+    "lift_arm": {
+      "status": "experimental",
+      "limits": "Scalar, selected VFP and integer NEON, a subset of predicated register/flag changes and Thumb IT; unsupported predicated calls, memory or PC changes remain opaque.",
+      "source": "app/src/main/cpp/mint/ir/lifter_arm32.cpp",
+      "suites": [
+        "native_isa",
+        "arm_vfp_semantics",
+        "arm_neon_semantics"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "lift_rv": {
+      "status": "experimental",
+      "limits": "Integer/M, common compressed scalar, selected F/D and AMO operations. LR/SC, some rounding, vector and privileged semantics retain explicit fallbacks.",
+      "source": "app/src/main/cpp/mint/ir/lifter_riscv.cpp",
+      "suites": [
+        "native_isa",
+        "floating_atomic_semantics",
+        "native_compiler_corpus"
+      ],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "dalvik_load": {
+      "status": "experimental",
+      "limits": "Legacy DEX with supported headers, tables and opcodes. No full multidex or native-app analysis through this route.",
+      "source": "app/src/main/cpp/mint/loader/dex_image.cpp",
+      "suites": [],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "apk_load": {
+      "status": "experimental",
+      "limits": "Validates bounded ZIP and extracts classes.dex only; resources, manifest semantics and secondary DEX are outside this route.",
+      "source": "app/src/main/cpp/mint/loader/zip_reader.cpp",
+      "suites": [],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "dalvik_list": {
+      "status": "experimental",
+      "limits": "List known method instructions. Native xref/search/ABI facilities do not qualify this legacy path.",
+      "source": "app/src/main/cpp/mint/session.cpp",
+      "suites": [],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "dalvik_flow": {
+      "status": "experimental",
+      "limits": "Bounded CFG and partial method lifting. Unsupported instructions stay explicit; this is not an ART execution model.",
+      "source": "app/src/main/cpp/mint/ir/lifter_dalvik.cpp",
+      "suites": [],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "dalvik_c": {
+      "status": "experimental",
+      "limits": "SSA/pseudo-C through the partial Dalvik lifter. Decompile report explicitly marks the Dalvik path partial.",
+      "source": "app/src/main/cpp/mint/session.cpp",
+      "suites": [],
+      "release_observation": "Suite listed for qualification; no per-cell 0.6 result asserted."
+    },
+    "dalvik_none": {
+      "status": "unsupported",
+      "limits": "No supported DEX/APK interpreter, typed native ABI, assembler or patch export, native debug import, or mapped external debugger workflow.",
+      "source": "app/src/main/cpp/mint/session.cpp",
+      "suites": [],
+      "release_observation": "No release qualification."
+    },
+    "unsupported_tuple": {
+      "status": "unsupported",
+      "limits": "Unsupported format/ISA/byte-order combination. Refuse the input or require an explicitly supported loader/mapping.",
+      "source": "app/src/main/cpp/mint/loader/elf_image.cpp",
+      "suites": [
+        "native_loaders"
+      ],
+      "release_observation": "No release qualification."
+    },
+    "elf64_rv_load": {
+      "status": "experimental",
+      "limits": "Little-endian ELF64/RISC-V executables and shared libraries. Storage and analysis support depend on the ABI flags and ISA operations.",
+      "source": "app/src/main/cpp/mint/loader/elf_image.cpp",
+      "suites": [
+        "native_compiler_corpus",
+        "riscv_calling_conventions",
+        "riscv_abi_compiler_corpus"
+      ],
+      "release_observation": "Compiler corpus available; no per-cell 0.6 result asserted."
+    }
+  },
+  "profiles": [
+    {
+      "id": "elf64-a64-le",
+      "format": "ELF64",
+      "target_isa": "aarch64",
+      "byte_order": "little",
+      "target_abis": [
+        "aapcs64"
+      ],
+      "scope": "candidate_1_0",
+      "operations": {
+        "load": "elf64_load",
+        "listing": "native_listing",
+        "cfg": "cfg_a64",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "aapcs64",
+        "debug_import": "dwarf_import"
+      }
+    },
+    {
+      "id": "elf64-x64",
+      "format": "ELF64",
+      "target_isa": "x86-64",
+      "byte_order": "little",
+      "target_abis": [
+        "sysv64"
+      ],
+      "scope": "candidate_1_0",
+      "operations": {
+        "load": "elf64_load",
+        "listing": "native_listing",
+        "cfg": "cfg_x64",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "sysv64",
+        "debug_import": "dwarf_import"
+      }
+    },
+    {
+      "id": "elf64-a64-be",
+      "format": "ELF64",
+      "target_isa": "aarch64",
+      "byte_order": "big",
+      "target_abis": [
+        "aapcs64"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "elf64_be_load",
+        "listing": "native_listing",
+        "cfg": "cfg_a64",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug_be",
+        "typed_abi_storage": "aapcs64",
+        "debug_import": "dwarf_import_be"
+      }
+    },
+    {
+      "id": "elf32-arm-base",
+      "format": "ELF32",
+      "target_isa": "arm",
+      "byte_order": "little",
+      "target_abis": [
+        "aapcs32"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "elf32_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_arm",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "aapcs32",
+        "debug_import": "dwarf_import"
+      }
+    },
+    {
+      "id": "elf32-arm-vfp",
+      "format": "ELF32",
+      "target_isa": "arm",
+      "byte_order": "little",
+      "target_abis": [
+        "aapcs32-vfp"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "elf32_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_arm",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "aapcs32_vfp",
+        "debug_import": "dwarf_import"
+      }
+    },
+    {
+      "id": "elf32-thumb-base",
+      "format": "ELF32",
+      "target_isa": "thumb",
+      "byte_order": "little",
+      "target_abis": [
+        "aapcs32"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "elf32_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_arm",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "aapcs32",
+        "debug_import": "dwarf_import"
+      }
+    },
+    {
+      "id": "elf32-thumb-vfp",
+      "format": "ELF32",
+      "target_isa": "thumb",
+      "byte_order": "little",
+      "target_abis": [
+        "aapcs32-vfp"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "elf32_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_arm",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "aapcs32_vfp",
+        "debug_import": "dwarf_import"
+      }
+    },
+    {
+      "id": "elf32-x86",
+      "format": "ELF32",
+      "target_isa": "x86-32",
+      "byte_order": "little",
+      "target_abis": [
+        "cdecl32"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "elf32_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "cdecl_stdcall",
+        "debug_import": "dwarf_import"
+      }
+    },
+    {
+      "id": "elf32-riscv32",
+      "format": "ELF32",
+      "target_isa": "riscv32",
+      "byte_order": "little",
+      "target_abis": [
+        "riscv32",
+        "riscv32f",
+        "riscv32d"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "elf32_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_rv",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "riscv_abi",
+        "debug_import": "dwarf_import"
+      }
+    },
+    {
+      "id": "elf32-riscv32-eq",
+      "format": "ELF32",
+      "target_isa": "riscv32",
+      "byte_order": "little",
+      "target_abis": [
+        "riscv32e",
+        "riscv32q"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "elf32_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_rv",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "riscv_eq",
+        "debug_import": "dwarf_import"
+      }
+    },
+    {
+      "id": "elf64-riscv64",
+      "format": "ELF64",
+      "target_isa": "riscv64",
+      "byte_order": "little",
+      "target_abis": [
+        "riscv64",
+        "riscv64f",
+        "riscv64d"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "elf64_rv_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_rv",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "riscv_abi",
+        "debug_import": "dwarf_import"
+      }
+    },
+    {
+      "id": "elf64-riscv64-eq",
+      "format": "ELF64",
+      "target_isa": "riscv64",
+      "byte_order": "little",
+      "target_abis": [
+        "riscv64e",
+        "riscv64q"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "elf64_rv_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_rv",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "riscv_eq",
+        "debug_import": "dwarf_import"
+      }
+    },
+    {
+      "id": "pe32-x86",
+      "format": "PE32",
+      "target_isa": "x86-32",
+      "byte_order": "little",
+      "target_abis": [
+        "cdecl32",
+        "stdcall32"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "pe32_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "cdecl_stdcall",
+        "debug_import": "pdb_import"
+      }
+    },
+    {
+      "id": "pe32plus-x64",
+      "format": "PE32+",
+      "target_isa": "x86-64",
+      "byte_order": "little",
+      "target_abis": [
+        "windows64"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "pe64_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "windows64",
+        "debug_import": "pdb_import"
+      }
+    },
+    {
+      "id": "pe32plus-a64",
+      "format": "PE32+",
+      "target_isa": "aarch64",
+      "byte_order": "little",
+      "target_abis": [
+        "windows-arm64"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "pe64_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "windows_arm64",
+        "debug_import": "pdb_import"
+      }
+    },
+    {
+      "id": "macho64-aarch64",
+      "format": "Mach-O64",
+      "target_isa": "aarch64",
+      "byte_order": "little",
+      "target_abis": [
+        "darwin-arm64"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "macho_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "mach_arm_abi",
+        "debug_import": "macho_debug"
+      }
+    },
+    {
+      "id": "macho-fat-aarch64",
+      "format": "Mach-O-universal",
+      "target_isa": "aarch64",
+      "byte_order": "little",
+      "target_abis": [
+        "darwin-arm64"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "macho_fat_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "macho_fat_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "mach_arm_abi",
+        "debug_import": "macho_debug"
+      }
+    },
+    {
+      "id": "macho64-x86-64",
+      "format": "Mach-O64",
+      "target_isa": "x86-64",
+      "byte_order": "little",
+      "target_abis": [
+        "darwin-x86-64"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "macho_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "mach_x86_abi",
+        "debug_import": "macho_debug"
+      }
+    },
+    {
+      "id": "macho-fat-x86-64",
+      "format": "Mach-O-universal",
+      "target_isa": "x86-64",
+      "byte_order": "little",
+      "target_abis": [
+        "darwin-x86-64"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "macho_fat_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "macho_fat_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "mach_x86_abi",
+        "debug_import": "macho_debug"
+      }
+    },
+    {
+      "id": "macho32-arm",
+      "format": "Mach-O32",
+      "target_isa": "arm",
+      "byte_order": "little",
+      "target_abis": [
+        "darwin-arm32"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "macho_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_arm",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "mach_arm_abi",
+        "debug_import": "macho_debug"
+      }
+    },
+    {
+      "id": "macho-fat-arm",
+      "format": "Mach-O-universal",
+      "target_isa": "arm",
+      "byte_order": "little",
+      "target_abis": [
+        "darwin-arm32"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "macho_fat_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_arm",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "macho_fat_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "mach_arm_abi",
+        "debug_import": "macho_debug"
+      }
+    },
+    {
+      "id": "macho32-x86-32",
+      "format": "Mach-O32",
+      "target_isa": "x86-32",
+      "byte_order": "little",
+      "target_abis": [
+        "darwin-x86-32"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "macho_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "mach_x86_abi",
+        "debug_import": "macho_debug"
+      }
+    },
+    {
+      "id": "macho-fat-x86-32",
+      "format": "Mach-O-universal",
+      "target_isa": "x86-32",
+      "byte_order": "little",
+      "target_abis": [
+        "darwin-x86-32"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "macho_fat_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "macho_fat_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "mach_x86_abi",
+        "debug_import": "macho_debug"
+      }
+    },
+    {
+      "id": "raw-a64-le",
+      "format": "raw",
+      "target_isa": "aarch64",
+      "byte_order": "little",
+      "target_abis": [
+        "aapcs64"
+      ],
+      "scope": "candidate_1_0",
+      "operations": {
+        "load": "raw_load",
+        "listing": "native_listing",
+        "cfg": "cfg_a64",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "aapcs64",
+        "debug_import": "debug_raw"
+      }
+    },
+    {
+      "id": "raw-a64-be",
+      "format": "raw",
+      "target_isa": "aarch64",
+      "byte_order": "big",
+      "target_abis": [
+        "aapcs64"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "raw_be_load",
+        "listing": "native_listing",
+        "cfg": "cfg_a64",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug_be",
+        "typed_abi_storage": "aapcs64",
+        "debug_import": "debug_raw"
+      }
+    },
+    {
+      "id": "raw-x64",
+      "format": "raw",
+      "target_isa": "x86-64",
+      "byte_order": "little",
+      "target_abis": [
+        "sysv64"
+      ],
+      "scope": "candidate_1_0",
+      "operations": {
+        "load": "raw_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "sysv64",
+        "debug_import": "debug_raw"
+      }
+    },
+    {
+      "id": "raw-x64-win",
+      "format": "raw",
+      "target_isa": "x86-64",
+      "byte_order": "little",
+      "target_abis": [
+        "windows64"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "raw_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "windows64",
+        "debug_import": "debug_raw"
+      }
+    },
+    {
+      "id": "raw-x86",
+      "format": "raw",
+      "target_isa": "x86-32",
+      "byte_order": "little",
+      "target_abis": [
+        "cdecl32",
+        "stdcall32"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "raw_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "native_lift",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "cdecl_stdcall",
+        "debug_import": "debug_raw"
+      }
+    },
+    {
+      "id": "raw-arm",
+      "format": "raw",
+      "target_isa": "arm",
+      "byte_order": "little",
+      "target_abis": [
+        "aapcs32"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "raw_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_arm",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "aapcs32",
+        "debug_import": "debug_raw"
+      }
+    },
+    {
+      "id": "raw-arm-vfp",
+      "format": "raw",
+      "target_isa": "arm",
+      "byte_order": "little",
+      "target_abis": [
+        "aapcs32-vfp"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "raw_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_arm",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "aapcs32_vfp",
+        "debug_import": "debug_raw"
+      }
+    },
+    {
+      "id": "raw-thumb",
+      "format": "raw",
+      "target_isa": "thumb",
+      "byte_order": "little",
+      "target_abis": [
+        "aapcs32"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "raw_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_arm",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "aapcs32",
+        "debug_import": "debug_raw"
+      }
+    },
+    {
+      "id": "raw-thumb-vfp",
+      "format": "raw",
+      "target_isa": "thumb",
+      "byte_order": "little",
+      "target_abis": [
+        "aapcs32-vfp"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "raw_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_arm",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "aapcs32_vfp",
+        "debug_import": "debug_raw"
+      }
+    },
+    {
+      "id": "raw-riscv32",
+      "format": "raw",
+      "target_isa": "riscv32",
+      "byte_order": "little",
+      "target_abis": [
+        "riscv32",
+        "riscv32f",
+        "riscv32d"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "raw_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_rv",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "riscv_abi",
+        "debug_import": "debug_raw"
+      }
+    },
+    {
+      "id": "raw-riscv64",
+      "format": "raw",
+      "target_isa": "riscv64",
+      "byte_order": "little",
+      "target_abis": [
+        "riscv64",
+        "riscv64f",
+        "riscv64d"
+      ],
+      "scope": "secondary",
+      "operations": {
+        "load": "raw_load",
+        "listing": "native_listing",
+        "cfg": "native_cfg",
+        "lift": "lift_rv",
+        "decompile": "native_c",
+        "interpreter": "native_ir_execution",
+        "assembler": "native_assembler",
+        "patch_export": "native_patch",
+        "external_debug": "native_debug",
+        "typed_abi_storage": "riscv_abi",
+        "debug_import": "debug_raw"
+      }
+    },
+    {
+      "id": "dex-dalvik",
+      "format": "DEX",
+      "target_isa": "dalvik",
+      "byte_order": "little",
+      "target_abis": [
+        "dalvik-managed"
+      ],
+      "scope": "outside_1_0",
+      "operations": {
+        "load": "dalvik_load",
+        "listing": "dalvik_list",
+        "cfg": "dalvik_flow",
+        "lift": "dalvik_flow",
+        "decompile": "dalvik_c",
+        "interpreter": "dalvik_none",
+        "typed_abi_storage": "dalvik_none",
+        "assembler": "dalvik_none",
+        "patch_export": "dalvik_none",
+        "debug_import": "dalvik_none",
+        "external_debug": "dalvik_none"
+      }
+    },
+    {
+      "id": "apk-dalvik",
+      "format": "APK",
+      "target_isa": "dalvik",
+      "byte_order": "little",
+      "target_abis": [
+        "dalvik-managed"
+      ],
+      "scope": "outside_1_0",
+      "operations": {
+        "load": "apk_load",
+        "listing": "dalvik_list",
+        "cfg": "dalvik_flow",
+        "lift": "dalvik_flow",
+        "decompile": "dalvik_c",
+        "interpreter": "dalvik_none",
+        "typed_abi_storage": "dalvik_none",
+        "assembler": "dalvik_none",
+        "patch_export": "dalvik_none",
+        "debug_import": "dalvik_none",
+        "external_debug": "dalvik_none"
+      }
+    }
+  ],
+  "explicit_loader_exclusions": [
+    {
+      "format": "ELF32",
+      "byte_order": "big",
+      "target_isa": "all",
+      "reason": "Unsupported by the ELF32 loader."
+    },
+    {
+      "format": "ELF64",
+      "byte_order": "big",
+      "target_isa": "other than aarch64",
+      "reason": "The big-endian ELF64 implementation requires AArch64."
+    },
+    {
+      "format": "PE32",
+      "byte_order": "little",
+      "target_isa": "arm/thumb",
+      "reason": "PE32 requires i386 machine."
+    },
+    {
+      "format": "Mach-O thin or universal inner slice",
+      "byte_order": "big",
+      "target_isa": "all",
+      "reason": "Big-endian slices are rejected even when the outer universal table is accepted."
+    },
+    {
+      "format": "raw",
+      "byte_order": "big",
+      "target_isa": "other than aarch64",
+      "reason": "Raw big-endian data requires AArch64."
+    }
+  ],
+  "default_operation_capability": "unsupported_tuple",
+  "sources": [
+    "now-to-production-roadmap.md",
+    "README.md",
+    "app/hosttest/CMakeLists.txt",
+    "quality/corpus/manifest.json",
+    "playstore/release-notes-0.6.md"
+  ]
+}

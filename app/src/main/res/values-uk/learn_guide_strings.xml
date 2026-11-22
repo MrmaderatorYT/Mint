@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="lesson_workspace_reference">Що показує кожна вкладка?</string>
+    <string name="lesson_guide">Підказки до уроку</string>
+    <string name="lesson_step">Крок %1$d із %2$d</string>
+    <string name="lesson_previous">Назад</string>
+    <string name="lesson_next">Далі</string>
+    <string name="lesson_show_panel">Показати %1$s</string>
+    <string name="lesson_check_patch">Перевірити патч</string>
+    <string name="lesson_patch_success">Інструкція відповідає завданню.</string>
+    <string name="lesson_patch_missing">Потрібної зміни ще немає. Відкрийте редактор патча й застосуйте заміну з підказки.</string>
+    <string name="lesson_choose_answer">Оберіть відповідь</string>
+    <string name="lesson_catalog_progress">Пройдено уроків: %1$d із %2$d</string>
+    <string name="lesson_catalog_intro">Бінарний файл містить інструкції й дані. У цих уроках ви навчитеся читати їх у Mint. У кожному тренувальному проєкті відкрийте підказки до уроку, щоб пройти пояснення, відповісти на запитання й виконати вправу.</string>
+    <string name="lesson_guide_unavailable">Підказки для цього прикладу недоступні. Відкрийте його з розділу «Навчання» ще раз.</string>
+    <string name="lesson_completed">Пройдено</string>
+    <string name="lesson_practice_title">Спробуйте самі</string>
+    <string name="lesson_open_patch">Відкрити редактор патча</string>
+    <string name="lesson_back_to_catalog">Назад до уроків</string>
+    <string name="lesson_continue_hint">Відкрийте підказки до уроку ще раз, щоб продовжити.</string>
+    <string name="lesson_show_references">Показати посилання на текст</string>
+
+    <string name="lesson_arithmetic_title">Прочитайте першу функцію</string>
+    <string name="lesson_arithmetic_summary">Простежте, як функція обчислює результат. Змініть одну інструкцію й порівняйте код.</string>
+    <string name="lesson_arithmetic_first">У Disasm видно машинні інструкції в порядку адрес. Регістр зберігає число всередині процесора. У scale_score регістр w0 спочатку містить вхідне число. lsl зсуває його біти на одну позицію вліво й подвоює число в межах 32 бітів. add додає 3. ret повертає керування, а результат лишається в w0.</string>
+    <string name="lesson_arithmetic_second">Pseudo-C показує, як інструкції можна виразити кодом, схожим на C. Простежте шлях від вхідного числа через зсув і додавання до результату. Замість назв регістрів можуть з’явитися змінні.</string>
+    <string name="lesson_arithmetic_third">Базовий блок — це послідовність інструкцій з одним входом і без переходів посередині. На графі керування (CFG) блоки показані прямокутниками. Ця функція проходить один блок від зсуву до ret.</string>
+    <string name="lesson_arithmetic_exercise">Який результат повертає початкова функція scale_score для числа 4?</string>
+    <string name="lesson_arithmetic_hint">Патч замінює байти інструкції у тренувальній копії. Спробуйте змінити доданок із 3 на 5. Відкрийте редактор патча й введіть add w0, w0, #5. Перегляньте байти, застосуйте патч і порівняйте код.</string>
+    <string name="lesson_arithmetic_answer_a">7</string>
+    <string name="lesson_arithmetic_answer_b">11</string>
+    <string name="lesson_arithmetic_answer_c">8</string>
+    <string name="lesson_arithmetic_correct">Зсув подвоює 4 до 8. Додаємо 3 й отримуємо 11.</string>
+    <string name="lesson_arithmetic_wrong">Спочатку виконайте зсув. Потім додайте 3 до подвоєного числа.</string>
+
+    <string name="lesson_branch_title">Простежте розгалуження</string>
+    <string name="lesson_branch_summary">Прочитайте умову й подивіться, як вона утворює два шляхи.</string>
+    <string name="lesson_branch_first">cmp порівнює число в w0 із 8. b.lt переходить до блоку для рівня 1, якщо число менше. В іншому разі наступна інструкція починає блок для рівня 2.</string>
+    <string name="lesson_branch_second">У Pseudo-C знайдіть умову порівняння з 8. Простежте, що повертає кожен шлях. Порядок і вигляд умов можуть відрізнятися від асемблерного коду.</string>
+    <string name="lesson_branch_third">На графі керування є блок з умовою й два блоки повернення. Кожна стрілка веде до можливого наступного блоку. Одна відповідає числам менше 8, інша — числам від 8.</string>
+    <string name="lesson_branch_exercise">Який рівень початкова функція вибирає для числа 8?</string>
+    <string name="lesson_branch_hint">Спробуйте підняти поріг до 10. У редакторі патча введіть cmp w0, #10. Перегляньте й застосуйте патч, а потім перевірте зміну умови у вікні порівняння.</string>
+    <string name="lesson_branch_answer_a">Рівень 2</string>
+    <string name="lesson_branch_answer_b">Рівень 1</string>
+    <string name="lesson_branch_answer_c">Рівень 8</string>
+    <string name="lesson_branch_correct">8 дорівнює порогу, тому b.lt не переходить до іншого блоку. Функція повертає 2.</string>
+    <string name="lesson_branch_wrong">b.lt виконує перехід тільки для меншого числа. Порівняйте 8 з 8.</string>
+
+    <string name="lesson_records_title">Прочитайте й змініть дані в пам’яті</string>
+    <string name="lesson_records_summary">Дізнайтеся, на що вказує адреса та яка інструкція змінює пам’ять.</string>
+    <string name="lesson_records_first">x0 містить адресу пари 32-бітних чисел. ldp читає їх у w1 та w2. add додає ці значення. str записує результат на місце першого числа, а mov переносить його в регістр повернення w0.</string>
+    <string name="lesson_records_second">У Pseudo-C знайдіть два читання й один запис. Друге значення лежить на чотири байти далі, бо число займає 32 біти. Запис змінює перше значення.</string>
+    <string name="lesson_records_third">Граф показує один блок. У ньому читання відбуваються перед обчисленням. Далі запис змінює дані за переданою адресою, а ret завершує блок.</string>
+    <string name="lesson_records_exercise">Яка інструкція записує значення назад у пам’ять?</string>
+    <string name="lesson_records_hint">Спробуйте відняти друге число від першого. У редакторі патча введіть sub w1, w1, w2. Перегляньте й застосуйте патч. Запис і далі змінюватиме перше число.</string>
+    <string name="lesson_records_answer_a">ldp</string>
+    <string name="lesson_records_answer_b">add</string>
+    <string name="lesson_records_answer_c">str</string>
+    <string name="lesson_records_correct">str записує значення з регістра w1 за адресою в x0.</string>
+    <string name="lesson_records_wrong">Знайдіть інструкцію, яка копіює значення з регістра за адресою. ldp читає з пам’яті, а add змінює лише регістр.</string>
+
+    <string name="lesson_loop_title">Простежте цикл</string>
+    <string name="lesson_loop_summary">Простежте за лічильником і знайдіть стрілку, яка повертає виконання на ще один повтор.</string>
+    <string name="lesson_loop_first">repeat_add записує початкову суму 0 у w0 і лічильник 3 у w1. За кожен повтор сума зростає на 2, а лічильник зменшується на 1. b.ne переходить назад, доки лічильник не дорівнює нулю.</string>
+    <string name="lesson_loop_second">У Pseudo-C знайдіть дві змінні, які оновлюються на кожному повторі. Одна накопичує суму, друга рахує, скільки повторів залишилося. Функція повертає суму.</string>
+    <string name="lesson_loop_third">На графі простежте три частини. Перший блок задає початкові значення, тіло циклу їх змінює, останній блок повертає суму. Стрілка назад до тіла означає повторення.</string>
+    <string name="lesson_loop_exercise">Що повертає початкова функція після трьох повторів?</string>
+    <string name="lesson_loop_hint">Спробуйте п’ять повторів. У редакторі патча введіть mov w1, #5. Перегляньте й застосуйте зміну, а потім перевірте початкове значення лічильника.</string>
+    <string name="lesson_loop_answer_a">3</string>
+    <string name="lesson_loop_answer_b">6</string>
+    <string name="lesson_loop_answer_c">2</string>
+    <string name="lesson_loop_correct">Починаємо з 0 і тричі додаємо по 2. Отримуємо 6.</string>
+    <string name="lesson_loop_wrong">Почніть із 0. Щоразу додавайте 2 до суми, а повтори рахуйте окремо.</string>
+
+    <string name="lesson_calls_title">Простежте виклик функції</string>
+    <string name="lesson_calls_summary">Подивіться, як функція передає значення іншій функції й використовує її результат.</string>
+    <string name="lesson_calls_first">boost_score зберігає адресу, за якою має повернутися. bl викликає score_bonus із вхідним числом у w0. Допоміжна функція подвоює його й повертає в w0. Далі boost_score додає 1, відновлює збережений стан і повертається.</string>
+    <string name="lesson_calls_second">У Pseudo-C знайдіть виклик score_bonus і додавання після нього. Mint позначає цей результат як частковий, бо має обмежені відомості про вхідні дані й результат допоміжної функції. У Disasm перевірте, як обидві функції передають значення через w0.</string>
+    <string name="lesson_calls_third">Граф викликів показує зв’язки між цілими функціями. Простежте стрілку від boost_score до score_bonus. Перша функція здійснює виклик, друга отримує керування.</string>
+    <string name="lesson_calls_exercise">Що повертає початкова функція boost_score для числа 4?</string>
+    <string name="lesson_calls_hint">Спробуйте додавати 4 замість 1. У редакторі патча введіть add w0, w0, #4. Перегляньте й застосуйте патч. Виклик допоміжної функції зберігається.</string>
+    <string name="lesson_calls_answer_a">5</string>
+    <string name="lesson_calls_answer_b">8</string>
+    <string name="lesson_calls_answer_c">9</string>
+    <string name="lesson_calls_correct">score_bonus подвоює 4 до 8. Після виклику boost_score додає 1, тому результат — 9.</string>
+    <string name="lesson_calls_wrong">Спочатку обчисліть результат score_bonus. Потім виконайте додавання в boost_score.</string>
+
+    <string name="lesson_strings_title">Знайдіть текст і посилання на нього</string>
+    <string name="lesson_strings_summary">Знайдіть вбудований напис та інструкцію, яка використовує його адресу.</string>
+    <string name="lesson_strings_first">У label_address інструкція adr записує адресу напису в x0, а ret повертає цю адресу. Сам текст зберігається в іншій ділянці файла, відведеній для даних.</string>
+    <string name="lesson_strings_second">На вкладці Strings видно текст, який Mint розпізнав у байтах файла. Знайдіть Mint practice label. Адреса поруч показує, де починаються його байти.</string>
+    <string name="lesson_strings_third">Перехресне посилання зв’язує місце, де використано адресу, із цільовою адресою. Для цього напису знайдіть посилання від інструкції adr у label_address до адреси тексту.</string>
+    <string name="lesson_strings_exercise">Що повертає функція label_address?</string>
+    <string name="lesson_strings_hint">Знайдіть Mint practice label на вкладці Strings, а потім відкрийте посилання на текст. Адреса показує, звідки можна прочитати напис.</string>
+    <string name="lesson_strings_answer_a">Адресу напису</string>
+    <string name="lesson_strings_answer_b">Кількість літер</string>
+    <string name="lesson_strings_answer_c">Першу літеру</string>
+    <string name="lesson_strings_correct">adr обчислює адресу текстових байтів, а ret повертає її в x0.</string>
+    <string name="lesson_strings_wrong">Простежте x0 від adr до ret. Згадайте, де лежать байти самого тексту.</string>
+</resources>

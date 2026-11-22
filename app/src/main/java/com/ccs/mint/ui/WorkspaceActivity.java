@@ -1,6 +1,7 @@
 package com.ccs.mint.ui;
 
 import android.app.Activity;
+import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Typeface;
@@ -23,7 +24,7 @@ import android.widget.LinearLayout;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.IntentCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
@@ -61,7 +62,48 @@ import java.util.concurrent.ExecutorService;
  * sample data: a screen that renders a plausible function the engine never produced
  * is worse than an empty one, because nothing distinguishes it from a working tool.
  */
-public final class WorkspaceActivity extends AppCompatActivity {
+public final class WorkspaceActivity extends MintActivity {
+
+    private static final String ACTION_CLONE = "com.ccs.mint.action.CLONE_BINARY";
+    private static final String ACTION_LEARN = "com.ccs.mint.action.OPEN_LESSON";
+    private static final String ACTION_PROJECT = "com.ccs.mint.action.OPEN_PROJECT";
+    private static final String ACTION_IMPORT_OPTIONS = "com.ccs.mint.action.IMPORT_OPTIONS";
+    private static final String EXTRA_INPUT = "input_uri";
+    private static final String EXTRA_ID = "project_id";
+    private static final String STATE_PROJECT = "opened_project_id";
+
+    static Intent openFileIntent(Context context, Uri uri) {
+        return inputIntent(context, Intent.ACTION_VIEW, uri);
+    }
+
+    static Intent cloneFileIntent(Context context, Uri uri) {
+        return inputIntent(context, ACTION_CLONE, uri);
+    }
+
+    private static Intent inputIntent(Context context, String action, Uri uri) {
+        Intent intent = new Intent(context, WorkspaceActivity.class).setAction(action);
+        // Keep a file: URI inside this app; content: URIs carry their read grant.
+        if ("content".equals(uri.getScheme())) {
+            return intent.setData(uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        }
+        return intent.putExtra(EXTRA_INPUT, uri);
+    }
+
+    static Intent learnIntent(Context context, String exampleId) {
+        return new Intent(context, WorkspaceActivity.class).setAction(ACTION_LEARN).putExtra(EXTRA_ID, exampleId);
+    }
+
+    static Intent openProjectIntent(Context context, String projectId) {
+        return new Intent(context, WorkspaceActivity.class).setAction(ACTION_PROJECT).putExtra(EXTRA_ID, projectId);
+    }
+
+    static Intent resumeIntent(Context context) {
+        return openProjectIntent(context, WorkspaceViewModel.lastProjectId(context));
+    }
+
+    static Intent importOptionsIntent(Context context) {
+        return new Intent(context, WorkspaceActivity.class).setAction(ACTION_IMPORT_OPTIONS);
+    }
 
     private static final int PAGE = 512;
     private static final int LISTING_LIMIT = 4096;
@@ -78,6 +120,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private static final int PROJECT_OPEN_REQUEST = 10;
     private static final int DEBUG_IMPORT_REQUEST = 11;
     private static final int SANDBOX_PLUGIN_REQUEST = 12;
+    private static final int PSEUDO_C_EXPORT_REQUEST = 13;
+    private static final int REVIEWED_PATCH_EXPORT_REQUEST = 14;
     private com.ccs.mint.plugin.SandboxPluginClient sandboxPlugin;
     private boolean sandboxPreparing;
     private java.util.concurrent.atomic.AtomicBoolean sandboxCopyCancelled;
@@ -122,12 +166,18 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private View textScroll;
     private GraphView graph;
     private View cancel;
+    private View returnToWelcome;
+    private View learnGuideButton;
+    private LearnLesson lesson;
+    private LearnGuide learnGuide;
+    private boolean showGuideOnOpen;
     private TabLayout nav;
     private ViewGroup openChips;
     private View openScroll;
 
     private final LineAdapter adapter = new LineAdapter();
     private Highlighter highlighter;
+    private PatchDialogCode patchDialogCode;
     private androidx.appcompat.app.AlertDialog betaNotice;
     private int dimColour;
     private int pane = Pane.FUNCTIONS;
@@ -136,6 +186,23 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private NavigationHistory history;
     private SourceListing sourceListing;
     private SourceListing restoreSourceScroll;
+    private Long pseudoCAnchor;
+    private ListingOrigin reverseListing;
+    private android.os.Parcelable restoreListingScroll;
+
+    private static final class ListingOrigin {
+        final FunctionRow function;
+        final long address;
+        final SourceListing source;
+        final android.os.Parcelable scroll;
+
+        ListingOrigin(FunctionRow function, long address, SourceListing source, android.os.Parcelable scroll) {
+            this.function = function;
+            this.address = address;
+            this.source = source;
+            this.scroll = scroll;
+        }
+    }
 
     private static final class SourceListing {
         final long entry, previousAddress, start, end;
@@ -200,7 +267,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
             String rawArch = state.getString("pendingRawArch");
             if (rawArch != null) {
                 try{pendingRawImport = new RawImportConfig(rawArch,state.getLong("pendingRawBase"),state.getLong("pendingRawEntry"));}
-                catch(IllegalArgumentException e){main.post(()->{if(!isDestroyed())showProjectError("The pending raw import requires a decoder that is not loaded. Reload the trusted decoder plugin and select the raw mapping again.");});}
+                catch(IllegalArgumentException e){main.post(()->{if(!isDestroyed())showProjectError(getString(R.string.ws_decoder_pending));});}
             }
         }
         // Edge to edge, then pad the content back by hand. Without this the title is
@@ -208,6 +275,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         setContentView(R.layout.activity_workspace);
         highlighter = new Highlighter(this);
+        patchDialogCode = new PatchDialogCode(this, highlighter);
         dimColour = androidx.core.content.ContextCompat.getColor(
                 this, R.color.syn_address);
 
@@ -223,6 +291,9 @@ public final class WorkspaceActivity extends AppCompatActivity {
         textScroll = findViewById(R.id.text_scroll);
         graph = findViewById(R.id.graph);
         cancel = findViewById(R.id.cancel_analysis);
+        returnToWelcome = findViewById(R.id.return_to_welcome);
+        learnGuideButton = findViewById(R.id.learn_guide);
+        configureLesson(state == null);
         nav = findViewById(R.id.nav);
         openChips = findViewById(R.id.open_functions);
         openScroll = findViewById(R.id.open_scroll);
@@ -240,11 +311,15 @@ public final class WorkspaceActivity extends AppCompatActivity {
 
         findViewById(R.id.open).setOnClickListener(v -> pickFile());
         findViewById(R.id.open_another).setOnClickListener(v -> pickFile());
+        returnToWelcome.setOnClickListener(v -> returnToWelcome(false));
         findViewById(R.id.help).setOnClickListener(v -> WorkspaceHelp.show(this));
         findViewById(R.id.about).setOnClickListener(v -> showLicences());
         findViewById(R.id.project_actions).setOnClickListener(v -> showProjectActions());
         showBetaNoticeOnce();
-        findViewById(R.id.try_example).setOnClickListener(v -> openExample());
+        if (betaNotice != null) {
+            betaNotice.setOnDismissListener(dialog -> main.post(this::showInitialLessonGuide));
+        }
+        findViewById(R.id.try_example).setOnClickListener(v -> returnToWelcome(true));
         cancel.setOnClickListener(v -> {
             if(sandboxPlugin!=null)sandboxPlugin.close();
             else if(sandboxPreparing && sandboxCopyCancelled!=null)sandboxCopyCancelled.set(true);
@@ -279,44 +354,62 @@ public final class WorkspaceActivity extends AppCompatActivity {
 
         model.state().observe(this, current -> {
             busy(current.phase == WorkspaceViewModel.Phase.OPENING);
-            if (current.phase == WorkspaceViewModel.Phase.OPENING) {
-                // A recreated Activity starts from the XML's empty state. The
-                // ViewModel may still be analysing the same descriptor, so restore
-                // the workspace shell while the determinate progress bar runs.
+            if (current.phase != WorkspaceViewModel.Phase.EMPTY) {
+                // Restore the shell for a pending open, results, or a failure log.
                 empty.setVisibility(View.GONE);
                 content.setVisibility(View.VISIBLE);
-            } else if (current.phase == WorkspaceViewModel.Phase.READY) {
+            }
+            if (current.phase == WorkspaceViewModel.Phase.READY) {
                 session = model.session();
                 onOpened(current.name);
             } else if (current.phase == WorkspaceViewModel.Phase.FAILED) {
-                appendLog("failed: " + current.message);
+                appendLog(getString(R.string.ws_open_failed, current.message));
                 selectPane(Pane.LOG);
             } else if (current.phase == WorkspaceViewModel.Phase.CANCELED) {
-                appendLog(current.message == null ? "analysis cancelled" : current.message);
+                appendLog(current.message == null ? getString(R.string.ws_analysis_cancelled) : current.message);
                 if (session == null) selectPane(Pane.LOG);
             }
         });
 
-        handleViewIntent(getIntent());
-        if (getIntent() == null || !Intent.ACTION_VIEW.equals(getIntent().getAction())) model.restoreLast(this);
+        if (model.claimInitialLaunch()) {
+            String savedProject = state == null ? null : state.getString(STATE_PROJECT);
+            if (savedProject != null) model.openSavedProject(this, savedProject);
+            else handleLaunchIntent(getIntent(), state == null);
+        }
     }
 
-    @Override
-    protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        setIntent(intent);
-        handleViewIntent(intent);
-    }
-
-    /** Opens the file another app handed over, when launched that way. */
-    private void handleViewIntent(@Nullable Intent intent) {
-        if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction())) return;
-        Uri uri = intent.getData();
-        if (uri != null && model.claimViewIntent(uri)) open(uri);
+    private void handleLaunchIntent(@Nullable Intent intent, boolean newActivity) {
+        if (intent == null || intent.getAction() == null) return;
+        switch (intent.getAction()) {
+            case Intent.ACTION_VIEW:
+            case ACTION_CLONE:
+                Uri uri = intent.getData();
+                if (uri == null) uri = IntentCompat.getParcelableExtra(intent, EXTRA_INPUT, Uri.class);
+                if (uri == null) return;
+                if (ACTION_CLONE.equals(intent.getAction())) {
+                    resetOpeningView(uri);
+                    model.openClone(this, uri);
+                } else open(uri, null);
+                break;
+            case ACTION_PROJECT:
+                String id = intent.getStringExtra(EXTRA_ID);
+                if (id != null) model.openSavedProject(this, id);
+                break;
+            case ACTION_LEARN:
+                if (lesson != null) model.openLesson(this, lesson.id, lesson.asset);
+                break;
+            case ACTION_IMPORT_OPTIONS:
+                if (newActivity) pickFile();
+                break;
+            default:
+                break;
+        }
     }
 
     @Override
     protected void onDestroy() {
+        showGuideOnOpen = false;
+        if (learnGuide != null) learnGuide.dismiss();
         if (betaNotice != null && betaNotice.isShowing()) betaNotice.dismiss();
         betaNotice = null;
         super.onDestroy();
@@ -331,44 +424,99 @@ public final class WorkspaceActivity extends AppCompatActivity {
         out.putInt("pane", pane);
         out.putLong("selected", selected == null ? -1 : selected.entry);
         out.putLong("listing", listingAddress);
+        out.putString(STATE_PROJECT, model.openedProjectId());
         if(pendingRawImport!=null){out.putString("pendingRawArch",pendingRawImport.architecture);out.putLong("pendingRawBase",pendingRawImport.baseAddress);out.putLong("pendingRawEntry",pendingRawImport.entryAddress);}
         model.rememberWorkspace(selected == null ? -1 : selected.entry, listingAddress, pane);
         super.onSaveInstanceState(out);
     }
 
-    /**
-     * Copies the bundled example out of the APK and opens it.
-     *
-     * <p>Copied rather than read in place because the engine maps the file, and an
-     * asset inside the APK is not a standalone mappable file. Written once and
-     * reused, so a second visit costs nothing.
-     */
-    private void openExample() {
-        busy(true);
-        worker.execute(() -> {
-            java.io.File target = new java.io.File(getFilesDir(), "libmintdemo.so");
-            String failure = null;
-            if (!target.exists() || target.length() == 0) {
-                try (java.io.InputStream in = getAssets().open("libmintdemo.so");
-                     java.io.OutputStream out = new java.io.FileOutputStream(target)) {
-                    byte[] chunk = new byte[16384];
-                    int read;
-                    while ((read = in.read(chunk)) > 0) out.write(chunk, 0, read);
-                } catch (java.io.IOException e) {
-                    failure = String.valueOf(e.getMessage());
+    private void returnToWelcome(boolean learn) {
+        Intent intent = learn ? WelcomeActivity.learnCatalogIntent(this) : new Intent(this, WelcomeActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        startActivity(intent);
+        finish();
+    }
+
+    private void configureLesson(boolean firstOpen) {
+        Intent launch = getIntent();
+        if (launch == null || !ACTION_LEARN.equals(launch.getAction())) return;
+        lesson = LearnLesson.find(launch.getStringExtra(EXTRA_ID));
+        if (lesson == null) return;
+        showGuideOnOpen = firstOpen && !lesson.isComplete(LearnLesson.progress(this));
+        learnGuide = new LearnGuide(this, lesson, new LearnGuide.Workspace() {
+            @Override public void inspect(int step) {
+                if (!isLessonActive()) return;
+                switch (step) {
+                    case 0:
+                        jumpTo(lesson.entry, Pane.DISASM);
+                        break;
+                    case 1:
+                        jumpTo(lesson.entry, lesson == LearnLesson.STRINGS ? Pane.STRINGS : Pane.C);
+                        break;
+                    case 2:
+                        if (lesson == LearnLesson.STRINGS) {
+                            showReferences(LearnLesson.PRACTICE_LABEL_ADDRESS);
+                        } else if (lesson == LearnLesson.CALLS) {
+                            clearSelection();
+                            if (pane != Pane.GRAPH) selectPane(Pane.GRAPH);
+                        } else {
+                            jumpTo(lesson.entry, Pane.GRAPH);
+                        }
+                        break;
+                    default:
+                        break;
                 }
             }
-            final String error = failure;
-            main.post(() -> {
-                busy(false);
-                if (error != null) {
-                    appendLog("could not unpack the example: " + error);
-                    selectPane(Pane.LOG);
+
+            @Override public void openPatchEditor() {
+                if (!isLessonActive() || lesson.expectedPatch == null) return;
+                jumpTo(lesson.patchAddress, Pane.DISASM);
+                promptAssembly(lesson.patchAddress);
+            }
+
+            @Override public void checkPatch(java.util.function.Consumer<Boolean> result) {
+                if (!isLessonActive() || lesson.expectedPatch == null) {
+                    result.accept(null);
                     return;
                 }
-                open(Uri.fromFile(target));
-            });
+                MintSession active = session;
+                worker.execute(() -> {
+                    Boolean matches;
+                    try {
+                        matches = lesson.expectedPatch.equals(active.patchReviewBytes(lesson.patchAddress, 4));
+                    } catch (RuntimeException error) {
+                        matches = null;
+                    }
+                    Boolean checked = matches;
+                    main.post(() -> {
+                        if (!isFinishing() && !isDestroyed()) {
+                            result.accept(active == session && isLessonActive() ? checked : null);
+                        }
+                    });
+                });
+            }
+
+            @Override public void returnToCatalog() {
+                returnToWelcome(true);
+            }
         });
+        learnGuideButton.setOnClickListener(view -> {
+            if (isLessonActive()) learnGuide.show();
+        });
+    }
+
+    private boolean isLessonActive() {
+        java.io.File binary = model.binaryFile();
+        return lesson != null && session != null && session == model.session() && binary != null
+                && ProjectStore.lessonProjectId(lesson.id).equals(binary.getParentFile().getName());
+    }
+
+    private void showInitialLessonGuide() {
+        if (!showGuideOnOpen || isFinishing() || isDestroyed() || !isLessonActive()
+                || learnGuideButton.getVisibility() != View.VISIBLE
+                || (betaNotice != null && betaNotice.isShowing())) return;
+        showGuideOnOpen = false;
+        learnGuide.show();
     }
 
     private static final String FEEDBACK_EMAIL = "cybercraftstudiopro@gmail.com";
@@ -472,12 +620,12 @@ public final class WorkspaceActivity extends AppCompatActivity {
     // ------------------------------------------------------------------ opening
 
     private void pickFile() {
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Import binary")
-                .setItems(new String[]{"Auto-detect native ELF / PE / Mach-O", "Raw binary — built-in or loaded plugin decoder", "Restore Mint project archive", "Mach-O — select CPU slice explicitly"},(d,which) -> {
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_import_title)
+                .setItems(new String[]{getString(R.string.ws_import_auto), getString(R.string.ws_import_raw), getString(R.string.ws_import_archive), getString(R.string.ws_import_macho)},(d,which) -> {
                     if(which==0){pendingRawImport=null;launchFilePicker();}
                     else if(which==1)promptRawImport();
                     else if(which==2)pickDocument(PROJECT_OPEN_REQUEST);
-                    else new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Mach-O architecture").setItems(new String[]{"AArch64", "x86-64", "x86-32", "ARM"},(dialog,index)->{
+                    else new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_macho_arch).setItems(new String[]{"AArch64", "x86-64", "x86-32", "ARM"},(dialog,index)->{
                         pendingRawImport=RawImportConfig.machOSlice(new String[]{"aarch64","x86-64","x86-32","arm"}[index]);launchFilePicker();
                     }).show();
                 }).show();
@@ -486,21 +634,21 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private void promptRawImport() {
         final com.ccs.mint.core.RawArchitecture[] architectures;
         try { architectures = MintSession.rawArchitectures(); RawImportConfig.installArchitectures(architectures); }
-        catch (RuntimeException | LinkageError error) { showProjectError("Cannot read decoder registry: " + error.getMessage()); return; }
+        catch (RuntimeException | LinkageError error) { showProjectError(getString(R.string.ws_decoder_error, error.getMessage())); return; }
         final String[] labels = new String[architectures.length];
         for (int i = 0; i < labels.length; ++i) labels[i] = architectures[i].name + " — " + (architectures[i].pointerSize * 8) + "-bit" +
                 (architectures[i].numericId >= 128 ? (architectures[i].hasLifter?" (plugin decoder + semantic lifter)":" (plugin decoder; no lifter)") : "");
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Raw architecture")
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_raw_arch)
                 .setItems(labels,(d,which) -> {
                     LinearLayout form=new LinearLayout(this);form.setOrientation(LinearLayout.VERTICAL);
                     EditText base=new EditText(this),entry=new EditText(this);
-                    base.setHint("Base address (hex)");base.setText("0x1000");entry.setHint("Entry address (hex)");entry.setText("0x1000");form.addView(base);form.addView(entry);
-                    android.widget.CheckBox bigEndian=new android.widget.CheckBox(this);bigEndian.setText("Big-endian data");bigEndian.setVisibility(architectures[which].id.equals("aarch64")?android.view.View.VISIBLE:android.view.View.GONE);form.addView(bigEndian);
-                    new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Raw memory mapping").setView(form)
-                            .setPositiveButton("Choose file",(dialog,w) -> {
+                    base.setHint(R.string.ws_base_hex);base.setText("0x1000");entry.setHint(R.string.ws_entry_hex);entry.setText("0x1000");form.addView(base);form.addView(entry);
+                    android.widget.CheckBox bigEndian=new android.widget.CheckBox(this);bigEndian.setText(R.string.ws_big_endian);bigEndian.setVisibility(architectures[which].id.equals("aarch64")?android.view.View.VISIBLE:android.view.View.GONE);form.addView(bigEndian);
+                    new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_raw_mapping).setView(form)
+                            .setPositiveButton(R.string.ws_choose_file,(dialog,w) -> {
                                 try{pendingRawImport=RawImportConfig.fromHex(architectures[which].id+(bigEndian.isChecked()?":be":""),base.getText().toString(),entry.getText().toString());launchFilePicker();}
                                 catch(IllegalArgumentException e){showProjectError(e.getMessage());}
-                            }).setNegativeButton("Cancel",null).show();
+                            }).setNegativeButton(android.R.string.cancel,null).show();
                 }).show();
     }
 
@@ -520,6 +668,20 @@ public final class WorkspaceActivity extends AppCompatActivity {
             pendingRawImport=null;
         }
         if(request==EXPORT_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)exportPatchedTo(data.getData());
+        if (request == REVIEWED_PATCH_EXPORT_REQUEST) {
+            PatchReview review = model.pendingReviewedExport;
+            model.pendingReviewedExport = null;
+            if (result == Activity.RESULT_OK && data != null && data.getData() != null) {
+                if (review == null) showProjectError(getString(R.string.patch_review_expired));
+                else exportPatchedTo(data.getData(), review);
+            }
+        }
+        if (request == PSEUDO_C_EXPORT_REQUEST) {
+            final String report = model.pendingPseudoCExport;
+            model.pendingPseudoCExport = null;
+            if (result == Activity.RESULT_OK && data != null && data.getData() != null)
+                writePseudoCReport(data.getData(), report);
+        }
         if(request==SCRIPT_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)openScript(data.getData());
         if(request==COMPARISON_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)openComparison(data.getData());
         if(request==PLUGIN_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)openNativePlugin(data.getData());
@@ -534,9 +696,6 @@ public final class WorkspaceActivity extends AppCompatActivity {
         if(request==DEBUG_IMPORT_REQUEST && result==Activity.RESULT_OK && data!=null && data.getData()!=null)importExternalDebug(data.getData());
     }
 
-    private void open(@NonNull Uri uri) {
-        open(uri,null);
-    }
     private void open(@NonNull Uri uri,@Nullable RawImportConfig config) {
         resetOpeningView(uri);
         model.open(this, uri,config);
@@ -544,12 +703,15 @@ public final class WorkspaceActivity extends AppCompatActivity {
 
     private void resetOpeningView(@NonNull Uri uri) {
         ++viewGeneration;
+        learnGuideButton.setVisibility(View.GONE);
         sourceListing = null;
         restoreSourceScroll = null;
+        reverseListing = null;
+        restoreListingScroll = null;
         session = null;
         empty.setVisibility(View.GONE);
         content.setVisibility(View.VISIBLE);
-        appendLog("opening " + uri.getLastPathSegment());
+        appendLog(getString(R.string.ws_opening, uri.getLastPathSegment()));
         selected = null;
         pendingAddress = -1;
         functions.clear();
@@ -571,7 +733,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         // content=gone and no click has happened in this Activity instance.
         empty.setVisibility(View.GONE);
         content.setVisibility(View.VISIBLE);
-        title.setText(name == null ? "binary" : name.substring(name.lastIndexOf('/') + 1));
+        title.setText(name == null ? getString(R.string.ws_binary) : name.substring(name.lastIndexOf('/') + 1));
         appendLog(session.imageSummary());
         appendLog(session.warnings());
         loadFunctions();
@@ -606,7 +768,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     }
                 }
             } catch (RuntimeException e) {
-                error = "function list failed: " + e.getMessage();
+                error = getString(R.string.ws_functions_failed, e.getMessage());
             }
             final String failure = error;
             runOnUiThread(() -> {
@@ -628,6 +790,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 model.rememberSelection(selected==null?-1:selected.entry,listingAddress);
                 updateSelectionChip();
                 selectPane(pane);
+                learnGuideButton.setVisibility(isLessonActive() ? View.VISIBLE : View.GONE);
+                showInitialLessonGuide();
             });
         });
     }
@@ -690,8 +854,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
             chip.setOnCloseIconClickListener(v -> closeFunction(row));
             ((ChipGroup) openChips).addView(chip);
         }
-        subtitle.setText(functions.isEmpty() ? "" : String.format(Locale.US,
-                "%,d functions", functions.size()));
+        subtitle.setText(functions.isEmpty() ? "" : getResources().getQuantityString(R.plurals.ws_function_count, functions.size(), functions.size()));
     }
 
     /** Makes an already-open function the current one, keeping the pane. */
@@ -741,6 +904,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
         if (pane != Pane.DISASM || selected == null ||
                 (sourceListing != null && selected.entry != sourceListing.entry)) sourceListing = null;
         if (pane != Pane.C) restoreSourceScroll = null;
+        if (pane != Pane.C && (pane != Pane.DISASM || sourceListing == null)) reverseListing = null;
+        if (pane != Pane.DISASM) restoreListingScroll = null;
         if(session!=null)busy(false);
         final boolean isList = pane == Pane.FUNCTIONS || pane == Pane.DISASM;
         list.setVisibility(isList ? View.VISIBLE : View.GONE);
@@ -749,7 +914,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         filter.setVisibility(pane == Pane.FUNCTIONS ? View.VISIBLE : View.GONE);
 
         if (pane == Pane.LOG) {
-            text.setText(log.isEmpty() ? "Nothing logged yet." : log);
+            text.setText(log.isEmpty() ? getString(R.string.ws_log_empty) : log);
             return;
         }
         if (session == null) {
@@ -816,12 +981,12 @@ public final class WorkspaceActivity extends AppCompatActivity {
         List<Line> lines = new ArrayList<>(visible.size());
         for (FunctionRow row : visible) {
             lines.add(new Line(String.format(Locale.US, "%08x  %s", row.entry, row.label()),
-                    row.instructions + " insn", -1, row));
+                    getResources().getQuantityString(R.plurals.ws_instruction_count, row.instructions, row.instructions), -1, row));
         }
         adapter.submit(lines);
         subtitle.setText(query.isEmpty()
-                ? String.format(Locale.US, "%,d functions", functions.size())
-                : String.format(Locale.US, "%,d of %,d", visible.size(), functions.size()));
+                ? getResources().getQuantityString(R.plurals.ws_function_count, functions.size(), functions.size())
+                : getString(R.string.ws_function_filter, visible.size(), functions.size()));
     }
 
     /**
@@ -835,6 +1000,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
      */
     private void loadListing(@Nullable FunctionRow function) {
         busy(true);
+        final android.os.Parcelable scroll = restoreListingScroll;
+        restoreListingScroll = null;
         final MintSession active = session;
         final long requestGeneration = viewGeneration;
         final long start;
@@ -864,8 +1031,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
             try {
                 if (active == null) return;
                 if (range != null) {
-                    lines.add(new Line(String.format(Locale.US, "Pseudo-C source range [0x%x, 0x%x)",
-                            range.start, range.end), null, -1, null));
+                    lines.add(new Line(getString(R.string.ws_pseudo_source_range, range.start, range.end), null, -1, null));
                 }
                 long[] address = new long[LISTING_LIMIT];
                 int[] size = new int[LISTING_LIMIT];
@@ -904,11 +1070,9 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     cursor = last;
                 }
                 if (lines.size() >= cap) {
-                    lines.add(new Line(String.format(Locale.US,
-                            "listing stops after %,d instructions — open a function to see"
-                                    + " all of it", cap), null, -1, null));
+                    lines.add(new Line(getString(R.string.ws_listing_limit, cap), null, -1, null));
                 } else if (!complete) {
-                    lines.add(new Line("listing truncated: page safety limit reached", null,
+                    lines.add(new Line(getString(R.string.ws_listing_page_limit), null,
                             -1, null));
                 }
             } catch (RuntimeException e) {
@@ -918,6 +1082,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 if (isFinishing() || isDestroyed() || active != session || requestGeneration != viewGeneration) return;
                 busy(false);
                 adapter.submit(lines);
+                if (scroll != null && list.getLayoutManager() != null)
+                    list.getLayoutManager().onRestoreInstanceState(scroll);
             });
         });
     }
@@ -935,10 +1101,10 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 if (active == null) throw new IllegalStateException("session is closed");
                 body = active.xrefs(function.entry);
             } catch (RuntimeException e) {
-                body = "xrefs failed: " + e.getMessage();
+                body = getString(R.string.ws_xrefs_failed, e.getMessage());
             }
             final CharSequence result = highlighter.code(
-                    body == null || body.isEmpty() ? "(nothing)" : body);
+                    body == null || body.isEmpty() ? getString(R.string.ws_no_output) : body);
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed() || active != session || requestGeneration != viewGeneration) return;
                 busy(false);
@@ -961,10 +1127,10 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 if (active == null) throw new IllegalStateException("session is closed");
                 body = active.strings(scope);
             } catch (RuntimeException e) {
-                body = "strings failed: " + e.getMessage();
+                body = getString(R.string.ws_strings_failed, e.getMessage());
             }
             final CharSequence result = highlighter.code(
-                    body == null || body.isEmpty() ? "(nothing)" : body);
+                    body == null || body.isEmpty() ? getString(R.string.ws_no_output) : body);
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed() || active != session || requestGeneration != viewGeneration) return;
                 busy(false);
@@ -1004,10 +1170,10 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     default: body = active.programCoverage(); break;
                 }
             } catch (RuntimeException e) {
-                body = report.name().toLowerCase(Locale.US) + " failed: " + e.getMessage();
+                body = getString(R.string.ws_general_report_failed, e.getMessage());
             }
             final CharSequence result = highlighter.code(
-                    body == null || body.isEmpty() ? "(nothing)" : body);
+                    body == null || body.isEmpty() ? getString(R.string.ws_no_output) : body);
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed() || active != session || requestGeneration != viewGeneration) return;
                 busy(false);
@@ -1051,7 +1217,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 }
                 dropped = capCallGraph(nodes);
             } catch (RuntimeException e) {
-                failure = "call graph failed: " + e.getMessage();
+                failure = getString(R.string.ws_calls_failed, e.getMessage());
             }
             final String error = failure;
             final int removed = dropped;
@@ -1060,9 +1226,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 busy(false);
                 appendLog(error);
                 if (removed > 0) {
-                    appendLog(String.format(Locale.US,
-                            "call graph capped at %,d functions; %,d with the fewest calls"
-                                    + " were left out", CALL_GRAPH_LIMIT, removed));
+                    appendLog(getString(R.string.ws_calls_limit, CALL_GRAPH_LIMIT, removed));
                 }
                 if (nodes.isEmpty() && error == null) {
                     appendLog(getString(R.string.call_graph_empty));
@@ -1133,7 +1297,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     nodes.add(node);
                 }
             } catch (RuntimeException e) {
-                graphError = "CFG failed: " + e.getMessage();
+                graphError = getString(R.string.ws_cfg_failed, e.getMessage());
             }
             final String failure = graphError;
             runOnUiThread(() -> {
@@ -1146,6 +1310,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
     }
 
     private void loadText(@NonNull FunctionRow function, boolean ir) {
+        final Long requestedAnchor = ir ? null : pseudoCAnchor;
+        pseudoCAnchor = null;
         busy(true);
         text.setText("");
         MintSession active = session;
@@ -1162,16 +1328,17 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     anchors = view[1];
                 }
             } catch (RuntimeException e) {
-                body = (ir ? "IR" : "decompilation") + " failed: " + e.getMessage();
+                body = getString(R.string.ws_decompile_failed, e.getMessage());
             }
             final CharSequence result = highlighter.code(
-                    body == null || body.isEmpty() ? "(empty)" : body);
+                    body == null || body.isEmpty() ? getString(R.string.ws_no_output) : body);
             final String sourceAnchors = anchors;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed() || active != session || requestGeneration != viewGeneration) return;
                 busy(false);
                 final CharSequence linked = linkedCode(result);
                 text.setText(ir ? linked : linkedSourceRanges(linked, sourceAnchors, function.entry));
+                if (requestedAnchor != null) revealPseudoCRanges(requestedAnchor, sourceAnchors, requestGeneration);
                 final SourceListing restore = restoreSourceScroll;
                 restoreSourceScroll = null;
                 if (!ir && restore != null && restore.entry == function.entry) {
@@ -1208,10 +1375,10 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 if (active == null) throw new IllegalStateException("session is closed");
                 body = active.writeMap(function.entry);
             } catch (RuntimeException e) {
-                body = "write map failed: " + e.getMessage();
+                body = getString(R.string.ws_writes_failed, e.getMessage());
             }
             final CharSequence result = highlighter.code(
-                    body == null || body.isEmpty() ? "(nothing)" : body);
+                    body == null || body.isEmpty() ? getString(R.string.ws_no_output) : body);
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed() || active != session || requestGeneration != viewGeneration) return;
                 busy(false);
@@ -1245,6 +1412,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
     }
     private void jumpTo(long address,int destinationPane) {
         sourceListing = null;
+        reverseListing = null;
         FunctionRow row = findFunction(address);
         if (row == null) {
             selected = null;
@@ -1276,6 +1444,20 @@ public final class WorkspaceActivity extends AppCompatActivity {
             selectPane(Pane.C);
             return true;
         }
+        if (pane == Pane.C && reverseListing != null) {
+            final ListingOrigin origin = reverseListing;
+            reverseListing = null;
+            selected = origin.function;
+            sourceListing = origin.source;
+            restoreListingScroll = origin.scroll;
+            listingAddress = origin.address;
+            pendingAddress = selected == null ? -1 : selected.entry;
+            if (selected != null && !openFunctions.contains(selected)) openFunctions.add(selected);
+            model.rememberSelection(pendingAddress, listingAddress);
+            updateSelectionChip();
+            selectPane(Pane.DISASM);
+            return true;
+        }
         if (history.canGoBack()) {
             jumpTo(history.back());
             return true;
@@ -1291,6 +1473,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
     }
 
     private void busy(boolean value) {
+        returnToWelcome.setEnabled(!value);
+        learnGuideButton.setEnabled(!value);
         if (value) {
             progress.setIndeterminate(false);
             progress.setMax(100);
@@ -1318,7 +1502,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         LinearLayout content = new LinearLayout(this);content.setOrientation(LinearLayout.VERTICAL);
         int padding = Math.round(16 * getResources().getDisplayMetrics().density);
         content.setPadding(padding,padding,padding,padding);
-        TextView title = new TextView(this);title.setText("Workspace tools");
+        TextView title = new TextView(this);title.setText(R.string.ws_tools);
         title.setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_HeadlineSmall);
         content.addView(title);
         final List<LinearLayout> sections = new ArrayList<>();
@@ -1328,14 +1512,14 @@ public final class WorkspaceActivity extends AppCompatActivity {
             items.setVisibility(View.GONE);sections.add(items);
             com.google.android.material.button.MaterialButton heading = new com.google.android.material.button.MaterialButton(this, null,
                     com.google.android.material.R.attr.materialButtonOutlinedStyle);
-            final String groupName=ProjectActions.GROUPS[group];
+            final String groupName=getString(ProjectActions.GROUPS[group]);
             heading.setText(groupName+"  ▾");heading.setAllCaps(false);
-            heading.setContentDescription(groupName);ViewCompat.setStateDescription(heading,"Collapsed");headings.add(heading);
+            heading.setContentDescription(groupName);ViewCompat.setStateDescription(heading,getString(R.string.help_collapsed));headings.add(heading);
             heading.setOnClickListener(view->{boolean expand=items.getVisibility()!=View.VISIBLE;
                 for(int index=0;index<sections.size();++index){sections.get(index).setVisibility(View.GONE);
-                    headings.get(index).setText(ProjectActions.GROUPS[index]+"  ▾");ViewCompat.setStateDescription(headings.get(index),"Collapsed");}
+                    headings.get(index).setText(getString(ProjectActions.GROUPS[index])+"  ▾");ViewCompat.setStateDescription(headings.get(index),getString(R.string.help_collapsed));}
                 items.setVisibility(expand?View.VISIBLE:View.GONE);
-                if(expand){heading.setText(groupName+"  ▴");ViewCompat.setStateDescription(heading,"Expanded");}});
+                if(expand){heading.setText(groupName+"  ▴");ViewCompat.setStateDescription(heading,getString(R.string.help_expanded));}});
             content.addView(heading,new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,ViewGroup.LayoutParams.WRAP_CONTENT));
             for(int action:ProjectActions.ITEMS[group]) {
                 com.google.android.material.button.MaterialButton button = new com.google.android.material.button.MaterialButton(new android.view.ContextThemeWrapper(this,
@@ -1353,38 +1537,39 @@ public final class WorkspaceActivity extends AppCompatActivity {
         if(session==null)return;
         if (which == 0) promptSearch();
         else if (which == 1) {
-            EditText input = new EditText(this); input.setHint("Hex address, e.g. 0x1000");
-            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Go to address").setView(input)
-                    .setPositiveButton("Go",(d,w) -> {
+            EditText input = new EditText(this); input.setHint(R.string.ws_go_to_hint);
+            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_go_to).setView(input)
+                    .setPositiveButton(R.string.ws_go,(d,w) -> {
                         try { jumpTo(Long.parseUnsignedLong(input.getText().toString().trim().replaceFirst("^(0x|0X)",""),16)); }
-                        catch (NumberFormatException e) { showProjectError("Invalid hexadecimal address"); }
-                    }).setNegativeButton("Cancel",null).show();
+                        catch (NumberFormatException e) { showProjectError(getString(R.string.ws_hex_error)); }
+                    }).setNegativeButton(android.R.string.cancel,null).show();
         } else if (which == 2) editAddress(listingAddress);
         else if (which == 3) showReferences(listingAddress);
         else if(which==4 || which==5) { MintSession active = session; mutateProject(() -> active.undoEdit(which == 5)); }
         else if(which==6)showMemoryBlocks();
         else if(which==7)showTypeManager();
-        else if(which==8)showReport("Function provenance",active -> active.provenance(listingAddress));
-        else if(which==9)showReport("C++ metadata",MintSession::cxxMetadata);
+        else if(which==8)showReport(getString(R.string.ws_provenance),active -> active.provenance(listingAddress));
+        else if(which==9)showReport(getString(R.string.ws_cxx),MintSession::cxxMetadata);
         else if(which==10){MintSession active=session;mutateProject(active::reanalyze);}
         else if(which==11){Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.setType("application/octet-stream");intent.addCategory(Intent.CATEGORY_OPENABLE);intent.putExtra(Intent.EXTRA_TITLE,"mint-patched.bin");startActivityForResult(intent,EXPORT_REQUEST);}
         else if(which==12 && history.canGoForward())jumpTo(history.forward());
-        else if(which==13)showReport("DWARF debug information",MintSession::debugInfo);
+        else if(which==13)showReport(getString(R.string.ws_dwarf_debug),MintSession::debugInfo);
         else if(which==14)promptAssembly(listingAddress);
         else if(which==15)promptScript("for _, f in ipairs(mint.functions()) do\n  print(f.entry, f.name, f.origin)\nend");
         else if(which==16){Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT);intent.setType("*/*");intent.addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(intent,SCRIPT_REQUEST);}
         else if(which==17)showVersionTracking();
         else if(which==18)showDebugger();
         else if(which==19)showNativePlugins();
-        else if(which==20)showReport("Call-graph prototype constraints",MintSession::interproceduralPrototypes);
+        else if(which==20)showReport(getString(R.string.ws_call_prototypes),MintSession::interproceduralPrototypes);
         else if(which==21) {
             Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.setType("application/zip");
             intent.addCategory(Intent.CATEGORY_OPENABLE);intent.putExtra(Intent.EXTRA_TITLE,"mint-project.mintproj");
             startActivityForResult(intent,PROJECT_SAVE_REQUEST);
         } else if(which==22)pickDocument(PROJECT_OPEN_REQUEST);
         else if(which==23)showLocalVariables();
-        else if(which==24){final long function=selected==null?listingAddress:selected.entry;showReport("Function ABI storage",s->s.abi(function));}
+        else if(which==24){final long function=selected==null?listingAddress:selected.entry;showReport(getString(R.string.ws_abi_storage),s->s.abi(function));}
         else if(which==25)pickDocument(DEBUG_IMPORT_REQUEST);
+        else if(which==26)preparePseudoCExport();
     }
 
     private void pickDocument(int request) {
@@ -1392,15 +1577,15 @@ public final class WorkspaceActivity extends AppCompatActivity {
     }
     private void importExternalDebug(Uri uri) {
         final MintSession active=session;if(active==null)return;
-        android.widget.CheckBox unverified=new android.widget.CheckBox(this);unverified.setText("Accept missing identity evidence (partial / unverified report)");
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Import external DWARF / PDB")
-                .setMessage("Choose matching ELF/DWO debug information or a Windows PDB7 file. Available build IDs, debuglink CRC, split-unit IDs or PDB GUID/age must match; a mismatch is always rejected. A private bounded copy survives reopening and is included in project backups. No referenced path is followed automatically. Unsupported records stay explicitly partial.")
-                .setView(unverified).setNegativeButton("Cancel",null).setPositiveButton("Import",(dialog,button)->{
+        android.widget.CheckBox unverified=new android.widget.CheckBox(this);unverified.setText(R.string.ws_debug_accept);
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_debug_import_title)
+                .setMessage(R.string.ws_debug_import_explanation)
+                .setView(unverified).setNegativeButton(android.R.string.cancel,null).setPositiveButton(R.string.ws_import,(dialog,button)->{
                     final boolean allow=unverified.isChecked();mutateProject(()->{java.io.File temporary=null;
                         try{temporary=java.io.File.createTempFile("mint-debug-",".bin",getCacheDir());
                             try(java.io.InputStream input=getContentResolver().openInputStream(uri);java.io.FileOutputStream output=new java.io.FileOutputStream(temporary)) {
-                                if(input==null)throw new java.io.IOException("Cannot open debug file");byte[] buffer=new byte[65536];long size=0;int count;
-                                while((count=input.read(buffer))!=-1){size+=count;if(size>ProjectArchive.MAX_DEBUG)throw new java.io.IOException("External debug file exceeds 128 MiB");output.write(buffer,0,count);}output.getFD().sync();
+                                if(input==null)throw new java.io.IOException(getString(R.string.ws_debug_open_failed));byte[] buffer=new byte[65536];long size=0;int count;
+                                while((count=input.read(buffer))!=-1){size+=count;if(size>ProjectArchive.MAX_DEBUG)throw new java.io.IOException(getString(R.string.ws_debug_size));output.write(buffer,0,count);}output.getFD().sync();
                             }
                             active.importDebug(temporary.getAbsolutePath(),allow);
                         }catch(java.io.IOException error){throw new IllegalStateException(error.getMessage(),error);}
@@ -1409,16 +1594,16 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 }).show();
     }
     private void showVersionTracking() {
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Binary diff / version tracking")
-                .setItems(new String[]{"Open comparison binary", "Function-level diff", "Confirm function pair", "Confirmed pairs", "Preview annotation transfer", "Apply transfer to comparison Program", "Save confirmed pairs", "Load confirmed pairs"},(d,which) -> {
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_tracking_title)
+                .setItems(new String[]{getString(R.string.ws_tracking_open), getString(R.string.ws_tracking_function_diff), getString(R.string.ws_tracking_confirm_pair), getString(R.string.ws_tracking_confirmed_pairs), getString(R.string.ws_tracking_transfer_preview), getString(R.string.ws_tracking_transfer_apply), getString(R.string.ws_tracking_save_pairs), getString(R.string.ws_tracking_load_pairs)},(d,which) -> {
                     if(which==0) {
-                        if(model.rawConfig()!=null)new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Explicit comparison interpretation")
-                                .setMessage(model.rawConfig().machOSlice?"The comparison Mach-O uses the same explicitly selected CPU slice. Addresses are read from the container.":"The comparison raw binary uses the same architecture, base and entry as this Program.")
-                                .setPositiveButton("Choose binary",(a,b)->pickDocument(COMPARISON_REQUEST)).setNegativeButton("Cancel",null).show();
+                        if(model.rawConfig()!=null)new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_tracking_format)
+                                .setMessage(model.rawConfig().machOSlice?getString(R.string.ws_tracking_macho):getString(R.string.ws_tracking_raw))
+                                .setPositiveButton(R.string.ws_choose_binary,(a,b)->pickDocument(COMPARISON_REQUEST)).setNegativeButton(android.R.string.cancel,null).show();
                         else pickDocument(COMPARISON_REQUEST);
-                    } else if(which==1)showReport("Semantic diff",active->active.comparison("diff",0,0,""));
+                    } else if(which==1)showReport(getString(R.string.ws_tracking_semantic_diff),active->active.comparison("diff",0,0,""));
                     else if(which==2)promptFunctionPair();
-                    else if(which==3)showReport("Confirmed function pairs",active->active.comparison("tracking",0,0,""));
+                    else if(which==3)showReport(getString(R.string.ws_tracking_confirmed_pairs),active->active.comparison("tracking",0,0,""));
                     else if(which==4)previewTransfer(false);
                     else if(which==5)previewTransfer(true);
                     else if(which==6){Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT);intent.setType("application/octet-stream");intent.addCategory(Intent.CATEGORY_OPENABLE);intent.putExtra(Intent.EXTRA_TITLE,"mint-version-tracking.minttracking");startActivityForResult(intent,TRACKING_SAVE_REQUEST);}
@@ -1433,20 +1618,20 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 if(save) {
                     active.comparison("save",0,0,temporary.getAbsolutePath());
                     try(java.io.InputStream input=new java.io.FileInputStream(temporary);java.io.OutputStream output=getContentResolver().openOutputStream(document,"wt")) {
-                        if(output==null)throw new java.io.IOException("Cannot open tracking destination");
+                        if(output==null)throw new java.io.IOException(getString(R.string.ws_tracking_open_destination));
                         byte[] buffer=new byte[8192];int count;while((count=input.read(buffer))!=-1)output.write(buffer,0,count);
                     }
-                    result="Confirmed pairs saved. Load them after opening these same source and comparison Programs; changed code or identities are rejected.";
+                    result=getString(R.string.ws_tracking_saved);
                 } else {
                     try(java.io.InputStream input=getContentResolver().openInputStream(document);java.io.FileOutputStream output=new java.io.FileOutputStream(temporary)) {
-                        if(input==null)throw new java.io.IOException("Cannot open tracking file");
-                        byte[] buffer=new byte[8192];int count;long size=0;while((count=input.read(buffer))!=-1){if((size+=count)>16*1024*1024)throw new java.io.IOException("Tracking file exceeds 16 MiB");output.write(buffer,0,count);}output.getFD().sync();
+                        if(input==null)throw new java.io.IOException(getString(R.string.ws_tracking_open_source));
+                        byte[] buffer=new byte[8192];int count;long size=0;while((count=input.read(buffer))!=-1){if((size+=count)>16*1024*1024)throw new java.io.IOException(getString(R.string.ws_tracking_size));output.write(buffer,0,count);}output.getFD().sync();
                     }
                     result=active.comparison("load",0,0,temporary.getAbsolutePath());
                 }
-            }catch(Exception e){result=(save?"Save failed; destination may be incomplete: ":"Load failed: ")+e.getMessage();}
+            }catch(Exception e){result=getString(save ? R.string.ws_tracking_save_failed : R.string.ws_tracking_load_failed, e.getMessage());}
             finally{if(temporary.exists())temporary.delete();}
-            final String body=result;main.post(()->{if(isDestroyed() || active!=session)return;busy(false);displayReport("Version tracking",body);});
+            final String body=result;main.post(()->{if(isDestroyed() || active!=session)return;busy(false);displayReport(getString(R.string.ws_tracking_short),body);});
         });
     }
     private void openComparison(Uri uri) {
@@ -1457,18 +1642,18 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 String project=new java.io.File(input.getParentFile(),"program.mint").getAbsolutePath();
                 result=raw!=null && raw.machOSlice?active.openComparisonMachO(input.getAbsolutePath(),project):active.openComparison(input.getAbsolutePath(),project,raw!=null);
             }catch(Exception e){result=e.getMessage();}
-            final String body=result;main.post(()->{if(isDestroyed() || active!=session)return;busy(false);displayReport("Comparison Program",body);});
+            final String body=result;main.post(()->{if(isDestroyed() || active!=session)return;busy(false);displayReport(getString(R.string.ws_tracking_comparison_program),body);});
         });
     }
     private void promptFunctionPair() {
         LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
-        EditText source=new EditText(this);source.setHint("Source function entry (hex)");source.setText("0x"+Long.toUnsignedString(listingAddress,16));fields.addView(source);
-        EditText target=new EditText(this);target.setHint("Comparison function entry (hex)");fields.addView(target);
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Confirm matching functions")
-                .setMessage("This is a manual decision, not an automatic match. It authorizes transfer previews for this exact pair and current code; no annotations are transferred yet.")
-                .setView(fields).setNegativeButton("Cancel",null).setPositiveButton("Confirm pair",(d,w)->{
-                    try {long from=parseHexAddress(source.getText().toString()),to=parseHexAddress(target.getText().toString());showReport("Confirmed pair",active->active.comparison("confirm",from,to,""));}
-                    catch(NumberFormatException e){showProjectError("Enter both function entry addresses in hexadecimal");}
+        EditText source=new EditText(this);source.setHint(R.string.ws_tracking_source_address);source.setText("0x"+Long.toUnsignedString(listingAddress,16));fields.addView(source);
+        EditText target=new EditText(this);target.setHint(R.string.ws_tracking_target_address);fields.addView(target);
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_tracking_confirm_title)
+                .setMessage(R.string.ws_tracking_confirm_details)
+                .setView(fields).setNegativeButton(android.R.string.cancel,null).setPositiveButton(R.string.ws_tracking_confirm_button,(d,w)->{
+                    try {long from=parseHexAddress(source.getText().toString()),to=parseHexAddress(target.getText().toString());showReport(getString(R.string.ws_tracking_confirmed_pair),active->active.comparison("confirm",from,to,""));}
+                    catch(NumberFormatException e){showProjectError(getString(R.string.ws_tracking_bad_addresses));}
                 }).show();
     }
     private static long parseHexAddress(String value) {return Long.parseUnsignedLong(value.trim().replaceFirst("^(0x|0X)",""),16);}
@@ -1478,46 +1663,46 @@ public final class WorkspaceActivity extends AppCompatActivity {
             String result=null,error=null;try{result=active.comparison("preview",0,0,"");}catch(RuntimeException e){error=e.getMessage();}
             final String body=result,failure=error;main.post(()->{
                 if(isDestroyed() || active!=session)return;busy(false);if(failure!=null){showProjectError(failure);return;}
-                if(!apply){displayReport("Transfer preview",body);return;}
-                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Apply annotations to comparison Program?")
-                        .setMessage(body+"\nExisting comparison annotations win. Only confirmed instruction-aligned symbols, comments, bookmarks and supported prototypes transfer. Patches and type libraries do not transfer. The current Program is unchanged.")
-                        .setNegativeButton("Cancel",null).setPositiveButton("Apply transfer",(d,w)->showReport("Transfer result",s->s.comparison("apply",0,0,""))).show();
+                if(!apply){displayReport(getString(R.string.ws_tracking_transfer_preview_title),body);return;}
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_tracking_transfer_confirm)
+                        .setMessage(body+"\n"+getString(R.string.ws_tracking_transfer_details))
+                        .setNegativeButton(android.R.string.cancel,null).setPositiveButton(R.string.ws_tracking_transfer_button,(d,w)->showReport(getString(R.string.ws_tracking_transfer_result),s->s.comparison("apply",0,0,""))).show();
             });
         });
     }
     private void showDebugger() {
-        String[] actions={"Connect debugger", "Status", "Attach LLDB DAP to PID", "Read registers", "Read 256 bytes at mapped current address", "Set mapped breakpoint here", "Remove mapped breakpoint here", "Step one instruction", "Continue", "Interrupt", "Wait for stop (bounded)", "Disconnect", "Threads / select thread", "Stack frames", "Loaded modules", "Map current binary to runtime base", "Go to mapped PC", "Read RSP register layout", "Clear address mapping"};
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("External debugger")
+        String[] actions={getString(R.string.advanced_debug_connect_title), getString(R.string.advanced_debug_status), getString(R.string.advanced_debug_attach_action), getString(R.string.advanced_debug_registers), getString(R.string.advanced_debug_read_memory), getString(R.string.advanced_debug_set_break), getString(R.string.advanced_debug_remove_break), getString(R.string.advanced_debug_step), getString(R.string.advanced_debug_continue), getString(R.string.advanced_debug_interrupt), getString(R.string.advanced_debug_wait), getString(R.string.advanced_debug_disconnect), getString(R.string.advanced_debug_threads_select), getString(R.string.advanced_debug_frames), getString(R.string.advanced_debug_modules), getString(R.string.advanced_debug_map), getString(R.string.advanced_debug_jump), getString(R.string.advanced_debug_rsp_layout), getString(R.string.advanced_debug_unmap)};
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_debugger)
                 .setItems(actions,(d,which)->{
                     if(which==0){promptDebuggerConnection();return;}
                     if(which==12){showDebuggerThreads();return;}
                     if(which==13){showDebuggerFrames();return;}
                     if(which==15){promptDebuggerMapping();return;}
                     if(which==16){runDebuggerAndFollowPc("pc-image");return;}
-                    if(which==2){EditText pid=new EditText(this);pid.setHint("Existing process ID (decimal)");pid.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-                        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Attach to existing process")
-                                .setMessage("LLDB DAP only. Mint never launches a process or executes a shell command.")
-                                .setView(pid).setNegativeButton("Cancel",null).setPositiveButton("Attach",(a,b)->{
-                                    try{long id=Long.parseLong(pid.getText().toString().trim());if(id<=0)throw new NumberFormatException();showReport("Debugger attach",s->s.debugger("attach",0,id));}
-                                    catch(NumberFormatException e){showProjectError("PID must be a positive decimal integer");}
+                    if(which==2){EditText pid=new EditText(this);pid.setHint(getString(R.string.advanced_debug_pid_hint));pid.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+                        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(getString(R.string.advanced_debug_attach_title))
+                                .setMessage(getString(R.string.advanced_debug_attach_help))
+                                .setView(pid).setNegativeButton(android.R.string.cancel,null).setPositiveButton(getString(R.string.advanced_debug_attach),(a,b)->{
+                                    try{long id=Long.parseLong(pid.getText().toString().trim());if(id<=0)throw new NumberFormatException();showReport(getString(R.string.advanced_debug_attach_report),s->s.debugger("attach",0,id));}
+                                    catch(NumberFormatException e){showProjectError(getString(R.string.advanced_debug_bad_pid));}
                                 }).show();return;
                     }
                     String[] ops={"","status","","registers","memory-image","break-image","unbreak-image","step","continue","interrupt","wait","disconnect","threads","stack","modules","map-image","pc-image","layout","unmap"};
                     final long at=listingAddress;
                     if(which>=5 && which<=9)new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(actions[which])
-                            .setMessage("This changes the connected target process. Breakpoints require your explicit image-to-runtime mapping; Mint never guesses the ASLR slide.")
-                            .setNegativeButton("Cancel",null).setPositiveButton("Execute",(a,b)->{if(which==7 || which==9)runDebuggerAndFollowPc(ops[which]);else showReport("Debugger",s->s.debugger(ops[which],at,0));}).show();
+                            .setMessage(getString(R.string.advanced_debug_confirm))
+                            .setNegativeButton(android.R.string.cancel,null).setPositiveButton(getString(R.string.advanced_debug_execute),(a,b)->{if(which==7 || which==9)runDebuggerAndFollowPc(ops[which]);else showReport(getString(R.string.advanced_debug_report),s->s.debugger(ops[which],at,0));}).show();
                     else if(which==10)runDebuggerAndFollowPc("wait");
-                    else showReport("Debugger",s->s.debugger(ops[which],at,which==4?256:0));
+                    else showReport(getString(R.string.advanced_debug_report),s->s.debugger(ops[which],at,which==4?256:0));
                 }).show();
     }
     private void promptDebuggerMapping() {
-        EditText runtime=new EditText(this);runtime.setHint("Runtime load base, hexadecimal (e.g. 0x7f000000)");
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Explicit ASLR mapping")
-                .setMessage("Inspect Loaded modules first. Enter the runtime address corresponding to this binary's preferred image base, not its entry point. Confirm this is the same binary. Mapping is session-only and is cleared on disconnect.")
-                .setView(runtime).setNegativeButton("Cancel",null).setPositiveButton("Map",(d,w)->{
-                    try{String text=runtime.getText().toString().trim();if(text.startsWith("0x"))text=text.substring(2);long base=Long.parseUnsignedLong(text,16);showReport("Address mapping",s->s.debugger("map-image",base,0));}
-                    catch(NumberFormatException e){showProjectError("Enter a valid 64-bit hexadecimal runtime base");}
+        EditText runtime=new EditText(this);runtime.setHint(getString(R.string.advanced_debug_runtime_base));
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(getString(R.string.advanced_debug_aslr_title))
+                .setMessage(getString(R.string.advanced_debug_aslr_help))
+                .setView(runtime).setNegativeButton(android.R.string.cancel,null).setPositiveButton(getString(R.string.advanced_debug_map_apply),(d,w)->{
+                    try{String text=runtime.getText().toString().trim();if(text.startsWith("0x"))text=text.substring(2);long base=Long.parseUnsignedLong(text,16);showReport(getString(R.string.advanced_debug_map_report),s->s.debugger("map-image",base,0));}
+                    catch(NumberFormatException e){showProjectError(getString(R.string.advanced_debug_bad_base));}
                 }).show();
     }
     private void showDebuggerThreads() {
@@ -1529,8 +1714,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
                     DebuggerThreadId identity=DebuggerThreadId.parse(line.substring(0,tab));
                     ids.add(identity.thread);processes.add(identity.process);rows.add(line);
                 }catch(NumberFormatException ignored){}}
-                if(rows.isEmpty()){displayReport("Threads",body);return;}
-                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Select debugger thread").setItems(rows.toArray(new String[0]),(d,index)->showReport("Selected thread",s->s.debugger("thread",processes.get(index),ids.get(index)))).setNegativeButton("Close",null).show();
+                if(rows.isEmpty()){displayReport(getString(R.string.advanced_debug_threads),body);return;}
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(getString(R.string.advanced_debug_select_thread)).setItems(rows.toArray(new String[0]),(d,index)->showReport(getString(R.string.advanced_debug_selected_thread),s->s.debugger("thread",processes.get(index),ids.get(index)))).setNegativeButton(getString(R.string.advanced_close),null).show();
             });});
     }
     private void showDebuggerFrames() {
@@ -1539,48 +1724,48 @@ public final class WorkspaceActivity extends AppCompatActivity {
             main.post(()->{if(isDestroyed() || active!=session)return;busy(false);java.util.ArrayList<String> labels=new java.util.ArrayList<>();java.util.ArrayList<Long> addresses=new java.util.ArrayList<>();
                 for(String line:body.split("\n")){String[] fields=line.split("\t",-1);if(fields.length<4 || !fields[2].startsWith("image 0x"))continue;
                     try{addresses.add(Long.parseUnsignedLong(fields[2].substring(8),16));labels.add(fields[3]+" — "+fields[2]+(fields.length>4?" — "+fields[4]:""));}catch(NumberFormatException ignored){}}
-                if(labels.isEmpty()){displayReport("Stack frames — no validated image mapping",body);return;}
-                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Mapped stack frames").setItems(labels.toArray(new String[0]),(d,index)->jumpTo(addresses.get(index))).setNeutralButton("Full report",(d,w)->displayReport("Stack frames",body)).setNegativeButton("Close",null).show();
+                if(labels.isEmpty()){displayReport(getString(R.string.advanced_debug_unmapped_frames),body);return;}
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(getString(R.string.advanced_debug_mapped_frames)).setItems(labels.toArray(new String[0]),(d,index)->jumpTo(addresses.get(index))).setNeutralButton(getString(R.string.advanced_debug_full_report),(d,w)->displayReport(getString(R.string.advanced_debug_frames),body)).setNegativeButton(getString(R.string.advanced_close),null).show();
             });});
     }
     private void runDebuggerAndFollowPc(String operation) {
         final MintSession active=session;if(active==null)return;busy(true);
-        worker.execute(()->{String result,pc=null;try{result=active.debugger(operation,0,0);try{pc=operation.equals("pc-image")?result:active.debugger("pc-image",0,0);}catch(Exception e){result+="\nPC not synchronized: "+e.getMessage();}}catch(Exception e){result=e.getMessage();}
+        worker.execute(()->{String result,pc=null;try{result=active.debugger(operation,0,0);try{pc=operation.equals("pc-image")?result:active.debugger("pc-image",0,0);}catch(Exception e){result+="\n" + getString(R.string.advanced_debug_pc_not_synced, e.getMessage());}}catch(Exception e){result=e.getMessage();}
             final String body=result,position=pc;main.post(()->{if(isDestroyed() || active!=session)return;busy(false);
                 if(position!=null){int tab=position.indexOf('\t');if(tab>2 && position.startsWith("0x"))try{jumpTo(Long.parseUnsignedLong(position.substring(2,tab),16));}catch(NumberFormatException ignored){}}
-                displayReport("Debugger",body);
+                displayReport(getString(R.string.advanced_debug_report),body);
             });});
     }
     private void promptDebuggerConnection() {
         LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
-        android.widget.Spinner backend=new android.widget.Spinner(this);backend.setAdapter(new android.widget.ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,new String[]{"GDB / LLDB remote (RSP)", "LLDB DAP over TCP"}));fields.addView(backend);
-        EditText host=new EditText(this);host.setHint("Numeric IPv4 / IPv6");host.setText("127.0.0.1");fields.addView(host);
-        EditText port=new EditText(this);port.setHint("TCP port");port.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);fields.addView(port);
-        android.widget.CheckBox remote=new android.widget.CheckBox(this);remote.setText("I accept unencrypted, unauthenticated non-loopback TCP");fields.addView(remote);
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Connect external debugger")
-                .setMessage("Connects only when you press Connect. Prefer loopback with your own authenticated tunnel. RSP expects an already attached all-stop stub; DAP requires a separate PID attach. Static analysis remains offline.")
-                .setView(fields).setNegativeButton("Cancel",null).setPositiveButton("Connect",(d,w)->{
-                    try{int number=Integer.parseInt(port.getText().toString().trim());String address=host.getText().toString().trim();boolean dap=backend.getSelectedItemPosition()==1,allow=remote.isChecked();showReport("Debugger connection",s->s.connectDebugger(address,number,dap,allow));}
-                    catch(NumberFormatException e){showProjectError("Enter a numeric TCP port from 1 to 65535");}
+        android.widget.Spinner backend=new android.widget.Spinner(this);backend.setAdapter(new android.widget.ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,new String[]{getString(R.string.advanced_debug_rsp_backend), getString(R.string.advanced_debug_dap_backend)}));fields.addView(backend);
+        EditText host=new EditText(this);host.setHint(getString(R.string.advanced_debug_host_hint));host.setText("127.0.0.1");fields.addView(host);
+        EditText port=new EditText(this);port.setHint(getString(R.string.advanced_debug_port_hint));port.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);fields.addView(port);
+        android.widget.CheckBox remote=new android.widget.CheckBox(this);remote.setText(getString(R.string.advanced_debug_remote_enable));fields.addView(remote);
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(getString(R.string.advanced_debug_connect_external))
+                .setMessage(getString(R.string.advanced_debug_connect_help))
+                .setView(fields).setNegativeButton(android.R.string.cancel,null).setPositiveButton(getString(R.string.advanced_debug_connect),(d,w)->{
+                    try{int number=Integer.parseInt(port.getText().toString().trim());String address=host.getText().toString().trim();boolean dap=backend.getSelectedItemPosition()==1,allow=remote.isChecked();showReport(getString(R.string.advanced_debug_connection_report),s->s.connectDebugger(address,number,dap,allow));}
+                    catch(NumberFormatException e){showProjectError(getString(R.string.advanced_debug_bad_port));}
                 }).show();
     }
     private void showNativePlugins() {
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Native plugins")
-                .setItems(new String[]{"Load trusted .so plugin", "List commands", "Run plugin command", "Run isolated plugin command"},(d,which)->{
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_plugins)
+                .setItems(new String[]{getString(R.string.ws_plugin_load_trusted), getString(R.string.ws_plugin_list_commands), getString(R.string.ws_plugin_run_command), getString(R.string.ws_plugin_run_isolated)},(d,which)->{
                     if(which==0)pickDocument(PLUGIN_REQUEST);
-                    else if(which==1)showReport("Plugin commands",MintSession::pluginCommands);
+                    else if(which==1)showReport(getString(R.string.ws_plugin_commands),MintSession::pluginCommands);
                     else if(which==3)pickDocument(SANDBOX_PLUGIN_REQUEST);
                     else {
                         LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
                         EditText command=new EditText(this);command.setHint("plugin-id/command-id");fields.addView(command);
-                        EditText arguments=new EditText(this);arguments.setHint("Arguments");fields.addView(arguments);
-                        android.widget.CheckBox edits=new android.widget.CheckBox(this);edits.setText("Allow Program edits through the host API");fields.addView(edits);
-                        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Run trusted native code")
-                                .setMessage("Native plugins are not sandboxed. The edits switch limits only the provided Mint API, not the plugin's OS access.")
-                                .setView(fields).setNegativeButton("Cancel",null).setPositiveButton("Run",(a,b)->{
+                        EditText arguments=new EditText(this);arguments.setHint(R.string.ws_plugin_arguments);fields.addView(arguments);
+                        android.widget.CheckBox edits=new android.widget.CheckBox(this);edits.setText(R.string.ws_plugin_allow_edits);fields.addView(edits);
+                        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_plugin_run_trusted)
+                                .setMessage(R.string.ws_plugin_trusted_explanation)
+                                .setView(fields).setNegativeButton(android.R.string.cancel,null).setPositiveButton(R.string.ws_run,(a,b)->{
                                     String id=command.getText().toString(),args=arguments.getText().toString();boolean allow=edits.isChecked();
                                     if(allow){++viewGeneration;pendingAddress=selected==null?-1:selected.entry;}
-                                    showReport("Plugin output",s->s.runPlugin(id,args,allow));
+                                    showReport(getString(R.string.ws_plugin_output),s->s.runPlugin(id,args,allow));
                                     if(allow){openFunctions.clear();loadFunctions();}
                                 }).show();
                     }
@@ -1589,30 +1774,30 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private void openIsolatedPlugin(Uri uri) {
         final MintSession active=session;final java.io.File binary=model.binaryFile();final RawImportConfig config=model.rawConfig();
         if(active==null || binary==null)return;
-        if(android.os.Build.VERSION.SDK_INT<29){showProjectError("Isolated plugins require Android 10 or newer");return;}
-        if(sandboxPlugin!=null || sandboxPreparing){showProjectError("An isolated plugin is already running");return;}
+        if(android.os.Build.VERSION.SDK_INT<29){showProjectError(getString(R.string.ws_plugin_requires_android));return;}
+        if(sandboxPlugin!=null || sandboxPreparing){showProjectError(getString(R.string.ws_plugin_running));return;}
         LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
         EditText command=new EditText(this);command.setHint("plugin-id/command-id");fields.addView(command);
-        EditText arguments=new EditText(this);arguments.setHint("Arguments");fields.addView(arguments);
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Run isolated native command")
-                .setMessage("Runs in a separate isolated process with fresh read-only analysis of the original binary. Current project annotations and patches are not shared.")
-                .setView(fields).setNegativeButton("Cancel",null).setPositiveButton("Run",(d,w)->{
+        EditText arguments=new EditText(this);arguments.setHint(R.string.ws_plugin_arguments);fields.addView(arguments);
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_plugin_isolated_title)
+                .setMessage(R.string.ws_plugin_isolated_explanation)
+                .setView(fields).setNegativeButton(android.R.string.cancel,null).setPositiveButton(R.string.ws_run,(d,w)->{
                     if(sandboxPlugin!=null || sandboxPreparing)return;
                     final String id=command.getText().toString(),args=arguments.getText().toString();
-                    if(id.isEmpty() || id.length()>160 || args.length()>4096){showProjectError("Enter a command ID (up to 160 characters) and at most 4096 argument characters");return;}
+                    if(id.isEmpty() || id.length()>160 || args.length()>4096){showProjectError(getString(R.string.ws_plugin_bad_args));return;}
                     sandboxPreparing=true;sandboxCopyCancelled=new java.util.concurrent.atomic.AtomicBoolean();
                     final java.util.concurrent.atomic.AtomicBoolean cancelled=sandboxCopyCancelled;busy(true);
                     worker.execute(()->{
                         java.io.File file=null;String failure=null;
                         try {
                             java.io.File root=new java.io.File(getCodeCacheDir(),"mint-isolated-plugins");
-                            if(!root.isDirectory() && !root.mkdirs())throw new java.io.IOException("Cannot create isolated plugin copy");
+                            if(!root.isDirectory() && !root.mkdirs())throw new java.io.IOException(getString(R.string.ws_plugin_copy_directory));
                             file=java.io.File.createTempFile("plugin-",".so",root);
                             try(java.io.InputStream input=getContentResolver().openInputStream(uri);java.io.FileOutputStream output=new java.io.FileOutputStream(file)) {
-                                if(input==null || !file.setReadOnly())throw new java.io.IOException("Cannot open/protect plugin copy");
+                                if(input==null || !file.setReadOnly())throw new java.io.IOException(getString(R.string.ws_plugin_copy_protection));
                                 byte[] buffer=new byte[65536];int n;long size=0;
-                                while((n=input.read(buffer))!=-1){if(cancelled.get())throw new java.io.IOException("Isolated plugin cancelled");if((size+=n)>16*1024*1024)throw new java.io.IOException("Plugin exceeds 16 MiB");output.write(buffer,0,n);}
-                                if(size==0)throw new java.io.IOException("Plugin is empty");output.getFD().sync();
+                                while((n=input.read(buffer))!=-1){if(cancelled.get())throw new java.io.IOException(getString(R.string.ws_plugin_cancelled));if((size+=n)>16*1024*1024)throw new java.io.IOException(getString(R.string.ws_plugin_size));output.write(buffer,0,n);}
+                                if(size==0)throw new java.io.IOException(getString(R.string.ws_plugin_empty));output.getFD().sync();
                             }
                         }catch(Exception error){failure=error.getMessage();}
                         final java.io.File copied=file;final String problem=failure;
@@ -1620,13 +1805,13 @@ public final class WorkspaceActivity extends AppCompatActivity {
                             sandboxPreparing=false;
                             if(isDestroyed() || active!=session || cancelled.get() || problem!=null){
                                 if(copied!=null)copied.delete();
-                                if(!isDestroyed() && active==session){busy(false);displayReport("Isolated plugin",cancelled.get()?"Isolated plugin cancelled":problem);}
+                                if(!isDestroyed() && active==session){busy(false);displayReport(getString(R.string.ws_plugin_isolated_report),cancelled.get()?getString(R.string.ws_plugin_cancelled):problem);}
                                 return;
                             }
                             try {
                                 sandboxPlugin=new com.ccs.mint.plugin.SandboxPluginClient(this,binary,copied,id,args,
                                         config==null?"":config.architecture,config==null?0:config.baseAddress,config==null?0:config.entryAddress,config!=null&&config.machOSlice,60000,
-                                        (success,output,uid,pid)->{sandboxPlugin=null;if(!isDestroyed() && active==session){busy(false);displayReport("Isolated plugin",output);}});
+                                        (success,output,uid,pid)->{sandboxPlugin=null;if(!isDestroyed() && active==session){busy(false);displayReport(getString(R.string.ws_plugin_isolated_report),output);}});
                                 sandboxPlugin.start();
                             }catch(Exception error){sandboxPlugin=null;copied.delete();busy(false);showProjectError(error.getMessage());}
                         });
@@ -1636,30 +1821,30 @@ public final class WorkspaceActivity extends AppCompatActivity {
 
     private void openNativePlugin(Uri uri) {
         final MintSession active=session;if(active==null)return;
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Trust and load native plugin?")
-                .setMessage("Loading this file executes unrestricted native code with Mint's permissions, including access to your private projects and network. Only load plugins you trust, built for this device ABI and Mint SDK v1/v2. Files are never auto-loaded on reopening a project.")
-                .setNegativeButton("Cancel",null).setPositiveButton("Trust and load",(d,w)->{
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_plugin_trust_title)
+                .setMessage(R.string.ws_plugin_trust_details)
+                .setNegativeButton(android.R.string.cancel,null).setPositiveButton(R.string.ws_plugin_trust_button,(d,w)->{
                     busy(true);worker.execute(()->{
                         java.io.File file=null;String result;
                         try {
-                            java.io.File root=new java.io.File(getCodeCacheDir(),"mint-plugins");if(!root.isDirectory() && !root.mkdirs())throw new java.io.IOException("Cannot create plugin directory");
+                            java.io.File root=new java.io.File(getCodeCacheDir(),"mint-plugins");if(!root.isDirectory() && !root.mkdirs())throw new java.io.IOException(getString(R.string.ws_plugin_directory));
                             file=java.io.File.createTempFile("plugin-",".so",root);
                             // Set read-only before loading executable code on modern Android.
                             try(java.io.InputStream input=getContentResolver().openInputStream(uri);java.io.FileOutputStream output=new java.io.FileOutputStream(file)) {
-                                if(input==null)throw new java.io.IOException("Cannot open plugin");if(!file.setReadOnly())throw new java.io.IOException("Cannot protect plugin file");
+                                if(input==null)throw new java.io.IOException(getString(R.string.ws_plugin_open_failed));if(!file.setReadOnly())throw new java.io.IOException(getString(R.string.ws_plugin_protect_failed));
                                 byte[] buffer=new byte[65536];int n;long size=0;
-                                while((n=input.read(buffer))!=-1){if((size+=n)>16*1024*1024)throw new java.io.IOException("Plugin exceeds 16 MiB");output.write(buffer,0,n);}output.getFD().sync();
+                                while((n=input.read(buffer))!=-1){if((size+=n)>16*1024*1024)throw new java.io.IOException(getString(R.string.ws_plugin_size));output.write(buffer,0,n);}output.getFD().sync();
                             }
                             result=active.loadPlugin(file.getAbsolutePath(),true);
                         }catch(Exception e){if(file!=null && file.exists())file.delete();result=e.getMessage();}
-                        final String body=result;main.post(()->{if(isDestroyed() || active!=session)return;busy(false);displayReport("Plugin load",body);});
+                        final String body=result;main.post(()->{if(isDestroyed() || active!=session)return;busy(false);displayReport(getString(R.string.ws_plugin_load_report),body);});
                     });
                 }).show();
     }
 
     private void showProjectError(String message) {
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Project").setMessage(message)
-                .setPositiveButton("OK",null).show();
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_project_title).setMessage(message)
+                .setPositiveButton(android.R.string.ok,null).show();
     }
 
     private void showLocalVariables() {
@@ -1674,21 +1859,21 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 if(report!=null)for(String line:report.split("\n")) {
                     String[] fields=line.split("\t",-1);
                     if(fields.length!=5 || fields[0].equals("identity"))continue;
-                    rows.add(fields);labels.add(fields[1]+" — "+fields[3]+" bytes, "+fields[4]+(fields[2].isEmpty()?"":" : "+fields[2]));
+                    rows.add(fields);labels.add(getString(R.string.ws_local_row, fields[1], fields[3], fields[4], fields[2].isEmpty() ? "" : " : " + fields[2]));
                 }
-                if(rows.isEmpty()){displayReport("Local variables",report);return;}
-                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Persistent local variables")
+                if(rows.isEmpty()){displayReport(getString(R.string.ws_locals_report),report);return;}
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_locals_title)
                         .setItems(labels.toArray(new String[0]),(dialog,which) -> {
                             String[] row=rows.get(which);LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
                             EditText name=new EditText(this),type=new EditText(this);
-                            name.setHint("Local name (empty preserves inference)");name.setText(row[1]);
-                            type.setHint("Type: i32, u64, named pointer… (empty preserves inference)");type.setText(row[2]);fields.addView(name);fields.addView(type);
-                            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Rename / retype "+row[1])
-                                    .setMessage("Storage width must match. Bindings are guarded by the current function structure; stale bindings are retained but never applied to different values. Parameter names/types belong in the function prototype.")
-                                    .setView(fields).setNegativeButton("Cancel",null)
-                                    .setNeutralButton("Remove override",(d,w)->mutateProject(()->active.editLocal(function,row[0],"","")))
-                                    .setPositiveButton("Save",(d,w)->{String edited=name.getText().toString().trim(),declared=type.getText().toString().trim();mutateProject(()->active.editLocal(function,row[0],edited,declared));}).show();
-                        }).setNegativeButton("Close",null).show();
+                            name.setHint(R.string.ws_local_name);name.setText(row[1]);
+                            type.setHint(R.string.ws_local_type);type.setText(row[2]);fields.addView(name);fields.addView(type);
+                            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(getString(R.string.ws_local_edit, row[1]))
+                                    .setMessage(R.string.ws_locals_help)
+                                    .setView(fields).setNegativeButton(android.R.string.cancel,null)
+                                    .setNeutralButton(R.string.ws_local_remove,(d,w)->mutateProject(()->active.editLocal(function,row[0],"","")))
+                                    .setPositiveButton(R.string.ws_save,(d,w)->{String edited=name.getText().toString().trim(),declared=type.getText().toString().trim();mutateProject(()->active.editLocal(function,row[0],edited,declared));}).show();
+                        }).setNegativeButton(R.string.ws_close,null).show();
             });
         });
     }
@@ -1696,19 +1881,37 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private void promptAssembly(long address) {
         final MintSession active=session;if(active==null)return;
         EditText input=new EditText(this);input.setTypeface(Typeface.MONOSPACE);input.setMinLines(4);input.setHint("nop\nret");
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(String.format(Locale.US,"Assemble at 0x%x",address))
-                .setMessage("Bounded scalar instruction subset with labels. Preview the encoded bytes before replacing code. Unsupported forms are rejected; original input remains unchanged.")
-                .setView(input).setNegativeButton("Cancel",null).setPositiveButton("Preview",(d,w) -> {
+        patchDialogCode.attachAssemblyHighlighting(input);
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                .setTitle(getString(R.string.patch_assemble_at, address))
+                .setMessage(R.string.patch_assemble_help)
+                .setView(input).setNegativeButton(android.R.string.cancel,null)
+                .setPositiveButton(R.string.patch_preview,(d,w) -> {
                     final String source=input.getText().toString();busy(true);
                     worker.execute(() -> {
-                        String bytes=null,error=null;try{bytes=active.assemble(address,source,false);}catch(RuntimeException e){error=e.getMessage();}
+                        String bytes=null,original="",error=null;
+                        try {
+                            bytes=active.assemble(address,source,false);
+                            original=active.patchReviewBytes(active.canonicalAddress(address), PatchComparison.byteCount(bytes));
+                        } catch(RuntimeException e) {
+                            error=e.getMessage();
+                        }
                         final String encoded=bytes,failure=error;
+                        final String before = original;
                         main.post(() -> {
                             if(isDestroyed() || active!=session)return;busy(false);
                             if(failure!=null){showProjectError(failure);return;}
-                            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Confirm assembly patch")
-                                    .setMessage(String.format(Locale.US,"0x%x\n%s\n\nThis replaces %d bytes. Undo/redo and patched-copy export apply.",address,encoded,encoded.isEmpty()?0:(encoded.length()+1)/3))
-                                    .setNegativeButton("Cancel",null).setPositiveButton("Apply patch",(confirm,button) -> mutateProject(() -> active.assemble(address,source,true))).show();
+                            new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                                    .setTitle(R.string.patch_confirm_title)
+                                    .setView(patchDialogCode.scrollView(
+                                            patchDialogCode.preview(address, source, before, encoded)))
+                                    .setNegativeButton(android.R.string.cancel,null)
+                                    .setPositiveButton(R.string.patch_apply,(confirm,button) ->
+                                            applyPatchWithComparison(active, address, encoded, true, () -> {
+                                                if (!encoded.equals(active.assemble(address, source, false)))
+                                                    throw new IllegalStateException(getString(R.string.patch_encoding_changed));
+                                                active.assemble(address, source, true);
+                                            })).show();
                         });
                     });
                 }).show();
@@ -1718,17 +1921,17 @@ public final class WorkspaceActivity extends AppCompatActivity {
         final MintSession active=session;if(active==null)return;
         LinearLayout fields=new LinearLayout(this);fields.setOrientation(LinearLayout.VERTICAL);
         EditText input=new EditText(this);input.setTypeface(Typeface.MONOSPACE);input.setText(source);input.setMinLines(5);input.setMaxLines(14);fields.addView(input);
-        android.widget.CheckBox edits=new android.widget.CheckBox(this);edits.setText("Allow this script to edit the Program");fields.addView(edits);
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Run Lua script")
-                .setMessage("Read-only by default. No files, network or process access. Execution and memory are bounded. Permitted edits are committed individually and remain undoable even if the script stops with an error.")
-                .setView(fields).setNegativeButton("Cancel",null).setPositiveButton("Run",(dialog,which) -> {
+        android.widget.CheckBox edits=new android.widget.CheckBox(this);edits.setText(getString(R.string.advanced_script_allow_edits));fields.addView(edits);
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(getString(R.string.advanced_script_title))
+                .setMessage(getString(R.string.advanced_script_help))
+                .setView(fields).setNegativeButton(android.R.string.cancel,null).setPositiveButton(getString(R.string.advanced_run),(dialog,which) -> {
                     final String text=input.getText().toString();final boolean allow=edits.isChecked();++viewGeneration;busy(true);
                     worker.execute(() -> {
                         String result;try{result=active.runScript(text,allow);}catch(RuntimeException e){result=e.getMessage();}
                         final String output=result;
                         main.post(() -> {
                             if(isDestroyed() || active!=session)return;busy(false);
-                            displayReport("Lua output",output);
+                            displayReport(getString(R.string.advanced_script_output),output);
                             if(allow){pendingAddress=selected==null?-1:selected.entry;openFunctions.clear();loadFunctions();}
                         });
                     });
@@ -1740,9 +1943,9 @@ public final class WorkspaceActivity extends AppCompatActivity {
         worker.execute(() -> {
             String source=null,error=null;
             try(java.io.InputStream input=getContentResolver().openInputStream(uri);java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream()) {
-                if(input==null)throw new java.io.IOException("Cannot open script");
+                if(input==null)throw new java.io.IOException(getString(R.string.advanced_script_open_error));
                 byte[] buffer=new byte[4096];int count;
-                while((count=input.read(buffer))!=-1){if(bytes.size()+count>256*1024)throw new java.io.IOException("Script exceeds 256 KiB");bytes.write(buffer,0,count);}
+                while((count=input.read(buffer))!=-1){if(bytes.size()+count>256*1024)throw new java.io.IOException(getString(R.string.advanced_script_size_error));bytes.write(buffer,0,count);}
                 source=new String(bytes.toByteArray(),java.nio.charset.StandardCharsets.UTF_8);
             }catch(Exception e){error=e.getMessage();}
             final String text=source,failure=error;
@@ -1754,10 +1957,18 @@ public final class WorkspaceActivity extends AppCompatActivity {
         final MintSession active = session;
         if (active == null) return;
         String[] kinds = {"name","comment","bookmark","data","prototype","function","patch"};
-        String[] labels = {"Rename symbol", "Comment", "Bookmark", "Define data — type expression or cstring", "Function prototype: uint64_t(int32_t count, void* buffer)", "Define function entry — code", "Patch hex bytes — 1f 20 03 d5", "References"};
+        int[] actions = {R.string.address_rename_symbol, R.string.address_comment,
+                R.string.address_bookmark, R.string.address_define_data,
+                R.string.address_prototype, R.string.address_define_function,
+                R.string.address_patch_hex, R.string.address_references,
+                R.string.address_show_pseudo_c, R.string.assemble_patch_here};
+        String[] labels = new String[actions.length];
+        for (int index = 0; index < actions.length; index++) labels[index] = getString(actions[index]);
         new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(String.format(Locale.US,"0x%x",address))
                 .setItems(labels,(dialog,which) -> {
                     if (which == 7) { showReferences(address); return; }
+                    if (which == 8) { showAddressInPseudoC(active, address); return; }
+                    if (which == 9) { promptAssembly(address); return; }
                     String kind = kinds[which];
                     worker.execute(() -> {
                         String value;
@@ -1767,43 +1978,172 @@ public final class WorkspaceActivity extends AppCompatActivity {
                         main.post(() -> {
                             if (isDestroyed() || active != session) return;
                             EditText input = new EditText(this); input.setText(initial);
-                            input.setHint("Empty value removes the override");
+                            input.setHint(R.string.address_empty_override);
+                            if ("patch".equals(kind)) input.setTypeface(Typeface.MONOSPACE);
                             new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(labels[which]).setView(input)
-                                    .setPositiveButton("Save",(d,w) -> {
+                                    .setPositiveButton(R.string.address_save,(d,w) -> {
                                         String edited = input.getText().toString();
-                                        mutateProject(() -> active.edit(address,kind,edited));
-                                    }).setNegativeButton("Cancel",null).show();
+                                        if ("patch".equals(kind))
+                                            applyPatchWithComparison(active, address, edited, false,
+                                                    () -> active.edit(address,kind,edited));
+                                        else mutateProject(() -> active.edit(address,kind,edited));
+                                    }).setNegativeButton(android.R.string.cancel,null).show();
                         });
                     });
                 }).show();
     }
 
     private void mutateProject(Runnable operation) {
+        mutateProject(operation, null);
+    }
+
+    private void mutateProject(Runnable operation, @Nullable java.util.function.Supplier<PatchReview> comparison) {
         ++viewGeneration;
+        reverseListing = null;
+        sourceListing = null;
         busy(true);
         final MintSession active = session;
         worker.execute(() -> {
             String failure = null;
-            try { if (active == null || active != model.session()) return; operation.run(); }
+            PatchReview report = null;
+            try {
+                if (active == null || active != model.session()) return;
+                if (comparison == null) operation.run();
+                else report = comparison.get();
+            }
             catch (RuntimeException e) { failure = e.getMessage(); }
             final String error = failure;
+            final PatchReview completedReport = report;
             main.post(() -> {
                 if (isDestroyed() || active != session) return;
                 busy(false);
                 if (error != null) showProjectError(error);
-                else { pendingAddress = selected == null ? -1 : selected.entry; openFunctions.clear(); loadFunctions(); }
+                else {
+                    pendingAddress = selected == null ? -1 : selected.entry;
+                    openFunctions.clear();
+                    loadFunctions();
+                    if (completedReport != null) showPatchReview(completedReport);
+                }
             });
         });
     }
 
+    static final class PatchReview {
+        final MintSession session;
+        final long revision;
+        final CharSequence report;
+        final String staleMessage;
+        final boolean canUndo, canExport;
+
+        PatchReview(MintSession session, long revision, CharSequence report, boolean canUndo, boolean canExport,
+                    String staleMessage) {
+            this.session = session;
+            this.revision = revision;
+            this.report = report;
+            this.canUndo = canUndo;
+            this.canExport = canExport;
+            this.staleMessage = staleMessage;
+        }
+
+        void requireCurrent(MintSession active) {
+            if (active != session || active.programRevision() != revision)
+                throw new IllegalStateException(staleMessage);
+        }
+    }
+
+    private void applyPatchWithComparison(MintSession active, long address, String replacement,
+                                          boolean assembly, Runnable patch) {
+        if (active != session) {
+            showProjectError(getString(R.string.patch_workspace_changed));
+            return;
+        }
+        mutateProject(patch, () -> {
+            final long patchAddress = assembly ? active.canonicalAddress(address) : address;
+            final long[] function = active.functionRangeAt(patchAddress);
+            final long originalRevision = active.programRevision();
+            final int length = Math.max(PatchComparison.byteCount(replacement),
+                    PatchComparison.byteCount(active.annotation(patchAddress, "patch")));
+            final String oldBytes = active.patchReviewBytes(patchAddress, length);
+            final String[] before = function == null ? new String[2] : patchSnapshot(active, function);
+            patch.run();
+            final long revision = active.programRevision();
+            final String newBytes = active.patchReviewBytes(patchAddress, length);
+            final String[] after = function == null ? new String[2] : patchSnapshot(active, function);
+            final boolean undoable = revision == originalRevision + 1;
+            final CharSequence report = patchDialogCode.comparison(patchAddress, oldBytes, newBytes,
+                    function, before, after);
+            return new PatchReview(active, revision, report, undoable,
+                    undoable && !oldBytes.isEmpty() && !newBytes.isEmpty(),
+                    getString(R.string.patch_review_stale));
+        });
+    }
+
+    private void showPatchReview(PatchReview review) {
+        var dialog = new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.patch_comparison_title).setView(patchDialogCode.scrollView(review.report))
+                .setNegativeButton(R.string.patch_close, null);
+        if (review.canUndo) dialog.setNeutralButton(R.string.patch_undo, (d, which) -> mutateProject(() -> {
+            review.requireCurrent(model.session());
+            review.session.undoEdit(false);
+        }));
+        if (review.canExport) dialog.setPositiveButton(R.string.patch_export_copy, (d, which) -> {
+            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("application/octet-stream");
+            intent.putExtra(Intent.EXTRA_TITLE, "mint-patched.bin");
+            model.pendingReviewedExport = review;
+            try {
+                startActivityForResult(intent, REVIEWED_PATCH_EXPORT_REQUEST);
+            } catch (android.content.ActivityNotFoundException e) {
+                model.pendingReviewedExport = null;
+                showProjectError(getString(R.string.patch_no_picker));
+            }
+        });
+        dialog.show();
+    }
+
+    private String[] patchSnapshot(MintSession active, long[] function) {
+        final String listing;
+        try {
+            StringBuilder rows = new StringBuilder();
+            long[] addresses = new long[PAGE];
+            int[] sizes = new int[PAGE], flows = new int[PAGE];
+            long[] targets = new long[PAGE];
+            String[] lines = new String[PAGE];
+            long cursor = function[1];
+            long end = function[2];
+            boolean complete = false;
+            for (int page = 0; page < 16 && !complete; ++page) {
+                int count = active.listing(cursor, PAGE, addresses, sizes, flows, targets, lines, null);
+                for (int i = 0; i < count; ++i) {
+                    if (Long.compareUnsigned(addresses[i], end) >= 0) {
+                        complete = true;
+                        break;
+                    }
+                    rows.append(Long.toUnsignedString(addresses[i], 16)).append("  ").append(lines[i]).append('\n');
+                    cursor = addresses[i] + Math.max(1, sizes[i]);
+                }
+                complete |= count < PAGE || Long.compareUnsigned(cursor, end) >= 0;
+            }
+            listing = complete ? rows.toString() : null;
+        } catch (RuntimeException e) {
+            return new String[]{null, null};
+        }
+        try {
+            return new String[]{listing, active.decompileView(function[0])[0]};
+        } catch (RuntimeException e) {
+            return new String[]{listing, null};
+        }
+    }
+
     private void promptSearch() {
         EditText input = new EditText(this);
-        input.setHint("Symbol, comment, bookmark, string, or bytes: 7f 45 4c 46");
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Global search (up to 500 hits)").setView(input)
-                .setPositiveButton("Search",(dialog,which) -> {
+        input.setHint(R.string.ws_search_hint);
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_search_title).setView(input)
+                .setPositiveButton(R.string.ws_search_button,(dialog,which) -> {
                     String query = input.getText().toString();
-                    showAddressResults("Search",active -> active.search(query));
-                }).setNegativeButton("Cancel",null).show();
+                    showAddressResults(getString(R.string.ws_search_button),active -> active.search(query));
+                }).setNegativeButton(android.R.string.cancel,null).show();
     }
 
     private CharSequence linkedCode(CharSequence source) {
@@ -1872,19 +2212,112 @@ public final class WorkspaceActivity extends AppCompatActivity {
         return linked;
     }
 
+    private void revealPseudoCRanges(long address, String anchors, long generation) {
+        CharSequence rendered = text.getText();
+        java.util.BitSet lines = new java.util.BitSet();
+        for (String row : anchors.split("\n")) {
+            String[] fields = row.split(" ");
+            if (fields.length != 4) continue;
+            int first = Integer.parseInt(fields[0]);
+            int last = Integer.parseInt(fields[1]);
+            long from = Long.parseUnsignedLong(fields[2], 16);
+            long to = Long.parseUnsignedLong(fields[3], 16);
+            if (Long.compareUnsigned(address, from) >= 0 && Long.compareUnsigned(address, to) < 0)
+                lines.set(first, last + 1);
+        }
+        int first = lines.nextSetBit(0);
+        if (first < 0) {
+            android.widget.Toast.makeText(this, getString(R.string.ws_pseudo_no_mapping),
+                    android.widget.Toast.LENGTH_SHORT).show();
+            return;
+        }
+        SpannableString marked = new SpannableString(rendered);
+        String source = rendered.toString();
+        int firstOffset = -1;
+        for (int line = 0, start = 0; start < source.length(); ++line) {
+            int newline = source.indexOf('\n', start);
+            int end = newline < 0 ? source.length() : newline;
+            if (lines.get(line)) {
+                if (firstOffset < 0) firstOffset = start;
+                if (start < end) marked.setSpan(new android.text.style.BackgroundColorSpan(
+                        (dimColour & 0x00ffffff) | 0x33000000), start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
+            start = end + 1;
+        }
+        if (firstOffset < 0) return;
+        text.setText(marked);
+        final int target = firstOffset;
+        text.getViewTreeObserver().addOnPreDrawListener(new android.view.ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                text.getViewTreeObserver().removeOnPreDrawListener(this);
+                if (generation == viewGeneration && text.getLayout() != null) {
+                    int visualLine = text.getLayout().getLineForOffset(target);
+                    textScroll.scrollTo(0, text.getLayout().getLineTop(visualLine));
+                }
+                return true;
+            }
+        });
+        int last = lines.length();
+        String label = first + 1 == last
+                ? getString(R.string.ws_pseudo_line, last)
+                : getString(R.string.ws_pseudo_lines, first + 1, last);
+        android.widget.Toast.makeText(this, label, android.widget.Toast.LENGTH_SHORT).show();
+    }
+
+    private void showAddressInPseudoC(MintSession active, long address) {
+        final long generation = viewGeneration;
+        final RecyclerView.LayoutManager layout = list.getLayoutManager();
+        final ListingOrigin origin = pane == Pane.DISASM
+                ? new ListingOrigin(selected, listingAddress, sourceListing,
+                        layout == null ? null : layout.onSaveInstanceState())
+                : null;
+        worker.execute(() -> {
+            final long[] function;
+            try { function = active.functionRangeAt(address); }
+            catch (RuntimeException e) {
+                main.post(() -> {
+                    if (!isDestroyed() && active == session && generation == viewGeneration)
+                        showProjectError(getString(R.string.ws_pseudo_locate_error, e.getMessage()));
+                });
+                return;
+            }
+            main.post(() -> {
+                if (isDestroyed() || active != session || generation != viewGeneration) return;
+                FunctionRow row = null;
+                if (function != null) {
+                    for (FunctionRow candidate : functions)
+                        if (candidate.entry == function[0]) { row = candidate; break; }
+                }
+                if (row == null) {
+                    showProjectError(getString(R.string.ws_pseudo_no_function));
+                    return;
+                }
+                reverseListing = origin;
+                pseudoCAnchor = address;
+                selected = row;
+                listingAddress = address;
+                pendingAddress = row.entry;
+                if (!openFunctions.contains(row)) openFunctions.add(row);
+                model.rememberSelection(row.entry, listingAddress);
+                updateSelectionChip();
+                selectPane(Pane.C);
+            });
+        });
+    }
+
     private void showTypeManager() {
         final MintSession active=session;if(active==null)return;
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle("Data Type Manager")
-                .setItems(new String[]{"View definitions", "Add or replace definition", "Remove definition", "Exportable GNU C11 type header", "Import type / signature library", "View imported signatures"},(d,which) -> {
-                    if(which==0){showReport("Data types",MintSession::types);return;}
-                    if(which==3){showReport("C type header (select / copy)",MintSession::typesCHeader);return;}
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(R.string.ws_type_manager)
+                .setItems(new String[]{getString(R.string.advanced_types_view), getString(R.string.advanced_types_add), getString(R.string.advanced_types_remove), getString(R.string.advanced_types_header), getString(R.string.advanced_types_import), getString(R.string.advanced_types_signatures)},(d,which) -> {
+                    if(which==0){showReport(getString(R.string.advanced_types_report),MintSession::types);return;}
+                    if(which==3){showReport(getString(R.string.advanced_types_header_report),MintSession::typesCHeader);return;}
                     if(which==4){pickDocument(LIBRARY_REQUEST);return;}
-                    if(which==5){showReport("Signature library",MintSession::signatureLibrary);return;}
+                    if(which==5){showReport(getString(R.string.advanced_types_signature_report),MintSession::signatureLibrary);return;}
                     EditText input=new EditText(this);
-                    input.setHint(which==1?"Packet=struct{length:u32;bytes:u8[16];next:Packet*}":"Type name");
-                    new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(which==1?"Define type":"Remove type").setView(input)
-                            .setPositiveButton("Save",(dialog,w) -> {String declaration=input.getText().toString();mutateProject(() -> {if(which==1)active.defineType(declaration);else active.eraseType(declaration);});})
-                            .setNegativeButton("Cancel",null).show();
+                    input.setHint(which==1?"Packet=struct{length:u32;bytes:u8[16];next:Packet*}":getString(R.string.advanced_types_name));
+                    new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(which==1?getString(R.string.advanced_types_define):getString(R.string.advanced_types_remove_title)).setView(input)
+                            .setPositiveButton(getString(R.string.advanced_save),(dialog,w) -> {String declaration=input.getText().toString();mutateProject(() -> {if(which==1)active.defineType(declaration);else active.eraseType(declaration);});})
+                            .setNegativeButton(android.R.string.cancel,null).show();
                 }).show();
     }
 
@@ -1893,17 +2326,18 @@ public final class WorkspaceActivity extends AppCompatActivity {
         worker.execute(()->{
             String result=null,error=null;
             try(java.io.InputStream input=getContentResolver().openInputStream(uri);java.io.ByteArrayOutputStream bytes=new java.io.ByteArrayOutputStream()) {
-                if(input==null)throw new java.io.IOException("Cannot open library");byte[] buffer=new byte[8192];int n;
-                while((n=input.read(buffer))!=-1){if(bytes.size()+n>1024*1024)throw new java.io.IOException("Library exceeds 1 MiB");bytes.write(buffer,0,n);}
+                if(input==null)throw new java.io.IOException(getString(R.string.advanced_types_open_error));byte[] buffer=new byte[8192];int n;
+                while((n=input.read(buffer))!=-1){if(bytes.size()+n>1024*1024)throw new java.io.IOException(getString(R.string.advanced_types_size_error));bytes.write(buffer,0,n);}
                 result=new String(bytes.toByteArray(),java.nio.charset.StandardCharsets.UTF_8);
-                if(!result.startsWith("MINT_TYPES 1 ") && !result.startsWith("MINTSIG 1\n"))throw new java.io.IOException("Expected MINT_TYPES 1 or MINTSIG 1 library");
+                if(!result.startsWith("MINT_TYPES 1 ") && !result.startsWith("MINTSIG 1\n"))throw new java.io.IOException(getString(R.string.advanced_types_format_error));
             }catch(Exception e){error=e.getMessage();}
             final String source=result,failure=error;main.post(()->{
                 if(isDestroyed() || active!=session)return;busy(false);if(failure!=null){showProjectError(failure);return;}
-                boolean signatures=source.startsWith("MINTSIG ");String preview=source.length()>8192?source.substring(0,8192)+"\n[Preview truncated]":source;
-                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(signatures?"Import signature library?":"Merge type library?")
-                        .setMessage(preview+"\n\nABI and pointer width must match the current Program. Import is one persisted undoable transaction. Type names in this file replace matching definitions; a signature import replaces the previous signature library. Explicit function prototypes retain priority.")
-                        .setNegativeButton("Cancel",null).setPositiveButton("Import",(d,w)->mutateProject(()->active.importLibrary(source,signatures))).show();
+                boolean signatures=source.startsWith("MINTSIG ");String preview=source.length()>8192?source.substring(0,8192)+"\n" + getString(R.string.advanced_types_preview_truncated):source;
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(signatures?getString(R.string.advanced_types_signatures_confirm):getString(R.string.advanced_types_merge_confirm))
+                        .setMessage(new android.text.SpannableStringBuilder(highlighter.code(preview))
+                                .append("\n\n").append(getText(R.string.advanced_types_merge_help)))
+                        .setNegativeButton(android.R.string.cancel,null).setPositiveButton(getString(R.string.advanced_import),(d,w)->mutateProject(()->active.importLibrary(source,signatures))).show();
             });
         });
     }
@@ -1919,26 +2353,96 @@ public final class WorkspaceActivity extends AppCompatActivity {
         });
     }
     private void displayReport(String title,String result) {
-        TextView view=new TextView(this);view.setTypeface(Typeface.MONOSPACE);view.setTextSize(12);view.setTextIsSelectable(true);view.setText(result==null || result.isEmpty()?"No output / metadata found.":result);
+        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(title)
+                .setView(reportView(result)).setPositiveButton(R.string.ws_close,null).show();
+    }
+
+    private View reportView(String result) {
+        TextView view=new TextView(this);view.setTypeface(Typeface.MONOSPACE);view.setTextSize(12);view.setTextIsSelectable(true);view.setText(result==null || result.isEmpty()?getString(R.string.ws_report_empty):result);
         android.widget.ScrollView scroll=new android.widget.ScrollView(this);scroll.addView(view);
-        new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(title).setView(scroll).setPositiveButton("Close",null).show();
+        return scroll;
+    }
+
+    private void preparePseudoCExport() {
+        if (selected == null) {
+            showProjectError(getString(R.string.ws_pseudo_pick_function));
+            return;
+        }
+        final MintSession active = session;
+        final long entry = selected.entry;
+        final long generation = viewGeneration;
+        busy(true);
+        worker.execute(() -> {
+            try {
+                final String report = active.decompileView(entry)[0];
+                if (report.isEmpty()) throw new IllegalStateException(getString(R.string.ws_no_pseudo_report));
+                main.post(() -> {
+                    if (isDestroyed() || active != session || generation != viewGeneration) return;
+                    busy(false);
+                    final Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                    intent.addCategory(Intent.CATEGORY_OPENABLE);
+                    intent.setType("text/plain");
+                    intent.putExtra(Intent.EXTRA_TITLE, String.format(Locale.US, "mint-%x-pseudo-c.txt", entry));
+                    model.pendingPseudoCExport = report;
+                    try {
+                        startActivityForResult(intent, PSEUDO_C_EXPORT_REQUEST);
+                    } catch (android.content.ActivityNotFoundException e) {
+                        model.pendingPseudoCExport = null;
+                        showProjectError(getString(R.string.welcome_no_picker));
+                    }
+                });
+            } catch (RuntimeException e) {
+                main.post(() -> {
+                    if (isDestroyed() || active != session || generation != viewGeneration) return;
+                    busy(false);
+                    showProjectError(getString(R.string.ws_pseudo_export_failed, e.getMessage()));
+                });
+            }
+        });
+    }
+
+    private void writePseudoCReport(Uri destination, @Nullable String report) {
+        if (report == null) {
+            showProjectError(getString(R.string.ws_pseudo_export_interrupted));
+            return;
+        }
+        worker.execute(() -> {
+            String message;
+            try (java.io.OutputStream output = getContentResolver().openOutputStream(destination, "wt")) {
+                if (output == null) throw new java.io.IOException(getString(R.string.ws_export_dest_failed));
+                output.write(report.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                message = getString(R.string.ws_pseudo_exported);
+            } catch (Exception e) {
+                message = getString(R.string.ws_export_failed, e.getMessage());
+            }
+            final String outcome = message;
+            main.post(() -> { if (!isDestroyed()) showProjectError(outcome); });
+        });
     }
 
     private void exportPatchedTo(Uri destination) {
+        exportPatchedTo(destination, null);
+    }
+
+    private void exportPatchedTo(Uri destination, @Nullable PatchReview review) {
         final MintSession active=session;if(active==null)return;busy(true);
         worker.execute(() -> {
             java.io.File temporary=new java.io.File(getCacheDir(),"mint-export-"+java.util.UUID.randomUUID()+".bin");
             String failure=null;
             try {
+                if (review != null) {
+                    if (active != model.session()) throw new IllegalStateException(getString(R.string.ws_workspace_changed_export));
+                    review.requireCurrent(active);
+                }
                 active.exportPatchedCopy(temporary.getAbsolutePath());
                 try(java.io.InputStream input=new java.io.FileInputStream(temporary);java.io.OutputStream output=getContentResolver().openOutputStream(destination,"wt")) {
-                    if(output==null)throw new java.io.IOException("cannot open export destination");
+                    if(output==null)throw new java.io.IOException(getString(R.string.ws_export_dest_failed));
                     byte[] buffer=new byte[65536];int count;while((count=input.read(buffer))!=-1)output.write(buffer,0,count);
                 }
             }catch(Exception e){failure=e.getMessage();}
             finally {if(temporary.exists())temporary.delete();}
             final String error=failure;
-            main.post(() -> {if(isDestroyed() || active!=session)return;busy(false);showProjectError(error==null?"Patched copy exported. Original input is unchanged.":"Export failed; destination may be incomplete: "+error);});
+            main.post(() -> {if(isDestroyed() || active!=session)return;busy(false);showProjectError(error==null?getString(R.string.ws_patched_exported):getString(R.string.ws_export_failed, error));});
         });
     }
 
@@ -1946,19 +2450,19 @@ public final class WorkspaceActivity extends AppCompatActivity {
         final MintSession active=session;
         final java.io.File binary=model.binaryFile();
         if(active==null || binary==null)return;
-        final ProjectArchive.Metadata metadata=new ProjectArchive.Metadata(model.name()==null?"binary":model.name(),
+        final ProjectArchive.Metadata metadata=new ProjectArchive.Metadata(model.name()==null?getString(R.string.ws_binary):model.name(),
                 model.rawConfig(),model.selectedAddress(),model.listingAddress(),model.pane());
         busy(true);
         worker.execute(() -> {
             java.io.File temporary=null;String failure=null;
             try {
-                if(active!=model.session())throw new java.io.IOException("Workspace changed before backup");
+                if(active!=model.session())throw new java.io.IOException(getString(R.string.ws_workspace_changed_backup));
                 temporary=java.io.File.createTempFile("mint-project-", ".mintproj",getCacheDir());
                 ProjectArchive.write(new java.io.FileOutputStream(temporary),binary.getParentFile(),metadata,
                         new java.util.concurrent.atomic.AtomicBoolean());
                 try(java.io.InputStream input=new java.io.FileInputStream(temporary);
                     java.io.OutputStream output=getContentResolver().openOutputStream(destination,"wt")) {
-                    if(output==null)throw new java.io.IOException("Cannot open backup destination");
+                    if(output==null)throw new java.io.IOException(getString(R.string.ws_backup_destination_failed));
                     byte[] buffer=new byte[65536];int count;
                     while((count=input.read(buffer))!=-1)if(count!=0)output.write(buffer,0,count);
                 }
@@ -1967,8 +2471,8 @@ public final class WorkspaceActivity extends AppCompatActivity {
             final String error=failure;
             main.post(() -> {
                 if(isDestroyed() || active!=session)return;busy(false);
-                showProjectError(error==null?"Complete project backed up: original binary, annotations, types, patches and import/navigation settings. Restore creates an independent project.":
-                        "Backup failed; chosen document may be incomplete: "+error);
+                showProjectError(error==null?getString(R.string.ws_backup_ok):
+                        getString(R.string.ws_backup_failed, error));
             });
         });
     }
@@ -1976,7 +2480,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
     private interface AddressQuery { String run(MintSession active); }
 
     private void showReferences(long address) {
-        showAddressResults("References at 0x"+Long.toHexString(address),active -> active.references(address));
+        showAddressResults(getString(R.string.ws_references_for, Long.toHexString(address)),active -> active.references(address));
     }
 
     private void showMemoryBlocks() {
@@ -1986,9 +2490,9 @@ public final class WorkspaceActivity extends AppCompatActivity {
             final String report=body;
             main.post(()->{if(isDestroyed()||active!=session)return;busy(false);
                 new com.google.android.material.dialog.MaterialAlertDialogBuilder(this)
-                    .setTitle("Memory blocks").setMessage(report)
-                    .setNeutralButton("Navigate to block",(dialog,which)->showAddressResults("Memory blocks",MintSession::memoryBlocks))
-                    .setPositiveButton("Close",null).show();});
+                    .setTitle(R.string.ws_memory_blocks).setMessage(report)
+                    .setNeutralButton(R.string.ws_jump_to_block,(dialog,which)->showAddressResults(getString(R.string.ws_memory_blocks),MintSession::memoryBlocks))
+                    .setPositiveButton(R.string.ws_close,null).show();});
         });
     }
 
@@ -1998,7 +2502,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
         busy(true);
         worker.execute(() -> {
             List<String> labels = new ArrayList<>(); List<Long> addresses = new ArrayList<>();
-            String diagnostic = "No results";
+            String diagnostic = getString(R.string.ws_no_results);
             try {
                 String body = query.run(active);
                 for (String line : body.split("\n")) {
@@ -2014,7 +2518,7 @@ public final class WorkspaceActivity extends AppCompatActivity {
                 androidx.appcompat.app.AlertDialog.Builder dialog = new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(title);
                 if (labels.isEmpty()) dialog.setMessage(message);
                 else dialog.setItems(labels.toArray(new String[0]),(d,which) -> jumpTo(addresses.get(which)));
-                dialog.setNegativeButton("Close",null).show();
+                dialog.setNegativeButton(R.string.ws_close,null).show();
             });
         });
     }

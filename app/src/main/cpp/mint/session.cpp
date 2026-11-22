@@ -231,8 +231,8 @@ DecompileReport Session::decompileReportFor(Address address) {
         return std::move(result.report);
     }
 
-    const Function* function = analyzer_.functionContaining(address);
-    if (function == nullptr) function = analyzer_.functionAt(address);
+    const Function* function = analyzer_.functionAt(address);
+    if (function == nullptr) function = analyzer_.functionContaining(address);
     if (function == nullptr)
         return failure(Status::error(ErrorCode::kNotFound, "no analyzed function at this address"), "Decompilation");
     if (function->instructions.empty() && analyzer_.stats().reachedInstructionLimit)

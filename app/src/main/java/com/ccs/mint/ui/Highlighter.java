@@ -88,10 +88,37 @@ public final class Highlighter {
             cursor = end;
         }
 
-        // The mnemonic: the next word. Control flow gets its own colour, because
-        // where a block ends is the first thing being looked for when reading a
-        // listing, and it should be findable without reading the text.
-        cursor = skipSpaces(line, cursor);
+        paintInstruction(out, line, cursor);
+
+        if (note != null && !note.isEmpty()) {
+            final int start = out.length();
+            out.append("   ").append(note);
+            paint(out, start, out.length(), comment);
+        }
+        return out;
+    }
+
+    /** Colours assembly source without the address column used by the listing. */
+    @NonNull
+    public Spanned assemblySource(@NonNull String source) {
+        SpannableStringBuilder out = new SpannableStringBuilder();
+        int start = 0;
+        while (start < source.length()) {
+            int end = source.indexOf('\n', start);
+            if (end == -1) end = source.length();
+            String line = source.substring(start, end);
+            SpannableStringBuilder instruction = new SpannableStringBuilder(line);
+            paintInstruction(instruction, line, 0);
+            out.append(instruction);
+            if (end < source.length()) out.append('\n');
+            start = end + 1;
+        }
+        return out;
+    }
+
+    private void paintInstruction(SpannableStringBuilder out, String line, int from) {
+        int cursor = skipSpaces(line, from);
+        int length = line.length();
         int wordEnd = cursor;
         while (wordEnd < length && !isSpace(line.charAt(wordEnd))) wordEnd++;
         if (wordEnd > cursor) {
@@ -101,13 +128,6 @@ public final class Highlighter {
         }
 
         paintOperands(out, line, cursor, length);
-
-        if (note != null && !note.isEmpty()) {
-            final int start = out.length();
-            out.append("   ").append(note);
-            paint(out, start, out.length(), comment);
-        }
-        return out;
     }
 
     private void paintOperands(SpannableStringBuilder out, String line, int from, int to) {

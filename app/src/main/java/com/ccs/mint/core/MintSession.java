@@ -332,6 +332,15 @@ public final class MintSession implements Closeable {
     public void edit(long address,String kind,String value) { checkOpen(); nativeEdit(handle,address,kind,value); }
     public String annotation(long address,String kind) { checkOpen(); return nativeAnnotation(handle,address,kind); }
     public void undoEdit(boolean redo) { checkOpen(); nativeUndo(handle,redo); }
+    public long programRevision() { checkOpen(); return nativeProgramRevision(handle); }
+    public long canonicalAddress(long address) { checkOpen(); return nativeCanonicalAddress(handle, address); }
+    /** Entry and half-open extent of the analyzed function owning this address. */
+    @Nullable
+    public long[] functionRangeAt(long address) { checkOpen(); return nativeFunctionRangeAt(handle, address); }
+    public String patchReviewBytes(long address, int length) {
+        checkOpen();
+        return nativePatchReviewBytes(handle, address, length);
+    }
     public String search(String query) { checkOpen(); return nativeSearch(handle,query); }
     public String references(long address) { checkOpen(); return nativeReferences(handle,address); }
     public String types() { checkOpen(); return nativeProgramInfo(handle,0,0); }
@@ -382,6 +391,10 @@ public final class MintSession implements Closeable {
     private static native void nativeEdit(long handle,long address,String kind,String value);
     private static native String nativeAnnotation(long handle,long address,String kind);
     private static native void nativeUndo(long handle,boolean redo);
+    private static native long nativeProgramRevision(long handle);
+    private static native long nativeCanonicalAddress(long handle,long address);
+    private static native long[] nativeFunctionRangeAt(long handle,long address);
+    private static native String nativePatchReviewBytes(long handle,long address,int length);
     private static native String nativeSearch(long handle,String query);
     private static native String nativeReferences(long handle,long address);
     private static native long nativeOpenPath(String path);
