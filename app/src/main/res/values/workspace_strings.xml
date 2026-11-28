@@ -157,6 +157,11 @@
     <string name="ws_cfg_failed">Could not load control-flow graph: %1$s</string>
     <string name="ws_writes_failed">Could not load memory writes: %1$s</string>
     <string name="ws_decompile_failed">Could not load the code: %1$s</string>
+    <string name="ws_decompile_status_line">/* Decompilation status: %1$s */</string>
+    <string name="ws_decompile_why_partial">Why is this result partial?</string>
+    <string name="ws_decompile_details">Decompilation details</string>
+    <string name="ws_decompile_reason_address">%1$s\nAddress 0x%2$x</string>
+    <string name="ws_decompile_go_to_instruction">Go to instruction at 0x%1$x</string>
     <string name="ws_general_report_failed">Could not load the program report: %1$s</string>
     <string name="ws_calls_limit">Call graph limited to %1$,d functions. Omitted %2$,d functions with the fewest calls.</string>
     <string name="ws_no_pseudo_report">No Pseudo-C report available</string>

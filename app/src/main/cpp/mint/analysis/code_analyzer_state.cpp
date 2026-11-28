@@ -224,7 +224,7 @@ Status CodeAnalyzer::restore(const ElfImage& image, const Options& options, cons
     }
     Address previous = 0;
     for (size_t i = 0; i < state.instructions.size(); ++i) {
-        if (cancelled(options)) return invalidState("restore cancelled");
+        if (cancelled(options)) return Status::error(ErrorCode::kCancelled, "restore cancelled");
         const InsnRecord& record = state.instructions[i];
         if ((i != 0 && record.address <= previous) || record.address == kNoAddress ||
             record.size == 0 || record.size > 16 ||
@@ -248,7 +248,7 @@ Status CodeAnalyzer::restore(const ElfImage& image, const Options& options, cons
     std::vector<u8> owners(state.instructions.size(), 0);
     previous = 0;
     for (size_t fi = 0; fi < state.functions.size(); ++fi) {
-        if (cancelled(options)) return invalidState("restore cancelled");
+        if (cancelled(options)) return Status::error(ErrorCode::kCancelled, "restore cancelled");
         Function function = state.functions[fi];
         // Tail-state evidence is transient even in an in-memory snapshot.
         function.tailCalls.clear();
@@ -499,7 +499,7 @@ Status CodeAnalyzer::reanalyzeChanged(const ElfImage& image, const Options& opti
         if (!dependent && saved != indirectFlowReports_.end()) for(const auto& dependency:saved->second.tailDependencies)
             for(const auto& range:merged)if(dependency.start<range.end&&range.start<dependency.end)dependent=true;
         if (!dependent) continue;
-        if (cancelled(options)) return invalidState("incremental indirect proof cancelled");
+        if (cancelled(options)) return Status::error(ErrorCode::kCancelled, "incremental indirect proof cancelled");
         if (function.instructions.size() > 1000000 - reproofInstructions) return fallback("incremental indirect proof budget exceeded");
         reproofInstructions += function.instructions.size();
         IndirectFlowReport current;
@@ -513,7 +513,7 @@ Status CodeAnalyzer::reanalyzeChanged(const ElfImage& image, const Options& opti
         if (old.incomplete || old.instructions.empty()) return fallback("affected function has unresolved/incomplete flow");
         std::vector<Root> pending;
         prepared.descend(image, options, Root{old.entry, old.origin, old.name, old.decodeArch}, &pending);
-        if (cancelled(options)) return invalidState("incremental analysis cancelled");
+        if (cancelled(options)) return Status::error(ErrorCode::kCancelled, "incremental analysis cancelled");
         if (prepared.functions_.empty() || prepared.functions_.back().entry != old.entry) return fallback("affected function no longer decodes");
         const Function& replacement = prepared.functions_.back();
         if (replacement.decodeArch != old.decodeArch || replacement.instructions != old.instructions || replacement.callees != old.callees ||

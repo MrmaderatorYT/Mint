@@ -17,6 +17,7 @@ import org.junit.runner.RunWith;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.CancellationException;
 
 import static org.junit.Assert.*;
 
@@ -99,8 +100,38 @@ public final class PatchReviewDeviceTest {
             assertEquals("20 00 80 d2", session.patchReviewBytes(entry, 4));
             assertThrows(IllegalStateException.class, () -> review.requireCurrent(session));
             assertEquals("complete", PatchComparison.status(session.decompileView(entry)[0]));
+            MintSession.DecompileView complete = session.decompileResult(entry);
+            assertEquals(MintSession.DecompilationStatus.COMPLETE, complete.status);
+            assertTrue(complete.status.isUsable());
+            assertTrue(complete.diagnostics.isEmpty());
+            assertArrayEquals(new String[]{complete.report, complete.anchors}, session.decompileView(entry));
+
             session.edit(entry + 4, "patch", "20 00 1f d6"); // br x1 leaves the branch target unknown.
             assertEquals("partial", PatchComparison.status(session.decompileView(entry)[0]));
+            MintSession.DecompileView partial = session.decompileResult(entry);
+            assertEquals(MintSession.DecompilationStatus.PARTIAL, partial.status);
+            assertTrue(partial.status.isUsable());
+            assertFalse(partial.diagnostic.isEmpty());
+            assertTrue(partial.diagnostics.stream().anyMatch(item ->
+                    item.status == MintSession.DecompilationStatus.PARTIAL
+                    && item.reason.contains("Unresolved indirect transfer")
+                    && Long.valueOf(entry + 4).equals(item.address)
+                    && Long.valueOf(entry + 8).equals(item.instructionEnd)));
+
+            MintSession.DecompileView missing = session.decompileResult(-1);
+            assertEquals(MintSession.DecompilationStatus.ERROR, missing.status);
+            assertFalse(missing.status.isUsable());
+            assertTrue(missing.diagnostic.contains("not-found"));
+            assertTrue(missing.anchors.isEmpty());
+            assertFalse(missing.diagnostics.isEmpty());
+            assertNull(missing.diagnostics.get(0).address);
+            assertNull(missing.diagnostics.get(0).instructionEnd);
+
+            other.cancelAnalysis();
+            assertThrows(CancellationException.class, other::analyze);
+            MintSession.DecompileView cancelled = other.decompileResult(entry);
+            assertEquals(MintSession.DecompilationStatus.CANCELLED, cancelled.status);
+            assertFalse(cancelled.status.isUsable());
         } finally {
             for (Path file : new Path[]{exported, analysis, project, input, temp}) Files.deleteIfExists(file);
         }

@@ -24,6 +24,7 @@ void testing::setProgramSaveHooks(ProgramSaveHooks hooks) { programSaveHooks = h
 
 Status Program::open(const std::string& path, const std::string& source) {
     State loaded;
+    bool needsWrite = false;
     std::ifstream input(path,std::ios::binary);
     if (!input) {
         if (access(path.c_str(),F_OK)==0 || errno != ENOENT) return Status::error(ErrorCode::kIoError,"cannot read project");
@@ -34,6 +35,7 @@ Status Program::open(const std::string& path, const std::string& source) {
         char magic[8]; u32 count = 0;
         if (!input.read(magic,8) || (std::memcmp(magic,"MINTPR01",8)!=0 && std::memcmp(magic,"MINTPR02",8)!=0 && std::memcmp(magic,"MINTPR03",8)!=0 && std::memcmp(magic,"MINTPR04",8)!=0) || !input.read(reinterpret_cast<char*>(&count),4) || count>100000)
             return Status::error(ErrorCode::kBadFormat,"invalid/newer project format");
+        needsWrite = std::memcmp(magic, "MINTPR04", 8) != 0;
         for (u32 i=0;i<count;++i) {
             Address address; u32 kindSize, valueSize;
             if (!input.read(reinterpret_cast<char*>(&address),8) || !input.read(reinterpret_cast<char*>(&kindSize),4) || !input.read(reinterpret_cast<char*>(&valueSize),4) || kindSize>32 || valueSize>1024*1024 || ((std::memcmp(magic,"MINTPR03",8)!=0 && std::memcmp(magic,"MINTPR04",8)!=0) && valueSize>65536))
@@ -49,12 +51,15 @@ Status Program::open(const std::string& path, const std::string& source) {
         if (input.peek()!=std::char_traits<char>::eof()) return Status::error(ErrorCode::kBadFormat,"trailing project data");
     }
     if (!source.empty()) {
-        auto bound=loaded.find({0,"source"});
-        if (bound!=loaded.end() && bound->second!=source) return Status::error(ErrorCode::kBadFormat,"project belongs to a different binary or raw configuration");
-        loaded[{0,"source"}]=source;
+        const auto [bound, inserted] = loaded.try_emplace({0, "source"}, source);
+        if (!inserted && bound->second != source)
+            return Status::error(ErrorCode::kBadFormat, "project belongs to a different binary or raw configuration");
+        needsWrite |= inserted;
     }
     DataTypeManager types(types_.pointerSize()); auto status=validate(loaded,&types); if (!status.ok()) return status;
-    if (!source.empty()) {auto previousPath=path_;path_=path;status=save(loaded);path_=previousPath;if(!status.ok())return status;}
+    // A validated current Program already bound to this input can be reopened
+    // even when storage cannot accommodate an authoritative replacement.
+    if (!source.empty() && needsWrite) {auto previousPath=path_;path_=path;status=save(loaded);path_=previousPath;if(!status.ok())return status;}
     path_ = path; state_ = std::move(loaded); types_=std::move(types); memory_={};undo_.clear(); redo_.clear(); ++revision_; invalidateReferences();
     return Status::success();
 }
@@ -90,8 +95,12 @@ Status Program::save(const State& state) {
     size_t written = 0;
 #ifdef MINT_HOST_TEST_PROGRAM_SAVE
     const auto writeBytes = programSaveHooks.write ? programSaveHooks.write : ::write;
+    const auto syncTemporary = programSaveHooks.syncTemporary ? programSaveHooks.syncTemporary : ::fsync;
+    const auto publish = programSaveHooks.rename ? programSaveHooks.rename : std::rename;
 #else
     const auto writeBytes = ::write;
+    const auto syncTemporary = ::fsync;
+    const auto publish = std::rename;
 #endif
     while (written < data.size()) {
         const auto n = writeBytes(fd, data.data() + written, data.size() - written);
@@ -102,17 +111,20 @@ Status Program::save(const State& state) {
         }
         written += static_cast<size_t>(n);
     }
-    if (status.ok() && fsync(fd) != 0) status = ioError("sync temporary file", errno);
+    if (status.ok() && syncTemporary(fd) != 0) status = ioError("sync temporary file", errno);
     if (close(fd) != 0 && status.ok()) status = ioError("close temporary file", errno);
 #ifdef MINT_HOST_TEST_PROGRAM_SAVE
     if (status.ok() && programSaveHooks.beforeRename) programSaveHooks.beforeRename();
 #endif
-    if (status.ok() && std::rename(temporary.c_str(), path_.c_str()) != 0)
+    if (status.ok() && publish(temporary.c_str(), path_.c_str()) != 0)
         status = ioError("publish project", errno);
     if (!status.ok()) {
         std::remove(temporary.c_str());
         return status;
     }
+#ifdef MINT_HOST_TEST_PROGRAM_SAVE
+    if (programSaveHooks.afterRename) programSaveHooks.afterRename();
+#endif
 
     // Rename is the commit point. Persist the directory entry when the
     // filesystem allows it. A sync failure after publication cannot roll back

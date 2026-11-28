@@ -1,5 +1,6 @@
 #include "mint/analysis/x86_switch_recovery.h"
 #include "mint/session.h"
+#include "program_fresh_oracle.h"
 #include "mint/ir/registers.h"
 #include <algorithm>
 #include <cstdlib>
@@ -101,7 +102,7 @@ void rejectedInputs(){
 class TemporaryDirectory {
     std::string path_;
 public:
-    TemporaryDirectory(){std::string path="/private/tmp/mint-x86-switch-XXXXXX";if(::mkdtemp(path.data()))path_=path;require(!path_.empty(),"create private fixture directory");}
+    TemporaryDirectory(){auto path=(std::filesystem::temp_directory_path()/"mint-x86-switch-XXXXXX").string();if(::mkdtemp(path.data()))path_=path;require(!path_.empty(),"create private fixture directory");}
     ~TemporaryDirectory(){std::error_code error;std::filesystem::remove_all(path_,error);}
     std::string file(const std::string& name)const{return path_+"/"+name;}
 };
@@ -122,63 +123,137 @@ std::string snapshot(Session& session){
 }
 std::string hex32(u32 value){std::ostringstream out;for(unsigned n=0;n<4;++n){if(n)out<<' ';out<<std::hex<<std::setw(2)<<std::setfill('0')<<((value>>(n*8))&255);}return out.str();}
 void captureExample(const std::string& label,Session& session){if(const char* path=std::getenv("MINT_X86_SWITCH_CAPTURE")){std::ofstream output(path,label=="before"?std::ios::trunc:std::ios::app);output<<label<<"\n"<<session.decompiledCFor(0x1000)<<"\nCFG\n"<<session.cfgTextFor(0x1000)<<'\n';require(!output.fail(),"capture actual decompiler/CFG example");}}
-void sessionLifecycle(){
-    TemporaryDirectory temporary;const auto source=temporary.file("switch.elf"),project=temporary.file("program.mint");const auto input=fixture();writeFile(source,input.bytes);Session session;open(session,source,project);const auto initial=snapshot(session);require(switchAt(entryFunction(session.analyzer()),input.branch),"Session exposes recovered switch semantics");unsigned oracle=0;
-    auto fresh=[&](const std::string& label){const auto overlay=temporary.file("oracle-"+std::to_string(oracle++)+".mint");writeFile(overlay,readFile(project));Session other;okay(other.openPath(source),"open fresh oracle");okay(other.attachProject(overlay),"attach independent oracle Program");okay(other.reanalyze(),"force full oracle analysis");require(snapshot(session)==snapshot(other),label+" agrees with fresh listing/IR/C/CFG/refs");};
-    captureExample("before",session);
-    okay(session.editAnnotation(0x2000,"patch",hex32(static_cast<u32>(Address{0x10b0}-0x2000))+" "+hex32(static_cast<u32>(Address{0x10a0}-0x2000))),"permute table cases while preserving unique targets");const auto permuted=snapshot(session);const auto* permutation=switchAt(entryFunction(session.analyzer()),input.branch);require(permutation&&permutation->targets==std::vector<Address>({0x10a0,0x10b0})&&permutation->switchCases[0].target==0x10b0&&permutation->switchCases[1].target==0x10a0,"case permutation changes values without changing target membership");require(permuted!=initial,"case permutation changes exported selector semantics despite an unchanged CFG");fresh("table permutation");captureExample("after case permutation",session);
-    {Session reopened;open(reopened,source,project);require(reopened.analysisStatusText().find("mode=restored")!=std::string::npos&&snapshot(reopened)==permuted,"cache reproof restores a case permutation with identical unique target set");}
-    okay(session.undoEdit(false),"undo table permutation");require(snapshot(session)==initial,"permutation undo restores original case values");okay(session.undoEdit(true),"redo table permutation");require(snapshot(session)==permuted,"permutation redo restores changed case values");fresh("permutation redo");okay(session.undoEdit(false),"return to baseline table");
-    okay(session.editAnnotation(0x2000,"patch",hex32(static_cast<u32>(Address{0x10c0}-0x2000))),"patch rel32 target");require(session.analysisStatusText().find("mode=full")!=std::string::npos,"table dependency edit uses safe full rediscovery");const auto patched=snapshot(session);require(patched!=initial,"table patch changes discovered case bodies and exported views");fresh("table patch");
-    okay(session.undoEdit(false),"undo table patch");require(snapshot(session)==initial,"undo exactly restores switch semantics and all views");fresh("table undo");
-    okay(session.undoEdit(true),"redo table patch");require(snapshot(session)==patched,"redo exactly restores patched switch semantics");fresh("table redo");
-    {Session reopened;open(reopened,source,project);require(reopened.analysisStatusText().find("mode=restored")!=std::string::npos,"switch Program restores derived discovery cache");require(snapshot(reopened)==patched,"cache restoration rebuilds exact selector/case metadata and views");}
-    okay(session.editAnnotation(0x1002,"patch","01"),"reduce unsigned guard bound");const auto guard=snapshot(session);require(guard!=patched,"guard patch changes the proven case range");fresh("guard patch");
-    okay(session.undoEdit(false),"undo guard patch");require(snapshot(session)==patched,"guard undo restores all three table cases");
-    okay(session.editAnnotation(0x2000,"patch",hex32(static_cast<u32>(Address{0x1001}-0x2000))),"patch table to middle of known instruction");require(entryFunction(session.analyzer()).incomplete&&!switchAt(entryFunction(session.analyzer()),input.branch),"invalid table overlay cannot reuse previously proved switch semantics");fresh("invalid target patch");
-    const auto invalid=snapshot(session);okay(session.undoEdit(false),"undo invalid target patch");require(snapshot(session)==patched,"invalid-target undo re-proves original valid cases ("+session.analysisStatusText()+")");okay(session.undoEdit(true),"redo invalid target patch");require(snapshot(session)==invalid,"invalid-target redo preserves conservative incomplete analysis");fresh("invalid target redo");
+void compareToFresh(Session& session, const std::string& source, const std::string& project,
+                    const std::string& label) {
+    okay(testing::matchesFreshAnalysis(session, project,
+        [&](Session& oracle) { return oracle.openPath(source); }, snapshot), label + " vs fresh full analysis");
 }
-void copyElidedLifecycle(){
+
+void checkReopen(const std::string& source, const std::string& project, const std::string& expected,
+                 const std::string& mode, const std::string& label) {
+    const auto authoritative = readFile(project);
+    require(!authoritative.empty(), label + " has a persisted Program");
+    Session reopened;
+    open(reopened, source, project);
+    require(testing::hasAnalysisMode(reopened, mode), label + " uses mode=" + mode);
+    require(snapshot(reopened) == expected, label + " keeps exact switch semantics and views");
+    compareToFresh(reopened, source, project, label);
+    require(readFile(project) == authoritative, label + " does not rewrite the authoritative Program");
+}
+
+void sessionLifecycle() {
     TemporaryDirectory temporary;
-    const auto source=temporary.file("copy-elided.elf"),project=temporary.file("program.mint");
-    const auto input=fixture(Variant::kCopyElided);
-    writeFile(source,input.bytes);
+    const auto source = temporary.file("switch.elf"), project = temporary.file("program.mint");
+    const auto input = fixture();
+    writeFile(source, input.bytes);
     Session session;
-    open(session,source,project);
-    const auto* jump=switchAt(entryFunction(session.analyzer()),input.branch);
-    require(jump&&jump->switchCases.size()==3&&jump->selectorWidth==4,"32-bit index definition before CMP permits the four-instruction dispatcher");
-    const auto complete=snapshot(session);
-    require(complete.find("proven table indices")!=std::string::npos,"copy-elided switch reaches the normal pseudo-C path");
-    bool dependency=false;
-    for(const auto& item:session.analyzer().indirectFlowReports())
-        for(const auto& site:item.second.sites)
-            if(site.address==input.branch)
-                for(const auto& range:site.dependencies)dependency|=range.start<=0x1000&&range.end>input.guard;
-    require(dependency,"switch proof depends on pre-CMP index definition bytes");
-    okay(session.editAnnotation(0x1001,"patch","fe"),"retarget XOR to esi without changing its length or flow");
-    require(entryFunction(session.analyzer()).incomplete&&!switchAt(entryFunction(session.analyzer()),input.branch),"patching the zero-extension witness invalidates its switch");
-    const auto invalidated=snapshot(session);
-    auto compareToFresh=[&](const std::string& expected,const std::string& label){
-        Session oracle;
-        const auto overlay=temporary.file(label+".mint");
-        writeFile(overlay,readFile(project));
-        okay(oracle.openPath(source),"open independent ELF for "+label);
-        okay(oracle.attachProject(overlay),"attach independent Program for "+label);
-        okay(oracle.reanalyze(),"run fresh full analysis for "+label);
-        require(snapshot(oracle)==expected,label+" agrees with fresh full analysis");
-    };
-    compareToFresh(invalidated,"index definition patch");
-    okay(session.undoEdit(false),"restore the zero-extending XOR");
-    require(snapshot(session)==complete,"undo re-proves the copy-elided switch");
-    {
-        Session reopened;
-        open(reopened,source,project);
-        const auto restored=snapshot(reopened);
-        require(restored==complete,"reopen revalidates the copy-elided switch");
-        compareToFresh(restored,"copy-elided switch reopen");
-    }
-    okay(session.undoEdit(true),"redo patch to index definition");
-    require(snapshot(session)==invalidated,"redo invalidates the copy-elided switch again");
+    open(session, source, project);
+    const auto initial = snapshot(session);
+    require(switchAt(entryFunction(session.analyzer()), input.branch), "Session exposes recovered switch semantics");
+    auto fresh = [&](const std::string& label) { compareToFresh(session, source, project, label); };
+    captureExample("before", session);
+
+    const auto firstIndex = Address{0x2000};
+    const auto relative = [&](Address target) { return hex32(static_cast<u32>(target - firstIndex)); };
+    okay(session.editAnnotation(firstIndex, "patch", relative(0x10b0) + " " + relative(0x10a0)),
+         "permute cases while preserving the set of jump targets");
+    const auto permuted = snapshot(session);
+    const auto* permutation = switchAt(entryFunction(session.analyzer()), input.branch);
+    require(permutation && permutation->targets == std::vector<Address>({0x10a0, 0x10b0}) &&
+            permutation->switchCases.size() == 3 && permutation->switchCases[0].target == 0x10b0 &&
+            permutation->switchCases[1].target == 0x10a0,
+            "equal sets of jump targets still have different case mappings");
+    require(permuted != initial, "table permutation changes the exported selector semantics");
+    fresh("table permutation");
+    captureExample("after case permutation", session);
+    checkReopen(source, project, permuted, "restored", "permuted switch reopen");
+
+    okay(session.undoEdit(false), "undo table permutation");
+    require(snapshot(session) == initial, "permutation undo restores original case values");
+    fresh("permutation undo");
+    okay(session.undoEdit(true), "redo table permutation");
+    require(snapshot(session) == permuted, "permutation redo restores changed case values");
+    fresh("permutation redo");
+    okay(session.undoEdit(false), "return to baseline table");
+
+    okay(session.editAnnotation(firstIndex, "patch", relative(0x10c0)), "patch rel32 target");
+    require(testing::hasAnalysisMode(session, "full"), "table dependency edit uses safe full rediscovery");
+    const auto patched = snapshot(session);
+    require(patched != initial, "table patch changes discovered case bodies and exported views");
+    fresh("table patch");
+    okay(session.undoEdit(false), "undo table patch");
+    require(snapshot(session) == initial, "undo exactly restores switch semantics and all views");
+    fresh("table undo");
+    okay(session.undoEdit(true), "redo table patch");
+    require(snapshot(session) == patched, "redo exactly restores patched switch semantics");
+    fresh("table redo");
+    checkReopen(source, project, patched, "restored", "patched switch reopen");
+    okay(testing::corruptDerivedCache(project), "corrupt the patched switch cache");
+    checkReopen(source, project, patched, "full", "patched switch recovery");
+    const auto olderCache = readFile(project + ".analysis");
+    require(!olderCache.empty(), "successful rediscovery replaces the corrupted cache");
+
+    okay(session.editAnnotation(0x1002, "patch", "01"), "reduce unsigned guard bound");
+    const auto guard = snapshot(session);
+    require(guard != patched, "guard patch changes the proven case range");
+    fresh("guard patch");
+    okay(session.undoEdit(false), "undo guard patch");
+    require(snapshot(session) == patched, "guard undo restores all three table cases");
+    fresh("guard undo");
+    okay(session.undoEdit(true), "redo guard patch");
+    require(snapshot(session) == guard, "guard redo restores the reduced case range");
+    fresh("guard redo");
+    checkReopen(source, project, guard, "restored", "guard patch reopen");
+    okay(session.undoEdit(false), "return to the original guard bound");
+
+    okay(session.editAnnotation(firstIndex, "patch", relative(0x1001)), "patch table to middle of instruction");
+    require(entryFunction(session.analyzer()).incomplete && !switchAt(entryFunction(session.analyzer()), input.branch),
+            "invalid table overlay cannot reuse previously proved switch semantics");
+    const auto invalid = snapshot(session);
+    fresh("invalid target patch");
+    okay(session.undoEdit(false), "undo invalid target patch");
+    require(snapshot(session) == patched, "invalid-target undo re-proves valid cases");
+    fresh("invalid target undo");
+    okay(session.undoEdit(true), "redo invalid target patch");
+    require(snapshot(session) == invalid, "invalid-target redo preserves the incomplete result");
+    fresh("invalid target redo");
+    writeFile(project + ".analysis", olderCache);
+    checkReopen(source, project, invalid, "full", "invalid switch with stale valid cache");
+}
+
+void copyElidedLifecycle() {
+    TemporaryDirectory temporary;
+    const auto source = temporary.file("copy-elided.elf"), project = temporary.file("program.mint");
+    const auto input = fixture(Variant::kCopyElided);
+    writeFile(source, input.bytes);
+    Session session;
+    open(session, source, project);
+    const auto* jump = switchAt(entryFunction(session.analyzer()), input.branch);
+    require(jump && jump->switchCases.size() == 3 && jump->selectorWidth == 4,
+            "32-bit index definition before CMP permits the four-instruction dispatcher");
+    const auto complete = snapshot(session);
+    require(complete.find("proven table indices") != std::string::npos,
+            "copy-elided switch reaches the normal Pseudo-C path");
+    bool dependency = false;
+    for (const auto& item : session.analyzer().indirectFlowReports())
+        for (const auto& site : item.second.sites)
+            if (site.address == input.branch)
+                for (const auto& range : site.dependencies) dependency |= range.start <= 0x1000 && range.end > input.guard;
+    require(dependency, "switch proof depends on pre-CMP index definition bytes");
+
+    okay(session.editAnnotation(0x1001, "patch", "fe"), "retarget XOR to esi without changing its length or flow");
+    require(entryFunction(session.analyzer()).incomplete && !switchAt(entryFunction(session.analyzer()), input.branch),
+            "patching the zero-extension witness invalidates its switch");
+    const auto invalidated = snapshot(session);
+    compareToFresh(session, source, project, "index definition patch");
+    okay(session.undoEdit(false), "restore the zero-extending XOR");
+    require(snapshot(session) == complete, "undo re-proves the copy-elided switch");
+    compareToFresh(session, source, project, "index definition undo");
+    checkReopen(source, project, complete, "restored", "copy-elided switch reopen");
+    okay(session.undoEdit(true), "redo patch to index definition");
+    require(snapshot(session) == invalidated, "redo invalidates the copy-elided switch again");
+    compareToFresh(session, source, project, "index definition redo");
+    checkReopen(source, project, invalidated, "restored", "copy-elided switch invalidation reopen");
 }
 void compilerFixture(const std::string& path,bool copyElided){
     Session session;okay(session.openPath(path),"open compiler-generated PIC switch");

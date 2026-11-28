@@ -5,6 +5,9 @@ import androidx.annotation.Nullable;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * An open binary and the analysis derived from it.
@@ -189,11 +192,76 @@ public final class MintSession implements Closeable {
         return nativeDecompiledC(handle, address);
     }
 
-    /** Pseudo-C with its status, and listing ranges keyed by output line. */
+    public enum DecompilationStatus {
+        COMPLETE, PARTIAL, UNSUPPORTED, BUDGET_EXHAUSTED, ERROR, CANCELLED;
+
+        static DecompilationStatus fromNative(String token) {
+            return switch (token) {
+                case "complete" -> COMPLETE;
+                case "partial" -> PARTIAL;
+                case "unsupported" -> UNSUPPORTED;
+                case "budget-exhausted" -> BUDGET_EXHAUSTED;
+                case "cancelled" -> CANCELLED;
+                default -> ERROR;
+            };
+        }
+
+        public boolean isUsable() {
+            return this == COMPLETE || this == PARTIAL;
+        }
+    }
+
+    public static final class DecompileDiagnostic {
+        public final DecompilationStatus status;
+        public final String reason;
+        @Nullable public final Long address;
+        /** End of a verified instruction at this address, exclusive. */
+        @Nullable public final Long instructionEnd;
+
+        private DecompileDiagnostic(String[] view, int index) {
+            status = DecompilationStatus.fromNative(view[index]);
+            reason = view[index + 1];
+            address = parseAddress(view[index + 2]);
+            instructionEnd = parseAddress(view[index + 3]);
+        }
+
+        @Nullable private static Long parseAddress(String value) {
+            return value.isEmpty() ? null : Long.parseUnsignedLong(value, 16);
+        }
+    }
+
+    public static final class DecompileView {
+        public final DecompilationStatus status;
+        public final String report;
+        public final String anchors;
+        public final String diagnostic;
+        public final List<DecompileDiagnostic> diagnostics;
+
+        private DecompileView(String[] view) {
+            report = view[0];
+            anchors = view[1];
+            status = DecompilationStatus.fromNative(view[2]);
+            diagnostic = view[3];
+            List<DecompileDiagnostic> details = new ArrayList<>();
+            for (int index = 4; index + 3 < view.length; index += 4) {
+                details.add(new DecompileDiagnostic(view, index));
+            }
+            diagnostics = Collections.unmodifiableList(details);
+        }
+    }
+
+    /** Pseudo-C report and listing ranges keyed by output line. */
     @NonNull
     public String[] decompileView(long address) {
+        DecompileView view = decompileResult(address);
+        return new String[]{view.report, view.anchors};
+    }
+
+    /** Native outcome, diagnostics, and text with its corresponding listing anchors. */
+    @NonNull
+    public DecompileView decompileResult(long address) {
         checkOpen();
-        return nativeDecompileView(handle, address);
+        return new DecompileView(nativeDecompileView(handle, address));
     }
 
     /** Compact CFG rows: {@code blockId start end successorId...}. */

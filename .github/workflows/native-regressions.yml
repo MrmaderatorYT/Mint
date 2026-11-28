@@ -1,0 +1,72 @@
+name: Native regressions
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  state-and-semantics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CC: clang
+      CXX: clang++
+      CMAKE_GENERATOR: Ninja
+      MINT_STATE_JOBS: '4'
+      ASAN_OPTIONS: halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Prepare host tools and compiler fixtures
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang ninja-build zlib1g-dev
+          ndk_version=28.2.13676358
+          ndk_root="$ANDROID_HOME/ndk/$ndk_version"
+          if [[ ! -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" ]]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$ndk_version"
+          fi
+          test -x "$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          printf 'MINT_CORPUS_NDK=%s\n' "$ndk_root" >> "$GITHUB_ENV"
+
+      - name: Compare patched, restored, and full analyses
+        shell: bash
+        run: |
+          mkdir -p build/ci-logs
+          app/hosttest/run.sh state build/ci-native 2>&1 | tee build/ci-logs/state.log
+
+      - name: Check headless outcomes and ELF64 semantics
+        shell: bash
+        run: |
+          cmake --build build/ci-native --parallel "$MINT_STATE_JOBS" \
+            --target mint_elf64_semantics_fixtures mint_control_flow_ast_test \
+            2>&1 | tee build/ci-logs/headless-build.log
+          ctest --test-dir build/ci-native --output-on-failure --no-tests=error \
+            -R '^(control_flow_ast|headless_script|headless_batch|elf64_semantics_aarch64|elf64_semantics_x86_64)$' \
+            --output-junit "$GITHUB_WORKSPACE/build/ci-logs/headless.xml" \
+            2>&1 | tee build/ci-logs/headless.log
+
+      - name: Check release provenance guard
+        shell: bash
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          export PATH="$JAVA_HOME/bin:$PATH"
+          python3 -m unittest discover -v -s tools/tests -p test_mint_release.py \
+            2>&1 | tee build/ci-logs/release-guard.log
+
+      - name: Save test logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mint-native-regression-logs
+          path: build/ci-logs
+          if-no-files-found: ignore

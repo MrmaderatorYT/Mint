@@ -154,6 +154,8 @@ final class PatchDialogCode {
             case "partial" -> R.string.patch_status_partial;
             case "unsupported" -> R.string.patch_status_unsupported;
             case "budget-exhausted" -> R.string.patch_status_budget;
+            case "error" -> R.string.patch_status_error;
+            case "cancelled" -> R.string.patch_status_cancelled;
             case "unavailable" -> R.string.patch_status_unavailable;
             default -> 0;
         };

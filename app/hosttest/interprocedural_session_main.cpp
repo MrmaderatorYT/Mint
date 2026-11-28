@@ -12,6 +12,10 @@ unsigned checks=0;
 void require(bool value,const std::string& text){++checks;if(!value){std::cerr<<"interprocedural Session: "<<text<<'\n';std::exit(1);}}
 std::string temporary(){auto path=(std::filesystem::temp_directory_path()/"mint-memory-session-XXXXXX").string();int fd=mkstemp(path.data());require(fd>=0,"owned temporary");close(fd);return path;}
 struct Files {std::string binary=temporary(),project=temporary();Files(){unlink(project.c_str());}~Files(){unlink(binary.c_str());unlink(project.c_str());unlink((project+".analysis").c_str());}};
+void open(Session& session, const Files& files) {
+    require(session.openRawPath(files.binary, Arch::kAArch64, 0x1000, 0x1000).ok() &&
+        session.attachProject(files.project).ok() && session.analyze().ok(), "open recursive memory fixture");
+}
 void compareFresh(Session& session, const Files& files, const char* step) {
     const auto status = testing::matchesFreshAnalysis(session, files.project, [&](Session& oracle) {
         return oracle.openRawPath(files.binary, Arch::kAArch64, 0x1000, 0x1000);
@@ -56,9 +60,11 @@ void recursiveFreshness(bool mutual){
         code[35]=code[36]=0xd65f03c0;
     }
     {std::ofstream out(files.binary,std::ios::binary);for(auto word:code)for(unsigned n=0;n<4;++n)out.put(static_cast<char>(word>>(n*8)));require(out.good(),"write recursive fixture");}
-    Session session;require(session.openRawPath(files.binary,Arch::kAArch64,0x1000,0x1000).ok()&&session.attachProject(files.project).ok()&&session.analyze().ok(),"discover recursive call graph");
+    Session session;
+    open(session, files);
     auto text=session.decompiledCFor(0x1000);
     require(text.find("1 proven read-only calls")!=std::string::npos&&text.find("1 exact store/load dependencies")!=std::string::npos,mutual?"ordinary decompiler consumes a read-only mutual cycle":"ordinary decompiler consumes a read-only self cycle");
+    compareFresh(session, files, "initial read-only recursive component");
     const Address patch=mutual?0x1084:0x1044;
     require(session.editAnnotation(patch,"patch","60 02 00 f9").ok(),"patch recursive member into overlapping pointer writer");
     text=session.decompiledCFor(0x1000);
@@ -66,12 +72,14 @@ void recursiveFreshness(bool mutual){
         // The first member has no explicit x19 SSA input yet. Passing that
         // absent physical binding to a nested writer cannot establish effects.
         require(text.find("0 proven read-only calls")!=std::string::npos&&text.find("0 selective write calls")!=std::string::npos&&text.find("1 alias barriers")!=std::string::npos&&text.find("0 exact store/load dependencies")!=std::string::npos,"absent transitive pointer input stays unknown in a mutual cycle");
+        compareFresh(session, files, "recursive writer with missing transitive binding");
         require(session.undoEdit(false).ok(),"undo writer before supplying explicit recursive input");
         text=session.decompiledCFor(0x1000);
         require(text.find("1 proven read-only calls")!=std::string::npos&&text.find("1 exact store/load dependencies")!=std::string::npos,"missing write input does not prevent a read-only cycle proof");
         require(session.editAnnotation(0x1044,"patch","69 02 40 f9").ok(),"make first recursive member explicitly read its pointer input");
         text=session.decompiledCFor(0x1000);
         require(text.find("1 proven read-only calls")!=std::string::npos&&text.find("1 exact store/load dependencies")!=std::string::npos,"explicit pointer read retains read-only recursive effects");
+        compareFresh(session, files, "recursive reader with explicit transitive binding");
         require(session.editAnnotation(patch,"patch","60 02 00 f9").ok(),"patch recursive writer with transitive physical input available");
         text=session.decompiledCFor(0x1000);
     }
@@ -85,7 +93,9 @@ void recursiveFreshness(bool mutual){
     text=session.decompiledCFor(0x1000);
     require(text.find("1 selective write calls")!=std::string::npos&&text.find("0 exact store/load dependencies")!=std::string::npos,"redo reapplies recursive write effects");
     compareFresh(session, files, "recursive writer redo");
-    Session reopened;require(reopened.openRawPath(files.binary,Arch::kAArch64,0x1000,0x1000).ok()&&reopened.attachProject(files.project).ok()&&reopened.analyze().ok(),"reopen patched recursive project");
+    Session reopened;
+    open(reopened, files);
+    require(testing::hasAnalysisMode(reopened, "restored"), "reopen recursive writer from the derived cache");
     text=reopened.decompiledCFor(0x1000);
     require(text.find("0 proven read-only calls")!=std::string::npos&&text.find("1 selective write calls")!=std::string::npos&&text.find("0 exact store/load dependencies")!=std::string::npos,"persistent recursive project rebuilds patched effect summaries");
     compareFresh(reopened, files, "reopened recursive write effects");
@@ -93,6 +103,20 @@ void recursiveFreshness(bool mutual){
     text=reopened.decompiledCFor(0x1000);
     require(text.find("0 proven read-only calls")!=std::string::npos&&text.find("0 selective write calls")!=std::string::npos&&text.find("1 alias barriers")!=std::string::npos&&text.find("0 exact store/load dependencies")!=std::string::npos,"unknown effects anywhere in recursive component remain a barrier");
     compareFresh(reopened, files, "opaque recursive call patch");
+    require(reopened.editAnnotation(0x1000, "comment", "recursive fixture note").ok(),
+            "persist unrelated user state alongside the opaque call");
+    require(testing::corruptDerivedCache(files.project).ok(), "corrupt test-owned recursive derived cache");
+    Session rebuilt;
+    open(rebuilt, files);
+    require(testing::hasAnalysisMode(rebuilt, "full"), "corrupt recursive cache falls back to full discovery");
+    require(rebuilt.annotation(patch, "patch") == "40 00 3f d6" &&
+            rebuilt.annotation(0x1000, "comment") == "recursive fixture note",
+            "recursive cache repair keeps the confirmed patch and unrelated user note");
+    text = rebuilt.decompiledCFor(0x1000);
+    require(text.find("1 alias barriers") != std::string::npos &&
+            text.find("0 exact store/load dependencies") != std::string::npos,
+            "recursive cache repair preserves the conservative barrier");
+    compareFresh(rebuilt, files, "corrupt recursive cache recovery");
 }
 void recursiveFramesRemainUnknown(){
     Files files;

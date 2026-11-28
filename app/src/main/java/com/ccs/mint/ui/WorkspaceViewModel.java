@@ -19,6 +19,7 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -189,7 +190,7 @@ public final class WorkspaceViewModel extends ViewModel {
             if (config != null && !id.endsWith(config.projectSuffix())) {
                 throw new IOException("Saved raw configuration does not match the project mapping");
             }
-            return new OpenInput(binary, config, preferences.getString("name", "input.bin"), null);
+            return new OpenInput(binary, config, preferences.getString("name", "input.bin"), null, true);
         });
     }
 
@@ -263,12 +264,19 @@ public final class WorkspaceViewModel extends ViewModel {
         final RawImportConfig config;
         final String name;
         final ProjectArchive.Metadata restoredArchive;
+        final boolean savedProject;
 
         OpenInput(File binary, RawImportConfig config, String name, ProjectArchive.Metadata restoredArchive) {
+            this(binary, config, name, restoredArchive, false);
+        }
+
+        OpenInput(File binary, RawImportConfig config, String name, ProjectArchive.Metadata restoredArchive,
+                  boolean savedProject) {
             this.binary = binary;
             this.config = config;
             this.name = name;
             this.restoredArchive = restoredArchive;
+            this.savedProject = savedProject;
         }
     }
 
@@ -287,7 +295,7 @@ public final class WorkspaceViewModel extends ViewModel {
                 RawImportConfig actualConfig = input.config;
                 ProjectArchive.Metadata restoredMetadata = input.restoredArchive;
                 displayName = input.name;
-                if (cancelRequested.get() || token != generation.get()) throw new IOException("import cancelled");
+                if (cancelRequested.get() || token != generation.get()) throw new CancellationException();
                 String id = projectId(binary);
                 SharedPreferences preferences = projectPreferences(application, id);
                 opened = actualConfig == null ? MintSession.open(binary.getAbsolutePath()) : actualConfig.open(binary.getAbsolutePath());
@@ -301,16 +309,22 @@ public final class WorkspaceViewModel extends ViewModel {
                     opened = null;
                     if (token == generation.get()) state.postValue(new State(Phase.CANCELED, displayName, null));
                 } else {
-                    SharedPreferences.Editor projectEditor = preferences.edit().putString("name", displayName)
+                    SharedPreferences.Editor projectEditor = preferences.edit()
                             .putLong("last_opened", System.currentTimeMillis());
-                    if (actualConfig == null) projectEditor.remove("raw_arch").remove("raw_base").remove("raw_entry");
-                    else projectEditor.putString("raw_arch",actualConfig.architecture)
-                            .putLong("raw_base",actualConfig.baseAddress).putLong("raw_entry",actualConfig.entryAddress);
-                    if (restoredMetadata != null) projectEditor.putLong("selected", restoredMetadata.selected)
-                            .putLong("listing", restoredMetadata.listing).putInt("pane", restoredMetadata.pane);
-                    // Configuration must be durable before replacing the live
-                    // session or updating the cold-start project pointer.
-                    if (!projectEditor.commit()) throw new IOException("cannot save project configuration");
+                    if (input.savedProject) {
+                        // The mapping was read from existing project preferences.
+                        // Failure to persist a recency timestamp must not prevent reopening.
+                        projectEditor.apply();
+                    } else {
+                        projectEditor.putString("name", displayName);
+                        if (actualConfig == null) projectEditor.remove("raw_arch").remove("raw_base").remove("raw_entry");
+                        else projectEditor.putString("raw_arch",actualConfig.architecture)
+                                .putLong("raw_base",actualConfig.baseAddress).putLong("raw_entry",actualConfig.entryAddress);
+                        if (restoredMetadata != null) projectEditor.putLong("selected", restoredMetadata.selected)
+                                .putLong("listing", restoredMetadata.listing).putInt("pane", restoredMetadata.pane);
+                        // A new configuration must be durable before replacing the live session.
+                        if (!projectEditor.commit()) throw new IOException("cannot save project configuration");
+                    }
                     MintSession previous = session;
                     session = opened;
                     name = displayName;
@@ -337,9 +351,9 @@ public final class WorkspaceViewModel extends ViewModel {
                 String error = exception.getMessage();
                 if (opened != null) opened.close();
                 if (token == generation.get()) {
-                    state.postValue(new State(
-                            cancelRequested.get() ? Phase.CANCELED : Phase.FAILED,
-                            displayName, error == null ? exception.toString() : error));
+                    boolean wasCancelled = cancelRequested.get() || exception instanceof CancellationException;
+                    state.postValue(new State(wasCancelled ? Phase.CANCELED : Phase.FAILED,
+                            displayName, wasCancelled ? null : error == null ? exception.toString() : error));
                 }
             } finally {
                 opening = null;
@@ -349,12 +363,18 @@ public final class WorkspaceViewModel extends ViewModel {
 
     /** Stops the current analysis without invalidating the session from a view. */
     public void cancel() {
+        if (!isOpening()) return;
         cancelRequested.set(true);
         MintSession current = opening;
         if (current != null) current.cancelAnalysis();
         Future<?> task = openTask;
         if (task != null) task.cancel(false);
-        state.postValue(new State(Phase.CANCELED, name, "analysis cancelled"));
+        state.postValue(new State(Phase.CANCELED, name, null));
+    }
+
+    boolean isOpening() {
+        final State current = state.getValue();
+        return current != null && current.phase == Phase.OPENING;
     }
 
     @Override

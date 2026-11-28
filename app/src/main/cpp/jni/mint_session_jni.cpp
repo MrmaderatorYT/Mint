@@ -36,6 +36,14 @@ namespace {
 
 Session* asSession(jlong handle) { return reinterpret_cast<Session*>(handle); }
 
+void throwAnalysisFailure(JNIEnv* env, const mint::Status& status) {
+    if (status.code() == mint::ErrorCode::kCancelled) {
+        mint::jni::throwCancellation(env, status.toString());
+    } else {
+        mint::jni::throwIllegalState(env, status.toString());
+    }
+}
+
 /// Bit flags packed into the `flags` column of the function list, so the Java
 /// side gets everything it needs to render a row without a second call.
 enum FunctionFlags : jint {
@@ -181,7 +189,7 @@ Java_com_ccs_mint_core_MintSession_nativeAnalyze(JNIEnv* env, jclass, jlong hand
     }
     mint::Status status = session->analyze();
     if (!status.ok()) {
-        mint::jni::throwIllegalState(env, status.toString());
+        throwAnalysisFailure(env, status);
         return JNI_FALSE;
     }
     return JNI_TRUE;
@@ -491,18 +499,47 @@ JNIEXPORT jobjectArray JNICALL
 Java_com_ccs_mint_core_MintSession_nativeDecompileView(JNIEnv* env, jclass, jlong handle,
                                                       jlong address) {
     auto* session = asSession(handle);
-    if (!session) return nullptr;
+    if (!session) {
+        mint::jni::throwIllegalState(env, "session is closed");
+        return nullptr;
+    }
+    const auto report = session->decompileReportFor(static_cast<Address>(address));
     std::string anchors;
-    const std::string body = session->decompileReportFor(static_cast<Address>(address)).text(&anchors);
+    auto body = report.text(&anchors);
+    const auto diagnostic = std::find_if(report.diagnostics.begin(), report.diagnostics.end(),
+        [&report](const auto& entry) { return entry.status == report.status; });
+    std::vector<std::string> values{std::move(body), std::move(anchors),
+        mint::decompileStatusName(report.status),
+        diagnostic == report.diagnostics.end() ? std::string{} : diagnostic->reason};
+    values.reserve(values.size() + 4 * report.diagnostics.size());
+    const auto addressText = [](Address at) {
+        char buffer[17];
+        std::snprintf(buffer, sizeof(buffer), "%llx", static_cast<unsigned long long>(at));
+        return std::string(buffer);
+    };
+    const auto& code = session->analyzer().code();
+    for (const auto& item : report.diagnostics) {
+        values.emplace_back(mint::decompileStatusName(item.status));
+        values.push_back(item.reason);
+        values.push_back(item.address == kNoAddress ? std::string{} : addressText(item.address));
+        // A report can point to an undecodable site, a function boundary, or an
+        // address in another listing space. Only an exact decoded row is a jump target.
+        const auto* instruction = item.address != kNoAddress && !session->isDexLike() && code.finalized()
+            ? code.find(item.address) : nullptr;
+        if (instruction && instruction->size && instruction->size <= kNoAddress - item.address)
+            values.push_back(addressText(item.address + instruction->size));
+        else
+            values.emplace_back();
+    }
     jclass stringClass = env->FindClass("java/lang/String");
     if (!stringClass) return nullptr;
-    jobjectArray view = env->NewObjectArray(2, stringClass, nullptr);
+    jobjectArray view = env->NewObjectArray(static_cast<jsize>(values.size()), stringClass, nullptr);
     env->DeleteLocalRef(stringClass);
     if (!view) return nullptr;
-    for (int index = 0; index < 2; ++index) {
-        jstring value = mint::jni::toJava(env, index == 0 ? body : anchors);
+    for (size_t index = 0; index < values.size(); ++index) {
+        jstring value = mint::jni::toJava(env, values[index]);
         if (!value) return nullptr;
-        env->SetObjectArrayElement(view, index, value);
+        env->SetObjectArrayElement(view, static_cast<jsize>(index), value);
         env->DeleteLocalRef(value);
         if (env->ExceptionCheck()) return nullptr;
     }
@@ -729,7 +766,7 @@ Java_com_ccs_mint_core_MintSession_nativeType(JNIEnv* env,jclass,jlong handle,js
 JNIEXPORT void JNICALL
 Java_com_ccs_mint_core_MintSession_nativeReanalyze(JNIEnv* env,jclass,jlong handle) {
     auto* session=asSession(handle);if(!session){mint::jni::throwIllegalState(env,"session is closed");return;}
-    auto status=session->reanalyze();if(!status.ok())mint::jni::throwIllegalState(env,status.toString());
+    auto status=session->reanalyze();if(!status.ok())throwAnalysisFailure(env,status);
 }
 JNIEXPORT void JNICALL
 Java_com_ccs_mint_core_MintSession_nativeExportPatched(JNIEnv* env,jclass,jlong handle,jstring path) {

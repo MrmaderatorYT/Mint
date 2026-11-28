@@ -5,11 +5,14 @@
 
 namespace mint::testing {
 
-// Compiled into the host test engine only. The write hook can produce partial
-// writes and errno failures. The publication hook runs after fsync and close.
+// Compiled into the host test engine only. The sync hook targets the temporary
+// file. The publication hooks bracket rename after the file has been closed.
 struct ProgramSaveHooks {
     ssize_t (*write)(int, const void*, size_t) = nullptr;
     void (*beforeRename)() = nullptr;
+    int (*syncTemporary)(int) = nullptr;
+    int (*rename)(const char*, const char*) = nullptr;
+    void (*afterRename)() = nullptr;
 };
 
 void setProgramSaveHooks(ProgramSaveHooks hooks);

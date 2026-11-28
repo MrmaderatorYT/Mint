@@ -157,6 +157,11 @@
     <string name="ws_cfg_failed">Не вдалося завантажити граф потоку керування: %1$s</string>
     <string name="ws_writes_failed">Не вдалося завантажити записи в пам’ять: %1$s</string>
     <string name="ws_decompile_failed">Не вдалося завантажити код: %1$s</string>
+    <string name="ws_decompile_status_line">/* Стан декомпіляції: %1$s */</string>
+    <string name="ws_decompile_why_partial">Чому результат частковий?</string>
+    <string name="ws_decompile_details">Докладніше про декомпіляцію</string>
+    <string name="ws_decompile_reason_address">%1$s\nАдреса 0x%2$x</string>
+    <string name="ws_decompile_go_to_instruction">Перейти до інструкції 0x%1$x</string>
     <string name="ws_general_report_failed">Не вдалося завантажити звіт про програму: %1$s</string>
     <string name="ws_calls_limit">У графі викликів показано до %1$,d функцій. Пропущено %2$,d функцій із найменшою кількістю викликів.</string>
     <string name="ws_no_pseudo_report">Звіт Pseudo-C недоступний</string>

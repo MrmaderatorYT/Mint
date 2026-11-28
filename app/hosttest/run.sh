@@ -17,6 +17,7 @@
 #   app/hosttest/run.sh jni    [file]
 #   app/hosttest/run.sh platform [file]
 #   app/hosttest/run.sh archive        # generated DWARF/PDB + real archive/JNI
+#   app/hosttest/run.sh state [build-dir]  # PROD-003, with compiler fixtures by default
 #   app/hosttest/run.sh fuzz   [iterations]
 set -euo pipefail
 
@@ -26,8 +27,9 @@ cd "$ROOT"
 NDK_SYSROOT="$HOME/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/sysroot"
 DEFAULT_LIB="$NDK_SYSROOT/usr/lib/aarch64-linux-android/libc++_shared.so"
 
-JAVA_HOME="${JAVA_HOME:-$(/usr/libexec/java_home -v 17)}"
-export JAVA_HOME
+if [[ -z "${JAVA_HOME:-}" && -x /usr/libexec/java_home ]]; then
+    export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+fi
 
 run_engine() {
     local lib="${1:-$DEFAULT_LIB}"
@@ -54,12 +56,12 @@ run_jni() {
 
     local out=build/hostjni/classes
     mkdir -p "$out"
-    "$JAVA_HOME/bin/javac" -nowarn -d "$out" \
+    "${JAVA_HOME:+$JAVA_HOME/bin/}javac" -nowarn -d "$out" \
         app/hosttest/jni/androidx/annotation/*.java \
         app/src/main/java/com/ccs/mint/core/*.java \
         app/hosttest/jni/JniProbe.java app/hosttest/jni/PlatformJniProbe.java
-    "$JAVA_HOME/bin/java" -Djava.library.path=build/hostjni -cp "$out" JniProbe "$lib"
-    "$JAVA_HOME/bin/java" -Djava.library.path=build/hostjni -cp "$out" PlatformJniProbe
+    "${JAVA_HOME:+$JAVA_HOME/bin/}java" -Djava.library.path=build/hostjni -cp "$out" JniProbe "$lib"
+    "${JAVA_HOME:+$JAVA_HOME/bin/}java" -Djava.library.path=build/hostjni -cp "$out" PlatformJniProbe
 }
 
 run_platform() {
@@ -85,13 +87,13 @@ run_archive() {
           -DMINT_HOST_CORPUS=ON -DMINT_HOST_SANITIZE=OFF >/dev/null
     cmake --build "$archive_build" --target mint_debug_loader_corpus_files mintcore -j4 >/dev/null
     mkdir -p "$archive_classes"
-    "$JAVA_HOME/bin/javac" -nowarn -d "$archive_classes" \
+    "${JAVA_HOME:+$JAVA_HOME/bin/}javac" -nowarn -d "$archive_classes" \
         app/hosttest/jni/androidx/annotation/*.java \
         app/src/main/java/com/ccs/mint/core/*.java \
         app/src/main/java/com/ccs/mint/ui/RawImportConfig.java \
         app/src/main/java/com/ccs/mint/ui/ProjectArchive.java \
         app/hosttest/jni/ArchiveJniProbe.java
-    "$JAVA_HOME/bin/java" -Djava.library.path="$archive_build" -cp "$archive_classes" \
+    "${JAVA_HOME:+$JAVA_HOME/bin/}java" -Djava.library.path="$archive_build" -cp "$archive_classes" \
         ArchiveJniProbe "$archive_fixtures/stripped.so" "$archive_fixtures/external.debug" \
         "$archive_fixtures/windows-types.exe" "$archive_fixtures/windows-types.pdb"
 }
@@ -104,6 +106,28 @@ run_fuzz() {
     python3 app/hosttest/fuzz.py "$DEFAULT_LIB" "$iterations"
 }
 
+run_state() {
+    local state_build="${1:-build/prod-003}"
+    local corpus="${MINT_STATE_CORPUS:-ON}"
+    local jobs="${MINT_STATE_JOBS:-4}"
+    local configure=(-S app/hosttest -B "$state_build" -DCMAKE_BUILD_TYPE=Debug
+        -DMINT_HOST_SANITIZE=ON -DMINT_HOST_CORPUS="$corpus")
+    if [[ -n "${MINT_CORPUS_NDK:-}" ]]; then configure+=("-DMINT_CORPUS_NDK=$MINT_CORPUS_NDK"); fi
+    cmake "${configure[@]}"
+    cmake --build "$state_build" --target mint_state_tests --parallel "$jobs"
+    ASAN_OPTIONS="${ASAN_OPTIONS:-halt_on_error=1}" UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1}" \
+        ctest --test-dir "$state_build" --label-regex '^prod003$' --no-tests=error --output-on-failure --parallel "$jobs"
+    if [[ "${MINT_STATE_DEVICE:-0}" == 1 ]]; then
+        app/src/androidTest/run_process_death.sh
+        local runner="${MINT_TEST_PACKAGE:-com.ccs.mint.test}/androidx.test.runner.AndroidJUnitRunner"
+        local recovery_result
+        recovery_result=$(adb shell am instrument -w -r \
+            -e class com.ccs.mint.ui.WorkspaceViewModelRecoveryTest "$runner")
+        printf '%s\n' "$recovery_result"
+        grep -Fq 'OK (1 test)' <<< "$recovery_result"
+    fi
+}
+
 case "${1:-all}" in
     engine) run_engine "${2:-}" ;;
     feature) run_feature "${2:-}" ;;
@@ -111,6 +135,7 @@ case "${1:-all}" in
     platform) run_platform "${2:-}" ;;
     corpus) run_corpus ;;
     archive) run_archive ;;
+    state)   run_state "${2:-}" ;;
     fuzz)   run_fuzz "${2:-}" ;;
     all)
         run_platform
@@ -123,7 +148,7 @@ case "${1:-all}" in
         run_fuzz 200
         ;;
     *)
-        echo "usage: $0 [all|engine|feature|platform|corpus|archive|jni|fuzz] [arg]" >&2
+        echo "usage: $0 [all|engine|feature|platform|corpus|archive|jni|fuzz|state] [arg]" >&2
         exit 2
         ;;
 esac

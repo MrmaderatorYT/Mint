@@ -14,7 +14,8 @@
 
 namespace mint {
 
-enum class DecompileStatus { kComplete, kPartial, kUnsupported, kBudgetExhausted, kError };
+enum class DecompileStatus { kComplete, kPartial, kUnsupported, kBudgetExhausted, kError, kCancelled };
+const char* decompileStatusName(DecompileStatus status);
 
 struct DecompileDiagnostic {
     DecompileStatus status;

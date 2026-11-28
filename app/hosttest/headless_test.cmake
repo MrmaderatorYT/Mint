@@ -24,8 +24,30 @@ file(SHA256 "${test_directory}/patched binary.so" patched_hash)
 execute_process(COMMAND "${TOOL}" "${INPUT}" --project "${test_directory}/program.mint" export-patched "${INPUT}" RESULT_VARIABLE overwrite OUTPUT_QUIET ERROR_QUIET)
 file(SHA256 "${INPUT}" final_hash)
 execute_process(COMMAND "${TOOL}" "${INPUT}" unsupported-command RESULT_VARIABLE invalid OUTPUT_QUIET ERROR_QUIET)
+get_filename_component(assets "${INPUT}" DIRECTORY)
+set(complete_input "${assets}/learn/arithmetic.elf")
+execute_process(COMMAND "${TOOL}" "${complete_input}" decompile 0x4234
+    RESULT_VARIABLE complete_exit OUTPUT_VARIABLE complete_report ERROR_VARIABLE complete_error)
+execute_process(COMMAND "${TOOL}" "${assets}/learn/calls.elf" decompile 0x4230
+    RESULT_VARIABLE partial_exit OUTPUT_VARIABLE partial_report ERROR_VARIABLE partial_error)
+execute_process(COMMAND "${TOOL}" "${complete_input}" decompile 0xffffffffffffffff
+    RESULT_VARIABLE error_exit OUTPUT_VARIABLE error_report ERROR_VARIABLE error_error)
+file(WRITE "${test_directory}/bad-decompile.mint" "decompile 0xffffffffffffffff\nsummary\n")
+execute_process(COMMAND "${TOOL}" "${complete_input}" --script "${test_directory}/bad-decompile.mint"
+    RESULT_VARIABLE script_exit OUTPUT_VARIABLE script_report ERROR_VARIABLE script_error)
 file(REMOVE_RECURSE "${test_directory}")
 if(NOT name STREQUAL "headless_entry" OR NOT origin STREQUAL "user" OR NOT original_hash STREQUAL after_hash OR NOT original_hash STREQUAL final_hash OR original_hash STREQUAL patched_hash OR overwrite EQUAL 0 OR invalid EQUAL 0)
     message(FATAL_ERROR "headless persist/export/fail-fast contract failed")
+endif()
+if(NOT complete_exit STREQUAL "0" OR NOT complete_report MATCHES "^/\\* Decompilation status: complete \\*/")
+    message(FATAL_ERROR "Complete decompile contract failed: ${complete_report}\n${complete_error}")
+endif()
+if(NOT partial_exit STREQUAL "0" OR NOT partial_report MATCHES "^/\\* Decompilation status: partial \\*/")
+    message(FATAL_ERROR "Partial report must stay usable: ${partial_report}\n${partial_error}")
+endif()
+if(NOT error_exit STREQUAL "1" OR NOT error_report MATCHES "^/\\* Decompilation status: error \\*/" OR
+   NOT error_report MATCHES "not-found" OR NOT script_exit STREQUAL "1" OR
+   NOT script_report STREQUAL error_report OR NOT script_error MATCHES "script line 1: decompilation: error")
+    message(FATAL_ERROR "Decompile errors must fail fast and keep diagnostics: ${error_report}\n${error_error}\n${script_report}\n${script_error}")
 endif()
 message(STATUS "Headless scripts, cold reopen, JSON, spaced export path and source/overwrite guards passed")

@@ -24,4 +24,8 @@ void throwIoException(JNIEnv* env, const std::string& message) {
     throwByName(env, "java/io/IOException", message);
 }
 
+void throwCancellation(JNIEnv* env, const std::string& message) {
+    throwByName(env, "java/util/concurrent/CancellationException", message);
+}
+
 }  // namespace mint::jni

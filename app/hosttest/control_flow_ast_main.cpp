@@ -259,6 +259,14 @@ void instruction(IrFunction& ir, MintOp op, Varnode dest = Varnode::invalid(), V
     IrInsn insn; insn.op = op; insn.dest = dest; insn.a = a; insn.b = b; insn.address = 0x1000 + ir.insns.size() * 4; ir.insns.push_back(insn); ++ir.blocks[0].insnCount;
 }
 void decompileReport() {
+    DecompileReport capped;
+    for (unsigned i = 0; i < 32; ++i)
+        capped.note(DecompileStatus::kPartial, "partial reason " + std::to_string(i));
+    capped.noteFailure(Status::error(ErrorCode::kTooLarge, "stronger reason"), "decompiler");
+    require(capped.diagnostics.size() == 32 && capped.status == DecompileStatus::kBudgetExhausted &&
+            capped.text().find("budget-exhausted: decompiler: too-large: stronger reason") != std::string::npos,
+            "the diagnostic cap preserves the reason for an escalated outcome");
+
     auto ir = singleBlock(Arch::kAArch64, "partial_transfer");
     ir.blocks[0].end = 0x1004;
     instruction(ir, MintOp::kBranchInd, {}, Varnode::reg(arm64::kXn(0), 8));

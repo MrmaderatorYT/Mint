@@ -13,6 +13,7 @@
 
 #include "mint/session.h"
 #include "mint/db/analysis_cache.h"
+#include "program_fresh_oracle.h"
 
 namespace {
 using namespace mint;
@@ -31,7 +32,10 @@ bool success(const Status& status, const std::string& description) {
 class TemporaryDirectory {
 public:
     TemporaryDirectory() {
-        std::string name = "/private/tmp/mint-cache-contract-XXXXXX";
+        std::error_code error;
+        const auto temporary = std::filesystem::temp_directory_path(error);
+        if (error) return;
+        auto name = (temporary / "mint-cache-contract-XXXXXX").string();
         if (::mkdtemp(name.data())) path_ = std::move(name);
     }
     ~TemporaryDirectory() {
@@ -196,10 +200,13 @@ Snapshot snapshot(Session& session) {
 }
 
 bool sameSnapshot(const Snapshot& actual, const Snapshot& expected, const std::string& description) {
-    bool ok = check(actual.analysis == expected.analysis, description + " code/functions/CFG/stats/indexes");
-    ok &= check(actual.views == expected.views, description + " listing/IR/decompiler views");
-    ok &= check(actual.references == expected.references, description + " code/data references");
-    return ok;
+    const auto compare = [&](const std::string& left, const std::string& right, const char* area) {
+        const auto difference = testing::firstSnapshotDifference(left, right);
+        return check(difference.empty(), description + " — " + area + "\n" + difference);
+    };
+    return compare(actual.analysis, expected.analysis, "code/functions/CFG/stats/indexes") &&
+           compare(actual.views, expected.views, "listing/IR/decompiler views") &&
+           compare(actual.references, expected.references, "code/data references");
 }
 
 bool open(Session* session, const Fixture& fixture, const std::string& source, const std::string& project) {
@@ -598,7 +605,11 @@ bool integration(Arch architecture) {
 }  // namespace
 
 int main() {
-    bool ok = serializerContracts();
+    const auto mismatch = mint::testing::firstSnapshotDifference("equal\npatch A\nlater",
+                                                                  "equal\npatch B\nlater");
+    bool ok = check(mismatch == "line 2, column 7\n  current: patch A\n  full:    patch B",
+                    "first difference identifies the scenario's line and values");
+    ok = serializerContracts() && ok;
     ok = boundedSnapshotContracts(Arch::kAArch64) && ok;
     ok = boundedSnapshotContracts(Arch::kX86_64) && ok;
     ok = sharedOwnerContract(Arch::kAArch64) && ok;

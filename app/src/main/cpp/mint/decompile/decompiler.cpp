@@ -10,18 +10,19 @@
 
 namespace mint {
 
-namespace {
-const char* statusName(DecompileStatus status) {
+const char* decompileStatusName(DecompileStatus status) {
     switch (status) {
         case DecompileStatus::kComplete: return "complete";
         case DecompileStatus::kPartial: return "partial";
         case DecompileStatus::kUnsupported: return "unsupported";
         case DecompileStatus::kBudgetExhausted: return "budget-exhausted";
         case DecompileStatus::kError: return "error";
+        case DecompileStatus::kCancelled: return "cancelled";
     }
     return "error";
 }
 
+namespace {
 std::string commentText(std::string reason) {
     for (char& ch : reason) if (ch == '\r' || ch == '\n') ch = ' ';
     for (size_t at = reason.find("*/"); at != std::string::npos; at = reason.find("*/", at + 3))
@@ -31,11 +32,16 @@ std::string commentText(std::string reason) {
 }
 
 void DecompileReport::note(DecompileStatus next, std::string reason, Address address) {
+    const bool escalated = next > status;
     status = std::max(status, next);
     // Retain the first site of each distinct limitation. Bound the report
     // independently of the size of the function.
-    if (diagnostics.size() == 32 || std::any_of(diagnostics.begin(), diagnostics.end(),
+    if (std::any_of(diagnostics.begin(), diagnostics.end(),
             [&](const auto& diagnostic) { return diagnostic.status == next && diagnostic.reason == reason; })) return;
+    if (diagnostics.size() == 32) {
+        if (!escalated) return;
+        diagnostics.pop_back();
+    }
     diagnostics.push_back({next, std::move(reason), address});
 }
 
@@ -43,15 +49,16 @@ void DecompileReport::noteFailure(const Status& failure, const char* stage) {
     if (failure.ok()) return;
     const auto kind = failure.code() == ErrorCode::kTooLarge ? DecompileStatus::kBudgetExhausted
         : failure.code() == ErrorCode::kUnsupported ? DecompileStatus::kUnsupported
+        : failure.code() == ErrorCode::kCancelled ? DecompileStatus::kCancelled
         : DecompileStatus::kError;
     note(kind, std::string(stage) + ": " + failure.toString());
 }
 
 std::string DecompileReport::text(std::string* listingAnchors) const {
     std::ostringstream out;
-    out << "/* Decompilation status: " << statusName(status) << " */\n";
+    out << "/* Decompilation status: " << decompileStatusName(status) << " */\n";
     for (const auto& item : diagnostics) {
-        out << "/* " << statusName(item.status) << ": " << commentText(item.reason);
+        out << "/* " << decompileStatusName(item.status) << ": " << commentText(item.reason);
         if (item.address != kNoAddress) out << " (0x" << std::hex << item.address << std::dec << ')';
         out << " */\n";
     }

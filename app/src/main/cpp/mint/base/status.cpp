@@ -14,6 +14,7 @@ const char* errorCodeName(ErrorCode code) {
         case ErrorCode::kUnsupported: return "unsupported";
         case ErrorCode::kTooLarge: return "too-large";
         case ErrorCode::kInternalError: return "internal-error";
+        case ErrorCode::kCancelled: return "cancelled";
     }
     return "unknown";
 }

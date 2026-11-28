@@ -2,6 +2,8 @@
 
 Baseline revision: `d607c10a886c37fc94cc9bf64aeddaec77a6a920`. All entries below are open on that revision. The [baseline report](../../quality/releases/0.6-preview/report.md) records the positive and negative runs. Classifications use the [production roadmap](../../now-to-production-roadmap.md).
 
+**0.8 Preview update.** BLK-01 is fixed in the decompilation path. An unknown function address retains the `error` diagnostic and returns exit 1. The batch report records `status: failed` and `analysis_status: error`. Partial decompilation remains usable and explicitly labeled. See `headless_script` and `headless_batch` in CTest.
+
 ## Reproduced findings
 
 | ID | Priority and scope | Observed result and reproduction | Closure condition |

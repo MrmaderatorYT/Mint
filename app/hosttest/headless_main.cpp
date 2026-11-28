@@ -10,13 +10,23 @@
 
 using namespace mint;
 namespace {
+class CommandFailure : public std::runtime_error {
+public:
+    CommandFailure(int exitCode, const std::string& message)
+        : std::runtime_error(message), exitCode(exitCode) {}
+    const int exitCode;
+};
+
 Address address(const std::string& text) {
     if(text.empty() || text[0]=='-')throw std::invalid_argument("address must be unsigned");
     size_t used=0;auto value=std::stoull(text,&used,text.rfind("0x",0)==0 || text.rfind("0X",0)==0?16:10);
     if(used!=text.size())throw std::invalid_argument("address must be decimal or 0x-prefixed hexadecimal");
     return value;
 }
-void checked(Status status) {if(!status.ok())throw std::runtime_error(status.toString());}
+void checked(Status status) {
+    if (!status.ok())
+        throw CommandFailure(status.code() == ErrorCode::kCancelled ? 130 : 1, status.toString());
+}
 std::string remainder(std::istringstream& input) {std::string value;std::getline(input,value);if(!value.empty() && value[0]==' ')value.erase(0,1);return value;}
 std::string joined(const std::string& first,std::istringstream& input) {auto rest=remainder(input);return first+(rest.empty()?"":" "+rest);}
 void command(Session& session,const std::string& line,bool allowEdits=false) {
@@ -26,7 +36,14 @@ void command(Session& session,const std::string& line,bool allowEdits=false) {
     if(op=="summary")std::cout<<session.memoryBlocksText();
     else if(op=="functions")for(const auto& fn:session.analyzer().functions())std::cout<<"0x"<<std::hex<<fn.entry<<std::dec<<"\t"<<session.displayNameAt(fn.entry)<<"\t"<<functionOriginName(fn.origin)<<"\n";
     else if(op=="listing")for(const auto& row:session.programListing(address(arg),256))std::cout<<"0x"<<std::hex<<row.address<<std::dec<<"\t"<<row.text<<"\t"<<row.comment<<"\n";
-    else if(op=="decompile")std::cout<<session.decompileReportFor(address(arg)).text();
+    else if(op=="decompile") {
+        const auto report = session.decompileReportFor(address(arg));
+        std::cout << report.text();
+        if (report.status != DecompileStatus::kComplete && report.status != DecompileStatus::kPartial) {
+            throw CommandFailure(report.status == DecompileStatus::kCancelled ? 130 : 1,
+                std::string("decompilation: ") + decompileStatusName(report.status));
+        }
+    }
     else if(op=="ir")std::cout<<session.irTextFor(address(arg));
     else if(op=="cfg")std::cout<<session.cfgTextFor(address(arg));
     else if(op=="refs")std::cout<<session.referencesText(address(arg));
@@ -143,10 +160,25 @@ int main(int argc,char** argv) {
         if(!script.empty()) {
             std::ifstream file(script);if(!file)throw std::runtime_error("cannot read script");
             std::string line;size_t number=0;
-            while(std::getline(file,line)) {if(++number>10000)throw std::runtime_error("script exceeds 10000 commands");try{command(session,line,allowEdits);}catch(const std::exception& e){throw std::runtime_error("script line "+std::to_string(number)+": "+e.what());}}
+            while (std::getline(file, line)) {
+                if (++number > 10000) throw std::runtime_error("script exceeds 10000 commands");
+                try {
+                    command(session, line, allowEdits);
+                } catch (const CommandFailure& e) {
+                    throw CommandFailure(e.exitCode, "script line " + std::to_string(number) + ": " + e.what());
+                } catch (const std::exception& e) {
+                    throw std::runtime_error("script line " + std::to_string(number) + ": " + e.what());
+                }
+            }
         }
         if(i<argc){std::string line;for(;i<argc;++i){if(!line.empty())line+=' ';line+=argv[i];}command(session,line,allowEdits);}
         else if(script.empty() && lua.empty())command(session,"summary");
         return 0;
-    }catch(const std::exception& e){std::cerr<<"mint_headless: "<<e.what()<<"\n";return 1;}
+    } catch (const CommandFailure& e) {
+        std::cerr << "mint_headless: " << e.what() << '\n';
+        return e.exitCode;
+    } catch (const std::exception& e) {
+        std::cerr << "mint_headless: " << e.what() << '\n';
+        return 1;
+    }
 }

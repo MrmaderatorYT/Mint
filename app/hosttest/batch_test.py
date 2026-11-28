@@ -37,6 +37,30 @@ if name == 'large':
 if name == 'bad':
     print('invalid input', file=sys.stderr)
     sys.exit(1)
+if sys.argv[-2] == 'decompile':
+    if name == 'missing-header':
+        print('plain output')
+        sys.exit(0)
+    if name == 'oversized-header':
+        print('/* Decompilation status: ' + 'x' * 1000 + ' */')
+        sys.exit(0)
+    if name == 'header-only':
+        print('/* Decompilation status: complete */')
+        sys.exit(0)
+    if name == 'plain-130':
+        sys.exit(130)
+    status, code = {
+        'partial-result': ('partial', 0),
+        'unsupported-result': ('unsupported', 1),
+        'budget-result': ('budget-exhausted', 1),
+        'error-result': ('error', 1),
+        'old-error-result': ('error', 0),
+        'cancelled-result': ('cancelled', 130),
+        'inconsistent-result': ('complete', 1),
+    }.get(name, ('complete', 0))
+    print(f'/* Decompilation status: {status} */')
+    print(json.dumps({'input': sys.argv[1], 'args': sys.argv[2:]}))
+    sys.exit(code)
 print(json.dumps({'input': sys.argv[1], 'args': sys.argv[2:]}))
 ''')
         self.tool.chmod(0o700)
@@ -139,8 +163,50 @@ print(json.dumps({'input': sys.argv[1], 'args': sys.argv[2:]}))
                 self.output = self.root / ("at-" + command)
                 result = self.run_batch("first", options=("--command", command, "--address", "0"))
                 self.assertEqual(result.returncode, 0, result.stderr)
-                data = json.loads((self.output / self.report()[0]["output"]).read_text())
+                row = self.report()[0]
+                body = (self.output / row["output"]).read_text()
+                if command == "decompile":
+                    self.assertEqual(row["analysis_status"], "complete")
+                    body = body.split("\n", 1)[1]
+                data = json.loads(body)
                 self.assertEqual(data["args"], [command, "0x0"])
+
+    def test_decompilation_outcomes_and_diagnostic_artifacts(self):
+        names = ("complete-result", "partial-result", "unsupported-result", "budget-result",
+                 "error-result", "old-error-result", "cancelled-result")
+        for name in names:
+            (self.root / name).write_text("fixture")
+        options = ("--command", "decompile", "--address", "0", "--jobs", "2")
+        result = self.run_batch(*names, options=options)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        rows = self.report()
+        self.assertEqual([row["status"] for row in rows],
+                         ["ok", "ok", "failed", "failed", "failed", "failed", "cancelled"])
+        self.assertEqual([row["analysis_status"] for row in rows],
+                         ["complete", "partial", "unsupported", "budget-exhausted", "error", "error", "cancelled"])
+        self.assertEqual([row["exit_code"] for row in rows], [0, 0, 1, 1, 1, 0, 130])
+        for row in rows:
+            path = self.output / row["output"]
+            self.assertFalse(path.name.endswith(".partial"))
+            self.assertEqual(path.name.endswith(".diagnostic.txt"), row["status"] != "ok")
+            self.assertTrue(path.read_text().startswith(
+                f"/* Decompilation status: {row['analysis_status']} */\n"))
+        resumed = self.run_batch(*names, options=(*options, "--resume"))
+        self.assertEqual(resumed.returncode, 1, resumed.stderr)
+        for previous, current in zip(rows, self.report()):
+            self.assertEqual(previous["analysis_status"], current["analysis_status"])
+            self.assertEqual(previous["output"] == current["output"], current["status"] == "ok")
+
+    def test_decompilation_does_not_publish_untrusted_or_truncated_output(self):
+        result = self.run_batch("missing-header", "oversized-header", "header-only", "inconsistent-result", "plain-130", "large",
+                                options=("--command", "decompile", "--address", "0", "--max-output-bytes", "4096"))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        rows = self.report()
+        self.assertEqual([row["status"] for row in rows],
+                         ["failed", "failed", "failed", "failed", "failed", "output_limit"])
+        self.assertEqual([row["analysis_status"] for row in rows], [None, None, None, "complete", None, None])
+        self.assertTrue(all(row["output"].endswith(".partial") for row in rows))
+        self.assertEqual((self.output / rows[-1]["output"]).stat().st_size, 4096)
 
     def test_input_list_paths_relative_to_list_and_spaces_preserved(self):
         folder = self.root / "list directory"
@@ -291,7 +357,34 @@ print(json.dumps({'input': sys.argv[1], 'args': sys.argv[2:]}))
                 self.assertEqual(result.returncode, 0, result.stderr)
                 report = json.loads((output / "report.json").read_text())
                 self.assertEqual(report["results"][0]["status"], "ok")
+                if command == "decompile":
+                    self.assertEqual(report["results"][0]["analysis_status"], "complete")
                 self.assertTrue((output / report["results"][0]["output"]).read_text().strip())
+
+    @unittest.skipUnless(os.environ.get("MINT_BATCH_TOOL"), "requires built mint_headless")
+    def test_real_engine_partial_and_missing_function(self):
+        source = self.root / "indirect.bin"
+        source.write_bytes(bytes.fromhex("20 00 80 d2 20 00 1f d6"))  # mov x0,#1; br x1
+        for address, status, code in (("0x1000", "partial", 0),
+                                      ("0xffffffffffffffff", "error", 1)):
+            with self.subTest(status=status):
+                output = self.root / status
+                result = subprocess.run([sys.executable, str(RUNNER), str(source),
+                                         "--tool", os.environ["MINT_BATCH_TOOL"], "--output", str(output),
+                                         "--raw", "aarch64", "0x1000", "0x1000",
+                                         "--command", "decompile", "--address", address],
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, code, result.stderr)
+                row = json.loads((output / "report.json").read_text())["results"][0]
+                self.assertEqual(row["exit_code"], code)
+                self.assertEqual(row["analysis_status"], status)
+                self.assertEqual(row["status"], "ok" if code == 0 else "failed")
+                body = (output / row["output"]).read_text()
+                self.assertTrue(body.startswith(f"/* Decompilation status: {status} */\n"))
+                if status == "partial":
+                    self.assertIn("unresolved", body.lower())
+                else:
+                    self.assertIn("no analyzed function", body)
 
     @unittest.skipUnless(os.environ.get("MINT_BATCH_TOOL"), "requires built mint_headless")
     def test_real_engine_success_and_missing_input(self):

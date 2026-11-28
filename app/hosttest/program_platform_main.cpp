@@ -1,5 +1,6 @@
 #include <cerrno>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -27,7 +28,7 @@ public:
     ~TemporaryFiles() { for (const auto& path : paths_) {::unlink(path.c_str());::unlink((path+".analysis").c_str());} }
 
     std::string create(const std::vector<u8>& bytes, bool removeForNewFile = false) {
-        std::string path = "/private/tmp/mint-platform-test-XXXXXX";
+        auto path = (std::filesystem::temp_directory_path() / "mint-platform-test-XXXXXX").string();
         const int fd = ::mkstemp(path.data());
         if (fd < 0) return {};
         paths_.push_back(path);
@@ -345,10 +346,31 @@ bool tests() {
     return true;
 }
 
+bool cancelledAnalysis() {
+    TemporaryFiles temporary;
+    const auto source = temporary.create({0x00, 0x00, 0x80, 0xd2, 0xc0, 0x03, 0x5f, 0xd6});
+    const auto project = temporary.create({}, true);
+    Session session;
+    if (!success(session.openRawPath(source, Arch::kAArch64, 0x1000, 0x1000), "open cancellation fixture") ||
+        !success(session.attachProject(project), "attach cancellation fixture")) return false;
+    const auto saved = contents(project);
+    session.requestCancel();
+    const auto analysis = session.analyze();
+    const auto report = session.decompileReportFor(0x1000);
+    if (!check(analysis.code() == ErrorCode::kCancelled && !session.analyzed() &&
+               report.status == DecompileStatus::kCancelled &&
+               report.text().find("Decompilation status: cancelled") != std::string::npos &&
+               report.cSource.empty() && contents(project) == saved,
+               "cancelled discovery reports cancellation without claiming a result or changing Program")) return false;
+    return success(session.reanalyze(), "retry cancelled analysis") &&
+           check(session.decompileReportFor(0x1000).status == DecompileStatus::kComplete,
+                 "explicit full retry clears cancellation");
+}
+
 }  // namespace
 
 int main() {
-    if (!constantReturnRegression() || !tests()) return 1;
+    if (!constantReturnRegression() || !tests() || !cancelledAnalysis()) return 1;
     std::cout << "Program/Session/type/data/function/patch/reopen/export integration tests passed\n";
     return 0;
 }

@@ -25,6 +25,7 @@ public class ProgramProcessDeathTest {
             (byte) 0xc0, 3, 0x5f, (byte) 0xd6
     };
     private static final String PATCH = "20 01 80 d2";
+    private static final String ORIGINAL_BYTES = "e0 00 80 d2";
     private static final String NOTE = "Committed before Android process death";
 
     private static Path fixture(String phase) {
@@ -36,12 +37,13 @@ public class ProgramProcessDeathTest {
         return target.getCacheDir().toPath().resolve("mint-process-death-" + token);
     }
 
-    private static MintSession open(Path folder, String project) throws Exception {
+    private static MintSession open(Path folder, String project, boolean full) throws Exception {
         final MintSession session = MintSession.openRaw(
                 folder.resolve("input.bin").toString(), "aarch64", ENTRY, ENTRY);
         try {
             session.attachProject(folder.resolve(project).toString());
-            session.analyze();
+            if (full) session.reanalyze();
+            else session.analyze();
             return session;
         } catch (Exception | Error failure) {
             session.close();
@@ -53,13 +55,17 @@ public class ProgramProcessDeathTest {
         final Path directory = fixture("write");
         Files.createDirectory(directory);
         Files.write(directory.resolve("input.bin"), SOURCE);
-        try (MintSession session = open(directory, "program.mint")) {
+        try (MintSession session = open(directory, "program.mint", false)) {
             session.edit(ENTRY, "name", "process_death_entry");
             session.edit(ENTRY, "comment", NOTE);
             session.defineType("ProcessDeathRecord=struct{value:u64}");
             session.edit(ENTRY, "prototype", "uint64_t(void)");
             session.edit(ENTRY, "patch", PATCH);
+            session.undoEdit(false);
+            assertEquals(ORIGINAL_BYTES, session.patchReviewBytes(ENTRY, 4));
+            session.undoEdit(true);
             assertEquals(PATCH, session.annotation(ENTRY, "patch"));
+            assertEquals(PATCH, session.patchReviewBytes(ENTRY, 4));
             assertTrue(session.functionIr(ENTRY).contains("9:8"));
             Files.write(directory.resolve("pid"),
                     Integer.toString(Process.myPid()).getBytes(StandardCharsets.US_ASCII));
@@ -78,24 +84,37 @@ public class ProgramProcessDeathTest {
             final int previousPid = Integer.parseInt(new String(
                     Files.readAllBytes(directory.resolve("pid")), StandardCharsets.US_ASCII));
             assertNotEquals(previousPid, Process.myPid());
+            final Path program = directory.resolve("program.mint");
             final Path cache = directory.resolve("program.mint.analysis");
             assertTrue("The previous process populated a derived cache", Files.size(cache) > 4);
-            Files.write(cache, new byte[] {0, 1, 2, 3});
-            Files.copy(directory.resolve("program.mint"), directory.resolve("oracle.mint"));
+            final byte[] committed = Files.readAllBytes(program);
+            Files.copy(program, directory.resolve("oracle.mint"));
+            assertFalse(Files.exists(directory.resolve("oracle.mint.analysis")));
+            try (MintSession oracle = open(directory, "oracle.mint", true)) {
+                assertMode(oracle, "full");
+                try (MintSession warm = open(directory, "program.mint", false)) {
+                    assertMode(warm, "restored");
+                    assertEquivalent(oracle, warm);
+                }
 
-            try (MintSession recovered = open(directory, "program.mint");
-                 MintSession oracle = open(directory, "oracle.mint")) {
-                oracle.reanalyze();
-                assertEquals("process_death_entry", recovered.annotation(ENTRY, "name"));
-                assertEquals(NOTE, recovered.annotation(ENTRY, "comment"));
-                assertEquals("uint64_t(void)", recovered.annotation(ENTRY, "prototype"));
-                assertEquals(PATCH, recovered.annotation(ENTRY, "patch"));
-                assertTrue(recovered.typesCHeader().contains("ProcessDeathRecord"));
-                assertTrue(recovered.functionIr(ENTRY).contains("9:8"));
-                assertEquals(oracle.functionIr(ENTRY), recovered.functionIr(ENTRY));
-                assertEquals(oracle.typesCHeader(), recovered.typesCHeader());
+                Files.write(cache, new byte[] {0, 1, 2, 3});
+                try (MintSession recovered = open(directory, "program.mint", false)) {
+                    assertMode(recovered, "full");
+                    assertEquivalent(oracle, recovered);
+                    final Path exported = directory.resolve("exported.bin");
+                    recovered.exportPatchedCopy(exported.toString());
+                    byte[] expected = SOURCE.clone();
+                    expected[0] = 0x20;
+                    expected[1] = 0x01;
+                    assertArrayEquals(expected, Files.readAllBytes(exported));
+                }
                 assertTrue("Recovery replaced the corrupt cache", Files.size(cache) > 4);
+                try (MintSession reopened = open(directory, "program.mint", false)) {
+                    assertMode(reopened, "restored");
+                    assertEquivalent(oracle, reopened);
+                }
             }
+            assertArrayEquals("Derived cache recovery must leave Program intact", committed, Files.readAllBytes(program));
             assertArrayEquals(SOURCE, Files.readAllBytes(directory.resolve("input.bin")));
         } finally {
             try (Stream<Path> files = Files.walk(directory)) {
@@ -104,5 +123,27 @@ public class ProgramProcessDeathTest {
                 }
             }
         }
+    }
+
+    private static void assertMode(MintSession session, String expected) {
+        final String warnings = session.warnings();
+        assertTrue(warnings, warnings.contains("mode=" + expected + " "));
+    }
+
+    private static void assertEquivalent(MintSession oracle, MintSession candidate) {
+        assertEquals("process_death_entry", candidate.annotation(ENTRY, "name"));
+        assertEquals(NOTE, candidate.annotation(ENTRY, "comment"));
+        assertEquals("uint64_t(void)", candidate.annotation(ENTRY, "prototype"));
+        assertEquals(PATCH, candidate.annotation(ENTRY, "patch"));
+        assertEquals(PATCH, candidate.patchReviewBytes(ENTRY, 4));
+        assertTrue(candidate.typesCHeader().contains("ProcessDeathRecord"));
+        assertTrue(candidate.functionIr(ENTRY).contains("9:8"));
+        assertEquals(oracle.functionCount(), candidate.functionCount());
+        assertArrayEquals(oracle.functionRangeAt(ENTRY), candidate.functionRangeAt(ENTRY));
+        assertEquals(oracle.cfg(ENTRY), candidate.cfg(ENTRY));
+        assertEquals(oracle.functionIr(ENTRY), candidate.functionIr(ENTRY));
+        assertArrayEquals(oracle.decompileView(ENTRY), candidate.decompileView(ENTRY));
+        assertEquals(oracle.xrefs(ENTRY), candidate.xrefs(ENTRY));
+        assertEquals(oracle.typesCHeader(), candidate.typesCHeader());
     }
 }

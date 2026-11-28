@@ -117,8 +117,14 @@ target_include_directories(mint_sample_architecture PRIVATE ${CORE_DIR}/src/main
 add_dependencies(mint_architecture_sdk_test mint_sample_architecture mint_sample_plugin mint_sample_semantics)
 add_dependencies(mint_plugin_test mint_sample_extension)
 mint_tool(mint_headless headless_main.cpp)
+if(MINT_HOST_CORPUS)
+    include(${CMAKE_CURRENT_LIST_DIR}/elf64_semantics.cmake)
+endif()
 get_property(MINT_HOST_TOOL_TARGETS GLOBAL PROPERTY MINT_HOST_TOOLS)
 add_custom_target(mint_host_tools DEPENDS ${MINT_HOST_TOOL_TARGETS})
+if(MINT_HOST_CORPUS)
+    add_dependencies(mint_host_tools mint_elf64_semantics_fixtures)
+endif()
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
@@ -181,10 +187,29 @@ add_test(NAME tail_call_generated_c COMMAND ${CMAKE_COMMAND}
     -P ${CMAKE_CURRENT_LIST_DIR}/tail_call_c_test.cmake)
 set_tests_properties(tail_call_generated_c PROPERTIES TIMEOUT 60)
 add_test(NAME interprocedural_type_session COMMAND mint_interprocedural_type_session_test)
+set_tests_properties(
+    program_platform program_cache program_recovery
+    interprocedural_session_memory interprocedural_memory_effects
+    interprocedural_type_evidence interprocedural_type_session
+    x86_pic_switch x86_tail_calls tail_call_state
+    PROPERTIES LABELS prod003)
+add_custom_target(mint_state_tests DEPENDS
+    mint_program_platform_test mint_program_cache_test mint_program_recovery_test
+    mint_interprocedural_session_test mint_interprocedural_memory_tests
+    mint_interprocedural_types_test mint_interprocedural_type_session_test
+    mint_x86_switch_test mint_x86_tail_call_test mint_tail_call_state_test)
 if(MINT_HOST_CORPUS)
+    foreach(_arch IN ITEMS aarch64 x86_64)
+        add_test(NAME elf64_semantics_${_arch} COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_LIST_DIR}/elf64_semantics_test.py" $<TARGET_FILE:mint_headless>
+            "${CMAKE_C_COMPILER}" "${_arch}" "${CMAKE_CURRENT_BINARY_DIR}/corpus/semantic-score-${_arch}.elf")
+        set_tests_properties(elf64_semantics_${_arch} PROPERTIES TIMEOUT 120 LABELS prod004)
+    endforeach()
     add_test(NAME x86_pic_switch_compiler_corpus COMMAND mint_x86_switch_test ${MINT_X86_SWITCH_BINARIES})
     add_test(NAME x86_pic_switch_copy_elided_corpus COMMAND mint_x86_switch_test --copy-elided ${MINT_X86_COPY_ELIDED_BINARY})
     add_test(NAME x86_tail_call_compiler_corpus COMMAND mint_x86_tail_call_test ${MINT_X86_TAIL_BINARIES})
+    set_tests_properties(x86_pic_switch_compiler_corpus x86_pic_switch_copy_elided_corpus
+        x86_tail_call_compiler_corpus PROPERTIES LABELS prod003)
     add_test(NAME microsoft_rtti_compiler_corpus COMMAND mint_msvc_rtti_test ${MINT_MSVC_RTTI_BINARIES})
     add_test(NAME aapcs_aggregate_compiler_corpus COMMAND mint_aapcs_aggregate_tests ${MINT_AAPCS_AGGREGATE_BINARIES})
     add_test(NAME riscv_abi_compiler_corpus COMMAND mint_riscv_abi_tests ${MINT_RISCV_ABI_ARGUMENTS})

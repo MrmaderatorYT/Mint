@@ -6,7 +6,7 @@
 
 Mint is an offline binary-analysis and decompilation workspace **running on Android**. Its primary purpose is reversing native binaries, not Android APK application analysis. The original targets are ELF64/AArch64 and ELF64/x86-64; ELF32/ARM/Thumb/x86-32/RISC-V32, ELF64/RISC-V64, explicit raw mappings, PE32/PE32+ and little-endian thin32/64 or validated universal Mach-O containers now use the same native engine. Analysis runs in C++ through JNI and exposes disassembly, MintIR, pseudo-C, control-flow graphs, functions, and diagnostics in a touch-oriented UI. Legacy DEX/APK parsing is present but is not the development priority.
 
-The project is an independent, Ghidra-inspired implementation. It does not embed Ghidra, Sleigh, LLVM, or Unicorn, and it is no longer a mock-data simulator. Mint is currently a `0.7 Preview`: the core pipeline is functional, but format, architecture, type-recovery, and control-structure coverage are narrower than a desktop reverse-engineering suite.
+The project is an independent, Ghidra-inspired implementation. It does not embed Ghidra, Sleigh, LLVM, or Unicorn, and it is no longer a mock-data simulator. Mint is currently a `0.8 Preview`: the core pipeline is functional, but format, architecture, type-recovery, and control-structure coverage are narrower than a desktop reverse-engineering suite.
 
 The [now-to-production roadmap](now-to-production-roadmap.md) defines the implementation work, acceptance evidence and release gates required for a working 1.0. Preview version numbers do not determine production readiness.
 
@@ -255,7 +255,7 @@ python3 tools/mint_batch.py input.so "another binary.exe" \
   --jobs 2 --timeout 300 --command json
 ```
 
-A new run requires a new output directory. Each input gets unique output and stderr files, including duplicate paths or filenames. `report.json` has `schema_version: 1` and input-ordered results with absolute input paths, relative artifact paths, `status` (`ok`, `failed`, `timeout`, `cancelled`, `output_limit`), `exit_code` and elapsed seconds. Failed or interrupted output retains a `.partial` suffix. The report is published by rename after the workers finish. One input failure does not stop other analyses; exit status is 0 for complete success, 1 for any failure/timeout, 2 for CLI errors and 130 for cancellation. SIGINT/SIGTERM stop active jobs and cancel queued jobs; POSIX termination also kills each job's process group.
+A new run requires a new output directory. Each input gets unique output and stderr files, including duplicate paths or filenames. `report.json` has `schema_version: 1` and input-ordered results with absolute input paths, relative artifact paths, `status` (`ok`, `failed`, `timeout`, `cancelled`, `output_limit`), `exit_code` and elapsed seconds. For `decompile`, `analysis_status` records the decompiler outcome when available. Complete and partial reports are usable, and the latter are explicitly marked as partial. Unusable decompilation reports are retained as diagnostic files. Interrupted or invalid output retains a `.partial` suffix. The report is published by rename after the workers finish. A failed input does not stop the other jobs. The runner exits 0 when all jobs are usable, 1 for any non-usable job, 2 for CLI errors and 130 when the runner is cancelled. SIGINT/SIGTERM stop active jobs and cancel queued jobs. POSIX termination also kills each job's process group.
 
 `--jobs` accepts 1–64 (default 1); `--timeout` is a finite positive per-input wall-clock budget (default 300 seconds). Output streams to disk with a per-stream limit of 64 MiB by default, configurable with `--max-output-bytes`; exceeding either limit stops the job and retains partial output. Concurrency and time are bounded; per-process memory depends on the engine and input. Read-only commands without an address are `json` (default), `summary`, `functions`, `types`, `types-c`, `prototypes`, `signatures`, `cxx` and `dwarf`. Commands `listing`, `decompile`, `ir`, `cfg`, `refs`, `provenance`, `abi`, `locals` and `source` require `--address ADDRESS`, an unsigned 64-bit decimal or `0x`-prefixed hexadecimal image address. The same address applies to every input; it must be meaningful for each image. The report records it as hexadecimal, and resume checks its value. Optional `--raw ARCH BASE ENTRY` or `--macho ARCH` applies to all inputs in that invocation; raw AArch64 additionally accepts `--raw-endian big` (or `little`). The runner creates no persistent Programs and loads no plugins. It is a host pipeline tool; this does not change Android analysis or claim completion of the broader 0.4 roadmap.
 
@@ -469,11 +469,15 @@ ctest --test-dir build/hosttest --output-on-failure -R '^(tail_call_.*|x86_tail_
 
 ## Decompilation status and listing navigation
 
-The Android Pseudo-C pane and `mint_headless FILE decompile ADDRESS` start with the same `Decompilation status` comment. `complete` means the decompiler reported no supported-stage limitations for this result. `partial` reports gaps such as unresolved transfers, unmodeled instructions or unverified call signatures. `unsupported` identifies a stage that cannot handle the input, `budget-exhausted` identifies an observed resource limit, and `error` identifies a failed request or invalid result. The diagnostic lines name the reason and include a machine address when available. These statuses describe the individual decompilation, including conservative fallbacks. They are not a source-level equivalence guarantee.
+Native decompilation reports start with a stable `Decompilation status` comment. Android consumes the same structured outcome over JNI. `complete` means the decompiler reported no supported-stage limitations for this result. `partial` reports gaps such as unresolved transfers, unmodeled instructions or unverified call signatures. `unsupported` identifies a stage that cannot handle the input, `budget-exhausted` identifies an observed resource limit, `error` identifies a failed request, and `cancelled` identifies a cooperative stop before discovery completes. The diagnostic lines name the reason and include a machine address when available. These statuses describe the individual decompilation and its conservative fallbacks.
+
+For `mint_headless FILE decompile ADDRESS`, complete and partial reports exit 0. Unusable reports exit 1, with exit 130 for cooperative cancellation. If a decompilation report exists, it remains on stdout, including on failure. A failing decompile also stops the command script at that line. Earlier acknowledged edits retain their usual persistence.
 
 Unresolved terminal paths show the target expression when known to the IR, followed by a marked stop in the generated output. The stop is a pseudo-C boundary marker. Proven table switches mark their out-of-domain default unreachable. Genuine machine returns still emit their return values.
 
 Tap a mapped statement in Android Pseudo-C to open the corresponding machine block's address range in the listing. The block range allows for folded operations and multiple IR statements per instruction. Existing symbol and address links are available within those statements. Back from this range returns to the same function and scroll position in Pseudo-C. Unmapped text, such as type headers and diagnostics, has no machine range.
+
+**Why is this result partial?** lists the native diagnostic reasons for the current function. A reason with an exact decoded instruction offers a jump to that instruction. A reason associated only with an address shows that address without offering an instruction jump. Back returns to the same Pseudo-C position.
 
 The first [production corpus](quality/corpus/README.md) provides reproducible ELF64 fixtures with a generated manifest and checked analysis properties. Stateful host tests compare edited projects with independent full analysis and check interrupted writes, ENOSPC, and corrupt-cache recovery. After installing matching Android debug and instrumentation APKs, run `app/src/androidTest/run_process_death.sh` to check recovery across an actual process kill using a private test project.
 
@@ -509,6 +513,33 @@ MINT_KEY_PASSWORD
 ```
 
 Keep `signing.properties`, `*.jks`, and `*.keystore` private. They are excluded by `.gitignore`.
+
+Use the release gate for distribution. Start from a clean checkout at the release tag and set
+`ANDROID_HOME`. Use a standalone bundletool JAR and a trusted SHA-256 fingerprint for the
+release certificate, for example from the previous verified release APK.
+
+```bash
+release_args=(
+  --tag 0.8-preview --version-name "0.8 Preview" --version-code 8
+  --certificate-sha256 "$MINT_RELEASE_CERTIFICATE_SHA256"
+  --bundletool "$BUNDLETOOL_JAR" --output build/release/0.8-preview
+)
+python3 tools/mint_release.py build "${release_args[@]}"
+python3 tools/mint_release.py verify "${release_args[@]}"
+```
+
+The gate checks the embedded commit, package and version of both signed artifacts. It verifies
+the APK signer with `apksigner`, the AAB signature with the JDK, and writes their sizes and
+SHA-256 checksums to `release.json`. Keep that manifest with `mint.apk` and `mint.aab`.
+For a GitHub prerelease, use the guarded publish command with an English notes file.
+
+```bash
+python3 tools/mint_release.py publish "${release_args[@]}" \
+  --repository MrmaderatorYT/Mint --notes-file "$RELEASE_NOTES"
+```
+
+Publication rechecks both files and the remote tag before uploading the verified APK and its
+checksum. Use the verified AAB for Google Play.
 
 ## Project layout
 

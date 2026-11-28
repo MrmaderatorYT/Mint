@@ -898,7 +898,7 @@ Status CodeAnalyzer::analyzeDiscovery(const ElfImage& image, const Options& opti
     size_t cursor = 0;
     while (cursor < pending.size()) {
         if (effective.cancel != nullptr && effective.cancel->load(std::memory_order_relaxed)) {
-            return Status::error(ErrorCode::kInternalError, "analysis cancelled");
+            return Status::error(ErrorCode::kCancelled, "analysis cancelled");
         }
         if (functions_.size() >= effective.maxFunctions) {
             addWarning("function limit of " + std::to_string(effective.maxFunctions) +
@@ -920,7 +920,7 @@ Status CodeAnalyzer::analyzeDiscovery(const ElfImage& image, const Options& opti
         linearSweep(image, effective, &pending);
         for (size_t i = sweepStart; i < pending.size(); ++i) {
             if (effective.cancel != nullptr && effective.cancel->load(std::memory_order_relaxed)) {
-                return Status::error(ErrorCode::kInternalError, "analysis cancelled");
+                return Status::error(ErrorCode::kCancelled, "analysis cancelled");
             }
             if (functions_.size() >= effective.maxFunctions) break;
             const Root root = pending[i];
@@ -1107,13 +1107,13 @@ Status CodeAnalyzer::analyze(const ElfImage& image, const Options& options) {
     effective.progress = nullptr;
     if (options.progress) options.progress->store(10, std::memory_order_relaxed);
     for (unsigned round = 0; round < 8; ++round) {
-        if (options.cancel && options.cancel->load(std::memory_order_relaxed)) return Status::error(ErrorCode::kInternalError, "analysis cancelled");
+        if (options.cancel && options.cancel->load(std::memory_order_relaxed)) return Status::error(ErrorCode::kCancelled, "analysis cancelled");
         Status status = analyzeDiscovery(image, effective, proofs);
         if (!status.ok()) return status;
         std::map<Address, IndirectFlowReport> current;
         size_t liftedInstructions = 0;
         for (const auto& function : functions_) {
-            if (options.cancel && options.cancel->load(std::memory_order_relaxed)) return Status::error(ErrorCode::kInternalError, "analysis cancelled");
+            if (options.cancel && options.cancel->load(std::memory_order_relaxed)) return Status::error(ErrorCode::kCancelled, "analysis cancelled");
             IndirectFlowReport report; report.functionEntry = function.entry;
             bool needed = function.indirectJumps != 0;
             if (!needed) for (Address address : function.instructions) {

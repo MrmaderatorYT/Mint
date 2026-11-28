@@ -19,6 +19,7 @@ import android.text.method.LinkMovementMethod;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.EditText;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.LinearLayout;
 
@@ -36,6 +37,7 @@ import androidx.lifecycle.ViewModelProvider;
 import com.ccs.mint.R;
 import com.ccs.mint.core.MintSession;
 import com.ccs.mint.ui.components.GraphView;
+import com.google.android.material.button.MaterialButton;
 import com.google.android.material.chip.Chip;
 import com.google.android.material.chip.ChipGroup;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
@@ -164,6 +166,8 @@ public final class WorkspaceActivity extends MintActivity {
     private RecyclerView list;
     private TextView text;
     private View textScroll;
+    private MaterialButton pseudoDiagnostics;
+    private androidx.appcompat.app.AlertDialog pseudoDiagnosticsDialog;
     private GraphView graph;
     private View cancel;
     private View returnToWelcome;
@@ -289,6 +293,7 @@ public final class WorkspaceActivity extends MintActivity {
         text = findViewById(R.id.text);
         text.setMovementMethod(LinkMovementMethod.getInstance());
         textScroll = findViewById(R.id.text_scroll);
+        pseudoDiagnostics = findViewById(R.id.pseudo_diagnostics);
         graph = findViewById(R.id.graph);
         cancel = findViewById(R.id.cancel_analysis);
         returnToWelcome = findViewById(R.id.return_to_welcome);
@@ -408,6 +413,7 @@ public final class WorkspaceActivity extends MintActivity {
 
     @Override
     protected void onDestroy() {
+        if (pseudoDiagnosticsDialog != null) pseudoDiagnosticsDialog.dismiss();
         showGuideOnOpen = false;
         if (learnGuide != null) learnGuide.dismiss();
         if (betaNotice != null && betaNotice.isShowing()) betaNotice.dismiss();
@@ -702,7 +708,7 @@ public final class WorkspaceActivity extends MintActivity {
     }
 
     private void resetOpeningView(@NonNull Uri uri) {
-        ++viewGeneration;
+        advanceViewGeneration();
         learnGuideButton.setVisibility(View.GONE);
         sourceListing = null;
         restoreSourceScroll = null;
@@ -900,7 +906,7 @@ public final class WorkspaceActivity extends MintActivity {
      * broken rather than unselected.
      */
     private void showPane() {
-        ++viewGeneration;
+        advanceViewGeneration();
         if (pane != Pane.DISASM || selected == null ||
                 (sourceListing != null && selected.entry != sourceListing.entry)) sourceListing = null;
         if (pane != Pane.C) restoreSourceScroll = null;
@@ -1319,25 +1325,39 @@ public final class WorkspaceActivity extends MintActivity {
         worker.execute(() -> {
             String body;
             String anchors = "";
+            MintSession.DecompileView details = null;
             try {
                 if (active == null) throw new IllegalStateException("session is closed");
                 if (ir) body = active.functionIr(function.entry);
                 else {
-                    final String[] view = active.decompileView(function.entry);
-                    body = view[0];
-                    anchors = view[1];
+                    final MintSession.DecompileView view = active.decompileResult(function.entry);
+                    final int headerEnd = view.report.indexOf('\n');
+                    body = headerEnd < 0 ? view.report
+                            : decompileStatusLine(view.status) + view.report.substring(headerEnd);
+                    anchors = view.anchors;
+                    details = view;
                 }
             } catch (RuntimeException e) {
                 body = getString(R.string.ws_decompile_failed, e.getMessage());
+                if (!ir) body = decompileStatusLine(MintSession.DecompilationStatus.ERROR) + "\n" + body;
             }
             final CharSequence result = highlighter.code(
                     body == null || body.isEmpty() ? getString(R.string.ws_no_output) : body);
             final String sourceAnchors = anchors;
+            final MintSession.DecompileView diagnostics = details;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed() || active != session || requestGeneration != viewGeneration) return;
                 busy(false);
                 final CharSequence linked = linkedCode(result);
                 text.setText(ir ? linked : linkedSourceRanges(linked, sourceAnchors, function.entry));
+                if (diagnostics != null && diagnostics.status != MintSession.DecompilationStatus.COMPLETE
+                        && !diagnostics.diagnostics.isEmpty()) {
+                    pseudoDiagnostics.setText(diagnostics.status == MintSession.DecompilationStatus.PARTIAL
+                            ? R.string.ws_decompile_why_partial : R.string.ws_decompile_details);
+                    pseudoDiagnostics.setOnClickListener(view ->
+                            showPseudoDiagnostics(active, requestGeneration, function.entry, diagnostics));
+                    pseudoDiagnostics.setVisibility(View.VISIBLE);
+                }
                 if (requestedAnchor != null) revealPseudoCRanges(requestedAnchor, sourceAnchors, requestGeneration);
                 final SourceListing restore = restoreSourceScroll;
                 restoreSourceScroll = null;
@@ -1355,6 +1375,74 @@ public final class WorkspaceActivity extends MintActivity {
                 }
             });
         });
+    }
+
+    private void advanceViewGeneration() {
+        ++viewGeneration;
+        pseudoDiagnostics.setVisibility(View.GONE);
+        pseudoDiagnostics.setOnClickListener(null);
+        if (pseudoDiagnosticsDialog != null) pseudoDiagnosticsDialog.dismiss();
+    }
+
+    private boolean isCurrentPseudoC(MintSession active, long generation, long entry) {
+        return !isFinishing() && !isDestroyed() && active == session && active == model.session()
+                && generation == viewGeneration && pane == Pane.C && selected != null && selected.entry == entry;
+    }
+
+    private void showPseudoDiagnostics(MintSession active, long generation, long entry,
+                                       MintSession.DecompileView result) {
+        if (!isCurrentPseudoC(active, generation, entry) || pseudoDiagnosticsDialog != null) return;
+
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout reasons = new LinearLayout(this);
+        reasons.setOrientation(LinearLayout.VERTICAL);
+        int margin = Math.round(24 * getResources().getDisplayMetrics().density);
+        reasons.setPaddingRelative(margin, 0, margin, margin / 2);
+        scroll.addView(reasons);
+        for (MintSession.DecompileDiagnostic item : result.diagnostics) {
+            TextView reason = new TextView(this);
+            reason.setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodyMedium);
+            reason.setPadding(0, margin / 2, 0, 0);
+            reason.setText(item.address != null && item.instructionEnd == null
+                    ? getString(R.string.ws_decompile_reason_address, item.reason, item.address) : item.reason);
+            reasons.addView(reason);
+            if (item.address != null && item.instructionEnd != null) {
+                MaterialButton jump = new MaterialButton(this, null,
+                        com.google.android.material.R.attr.materialButtonOutlinedStyle);
+                jump.setText(getString(R.string.ws_decompile_go_to_instruction, item.address));
+                jump.setOnClickListener(view -> {
+                    if (isCurrentPseudoC(active, generation, entry)) {
+                        openPseudoCListing(entry, item.address, item.instructionEnd);
+                    }
+                });
+                reasons.addView(jump);
+            }
+        }
+        int heading = result.status == MintSession.DecompilationStatus.PARTIAL
+                ? R.string.ws_decompile_why_partial : R.string.ws_decompile_details;
+        final androidx.appcompat.app.AlertDialog dialog =
+                new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(heading)
+                        .setView(scroll).setPositiveButton(R.string.ws_close, null).create();
+        pseudoDiagnosticsDialog = dialog;
+        dialog.setOnDismissListener(ignored -> {
+            if (pseudoDiagnosticsDialog == dialog) pseudoDiagnosticsDialog = null;
+        });
+        dialog.show();
+    }
+
+    private String decompileStatusLine(MintSession.DecompilationStatus status) {
+        return getString(R.string.ws_decompile_status_line, getString(decompileStatusLabel(status)));
+    }
+
+    private static int decompileStatusLabel(MintSession.DecompilationStatus status) {
+        return switch (status) {
+            case COMPLETE -> R.string.patch_status_complete;
+            case PARTIAL -> R.string.patch_status_partial;
+            case UNSUPPORTED -> R.string.patch_status_unsupported;
+            case BUDGET_EXHAUSTED -> R.string.patch_status_budget;
+            case ERROR -> R.string.patch_status_error;
+            case CANCELLED -> R.string.patch_status_cancelled;
+        };
     }
 
     /**
@@ -1485,7 +1573,8 @@ public final class WorkspaceActivity extends MintActivity {
             main.removeCallbacks(progressPoll);
             progress.setVisibility(View.INVISIBLE);
         }
-        cancel.setVisibility(value ? View.VISIBLE : View.GONE);
+        boolean canCancel = model.isOpening() || sandboxPreparing || sandboxPlugin != null;
+        cancel.setVisibility(value && canCancel ? View.VISIBLE : View.GONE);
     }
 
     private void appendLog(@Nullable String message) {
@@ -1764,7 +1853,7 @@ public final class WorkspaceActivity extends MintActivity {
                                 .setMessage(R.string.ws_plugin_trusted_explanation)
                                 .setView(fields).setNegativeButton(android.R.string.cancel,null).setPositiveButton(R.string.ws_run,(a,b)->{
                                     String id=command.getText().toString(),args=arguments.getText().toString();boolean allow=edits.isChecked();
-                                    if(allow){++viewGeneration;pendingAddress=selected==null?-1:selected.entry;}
+                                    if(allow){advanceViewGeneration();pendingAddress=selected==null?-1:selected.entry;}
                                     showReport(getString(R.string.ws_plugin_output),s->s.runPlugin(id,args,allow));
                                     if(allow){openFunctions.clear();loadFunctions();}
                                 }).show();
@@ -1925,7 +2014,7 @@ public final class WorkspaceActivity extends MintActivity {
         new com.google.android.material.dialog.MaterialAlertDialogBuilder(this).setTitle(getString(R.string.advanced_script_title))
                 .setMessage(getString(R.string.advanced_script_help))
                 .setView(fields).setNegativeButton(android.R.string.cancel,null).setPositiveButton(getString(R.string.advanced_run),(dialog,which) -> {
-                    final String text=input.getText().toString();final boolean allow=edits.isChecked();++viewGeneration;busy(true);
+                    final String text=input.getText().toString();final boolean allow=edits.isChecked();advanceViewGeneration();busy(true);
                     worker.execute(() -> {
                         String result;try{result=active.runScript(text,allow);}catch(RuntimeException e){result=e.getMessage();}
                         final String output=result;
@@ -1998,7 +2087,7 @@ public final class WorkspaceActivity extends MintActivity {
     }
 
     private void mutateProject(Runnable operation, @Nullable java.util.function.Supplier<PatchReview> comparison) {
-        ++viewGeneration;
+        advanceViewGeneration();
         reverseListing = null;
         sourceListing = null;
         busy(true);
@@ -2192,9 +2281,7 @@ public final class WorkspaceActivity extends MintActivity {
                             linked.setSpan(new ClickableSpan() {
                                 @Override public void onClick(@NonNull View widget) {
                                     if (pane != Pane.C || selected == null || selected.entry != entry) return;
-                                    sourceListing = new SourceListing(entry, listingAddress, start, end,
-                                            ((View) text.getParent()).getScrollX(), textScroll.getScrollY());
-                                    selectPane(Pane.DISASM);
+                                    openPseudoCListing(entry, start, end);
                                 }
 
                                 @Override public void updateDrawState(@NonNull android.text.TextPaint paint) {
@@ -2210,6 +2297,12 @@ public final class WorkspaceActivity extends MintActivity {
             }
         }
         return linked;
+    }
+
+    private void openPseudoCListing(long entry, long start, long end) {
+        sourceListing = new SourceListing(entry, listingAddress, start, end,
+                ((View) text.getParent()).getScrollX(), textScroll.getScrollY());
+        selectPane(Pane.DISASM);
     }
 
     private void revealPseudoCRanges(long address, String anchors, long generation) {
@@ -2374,7 +2467,13 @@ public final class WorkspaceActivity extends MintActivity {
         busy(true);
         worker.execute(() -> {
             try {
-                final String report = active.decompileView(entry)[0];
+                final MintSession.DecompileView result = active.decompileResult(entry);
+                if (!result.status.isUsable()) {
+                    final String label = getString(decompileStatusLabel(result.status));
+                    throw new IllegalStateException(result.diagnostic.isEmpty()
+                            ? label : label + "\n" + result.diagnostic);
+                }
+                final String report = result.report;
                 if (report.isEmpty()) throw new IllegalStateException(getString(R.string.ws_no_pseudo_report));
                 main.post(() -> {
                     if (isDestroyed() || active != session || generation != viewGeneration) return;

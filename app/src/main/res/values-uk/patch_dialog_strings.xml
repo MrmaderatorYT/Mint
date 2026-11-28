@@ -25,6 +25,8 @@
     <string name="patch_status_partial">частково</string>
     <string name="patch_status_unsupported">не підтримується</string>
     <string name="patch_status_budget">ліміт вичерпано</string>
+    <string name="patch_status_error">помилка</string>
+    <string name="patch_status_cancelled">скасовано</string>
     <string name="patch_comparison_unavailable">Порівняння недоступне або досягнуто ліміту знімка.</string>
     <string name="patch_no_changes">Без змін.</string>
     <string name="patch_diff_legend">− До  ·  + Після</string>

@@ -1,4 +1,5 @@
 #include "mint/session.h"
+#include "program_fresh_oracle.h"
 #include "mint/ir/lifter.h"
 #include "mint/ir/normalize.h"
 #include "mint/ir/registers.h"
@@ -62,42 +63,96 @@ void machineAndIr(){
     for(auto variant:{Variant::kBadSp,Variant::kUnknownSp,Variant::kReturnSlot,Variant::kBadSaved,Variant::kAliasWrite,Variant::kPriorCall,Variant::kBadTarget}){const auto input=fixture(variant);ElfImage image;okay(image.load(view(input.bytes)),"load unsafe tail fixture");CodeAnalyzer analyzer;okay(analyzer.analyze(image,options()),"analyze unproved tail state");const auto& function=dispatcher(analyzer);require(function.incomplete&&!hasSwitch(function),"one unproved frame/alias/call/target exit prevents complete switch publication");require(std::none_of(function.tailCalls.begin(),function.tailCalls.end(),[&](const auto& tail){return tail.branch==input.tail;}),"unsafe exit never becomes a verified tail site");}
     const auto input=fixture();ElfImage image;okay(image.load(view(input.bytes)),"load bounded tail fixture");CodeAnalyzer analyzer;auto bounded=options();bounded.maxInstructions=11;okay(analyzer.analyze(image,bounded),"partially discover tail case paths");require(dispatcher(analyzer).incomplete&&!hasSwitch(dispatcher(analyzer)),"partial case/callee discovery exports no complete switch proof");
 }
-class TemporaryDirectory {std::string path_;public:TemporaryDirectory(){std::string path="/private/tmp/mint-x86-tail-XXXXXX";if(::mkdtemp(path.data()))path_=path;require(!path_.empty(),"create owned temporary directory");}~TemporaryDirectory(){std::error_code error;std::filesystem::remove_all(path_,error);}std::string file(const std::string& name)const{return path_+'/'+name;}};
+class TemporaryDirectory {std::string path_;public:TemporaryDirectory(){auto path=(std::filesystem::temp_directory_path()/"mint-x86-tail-XXXXXX").string();if(::mkdtemp(path.data()))path_=path;require(!path_.empty(),"create owned temporary directory");}~TemporaryDirectory(){std::error_code error;std::filesystem::remove_all(path_,error);}std::string file(const std::string& name)const{return path_+'/'+name;}};
 std::vector<u8> contents(const std::string& path){std::ifstream input(path,std::ios::binary);return {std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()};}
 void write(const std::string& path,const std::vector<u8>& bytes){std::ofstream output(path,std::ios::binary|std::ios::trunc);output.write(reinterpret_cast<const char*>(bytes.data()),bytes.size());output.close();require(!output.fail(),"write owned fixture");}
 void open(Session& session,const std::string& source,const std::string& project){okay(session.openPath(source),"open tail Session");okay(session.attachProject(project),"attach tail Program");okay(session.analyze(),"analyze/restore tail Program");}
 void prototypes(Session& session,bool isVoid=false){okay(session.editAnnotation(0x1000,"prototype",std::string(isVoid?"void":"uint64_t")+"(uint64_t selector, uint64_t value)"),"set authoritative dispatcher prototype");for(Address target:{Address{0x1140},Address{0x1160}})okay(session.editAnnotation(target,"prototype",std::string(isVoid?"void":"uint64_t")+"(uint64_t value)"),"set authoritative tail prototype");}
 std::string snapshot(Session& session){std::ostringstream out;const auto& analyzer=session.analyzer();out<<analyzer.stats().instructions<<' '<<analyzer.stats().blocks<<' '<<analyzer.stats().edges<<' '<<analyzer.stats().incompleteFunctions<<'\n';for(const auto& insn:analyzer.code().instructions())out<<insn.address<<' '<<insn.id<<' '<<unsigned(insn.size)<<' '<<unsigned(insn.flow)<<' '<<insn.target<<'\n';for(const auto& function:analyzer.functions()){out<<"function "<<function.entry<<' '<<function.incomplete<<'\n';for(auto address:function.instructions)out<<address<<' ';out<<'\n';for(auto target:function.callees)out<<"callee "<<target<<'\n';for(auto caller:analyzer.callersOf(function.entry))out<<"caller "<<caller<<'\n';for(const auto& tail:function.tailCalls)out<<"tail "<<tail.branch<<' '<<tail.target<<'\n';for(const auto& jump:function.resolvedIndirectJumps){out<<"jump "<<jump.branch<<' '<<jump.table<<'\n';for(const auto& arm:jump.switchCases)out<<arm.value<<':'<<arm.target<<' ';out<<'\n';}out<<session.irTextFor(function.entry)<<session.decompiledCFor(function.entry)<<session.cfgTextFor(function.entry);}for(const auto& row:session.programListing(0x1000,512))out<<row.address<<' '<<row.size<<' '<<unsigned(row.flow)<<' '<<row.target<<' '<<row.text<<'\n';for(Address address:{Address{0x10a0},Address{0x10b0},Address{0x1140},Address{0x1160},Address{0x2000}})out<<session.referencesText(address);return out.str();}
 std::string hex32(u32 value){std::ostringstream out;for(unsigned n=0;n<4;++n){if(n)out<<' ';out<<std::hex<<std::setw(2)<<std::setfill('0')<<((value>>(n*8))&255);}return out.str();}
+void compareToFresh(Session& session, const std::string& source, const std::string& project,
+                    const std::string& label) {
+    okay(testing::matchesFreshAnalysis(session, project,
+        [&](Session& oracle) { return oracle.openPath(source); }, snapshot), label + " vs fresh full analysis");
+}
+
+void checkReopen(const std::string& source, const std::string& project, const std::string& expected,
+                 const std::string& mode, const std::string& label, const std::string& diagnostic = {}) {
+    const auto authoritative = contents(project);
+    require(!authoritative.empty(), label + " has a persisted Program");
+    Session reopened;
+    open(reopened, source, project);
+    require(testing::hasAnalysisMode(reopened, mode), label + " uses mode=" + mode + "\n" + reopened.analysisStatusText());
+    if (!diagnostic.empty()) {
+        require(reopened.analysisStatusText().find(diagnostic) != std::string::npos,
+                label + " reports why cache was rejected\n" + reopened.analysisStatusText());
+    }
+    require(snapshot(reopened) == expected, label + " keeps exact tail semantics, callers and views");
+    compareToFresh(reopened, source, project, label);
+    require(contents(project) == authoritative, label + " does not rewrite the authoritative Program");
+}
+
 void typedAndLifecycle(){
     TemporaryDirectory temporary;const auto source=temporary.file("tail.elf"),project=temporary.file("program.mint");const auto input=fixture();write(source,input.bytes);Session session;open(session,source,project);require(session.decompiledCFor(0x1000).find("op_tail_transfer")!=std::string::npos,"unknown ABI contract stays an explicit terminal transfer");prototypes(session);const auto typed=session.decompiledCFor(0x1000);require(typed.find("op_tail_transfer")==std::string::npos&&typed.find("tail_one")!=std::string::npos&&typed.find("tail_two")!=std::string::npos,"compatible authoritative scalar contracts render typed tail returns");
     for(const auto* name:{"tail_one","tail_two"}){const auto at=typed.find(name),end=typed.find(';',at);require(typed.substr(at,end-at).find("value")!=std::string::npos&&typed.substr(at,end-at).find("selector")==std::string::npos,"tail argument follows the real RSI-to-RDI assignment rather than incoming selector");}
     Lifter lifter;IrFunction ir;okay(lifter.open(Arch::kX86_64),"open typed tail lifter");okay(lifter.liftFunction(dispatcher(session.analyzer()),session.image().memory(),&ir),"lift typed tail fixture");DecompileResult decompiled;okay(decompileIr(ir,&decompiled,[&](Address address){return session.displayNameAt(address);},{},{},[&](Address address){return session.prototypeAt(address);},[&](const std::string& expression,DataTypeLayout* layout){return session.program().types().resolve(expression,layout);}),"decompile with explicit SSA tail operands");for(const auto& tail:decompiled.ssa.insns)if(tail.op==MintOp::kTailCall){require(tail.tailInputs.size()==1&&tail.tailInputs[0]<decompiled.ssa.values.size(),"typed tail arguments are real verified SSA uses");const auto& argument=decompiled.ssa.values[tail.tailInputs[0]];require(argument.def==SsaDef::kEntry&&argument.storage.offset==x86::kRsi,"tail SSA use names the forwarded entry value");}
     okay(session.defineType("Pair=struct{first:u64;second:u64}"),"define aggregate ABI negative fixture");
     for(const auto* declaration:{"uint32_t(uint64_t value)","f64(uint64_t value)","uint64_t(f64 value)","uint64_t(Pair value)","Pair(uint64_t value)","uint64_t(uint64_t value, ...)","uint64_t(uint64_t a,uint64_t b,uint64_t c,uint64_t d,uint64_t e,uint64_t f,uint64_t g)","@windows64 uint64_t(uint64_t value)"}){okay(session.editAnnotation(0x1140,"prototype",declaration),"set unsupported tail ABI contract");require(session.decompiledCFor(0x1000).find("op_tail_transfer")!=std::string::npos,"unsupported or incompatible declaration never fabricates a typed tail return");}
-    prototypes(session,true);const auto voidSource=session.decompiledCFor(0x1000);require(voidSource.find("op_tail_transfer")==std::string::npos&&voidSource.find("tail_one")!=std::string::npos&&voidSource.find("return;")!=std::string::npos,"matching void contracts emit a call followed by terminal void return");prototypes(session);const auto initial=snapshot(session);unsigned serial=0;
-    auto fresh=[&](Session& current,const std::string& label){const auto overlay=temporary.file("oracle-"+std::to_string(serial++)+".mint");write(overlay,contents(project));Session oracle;okay(oracle.openPath(source),"open full tail oracle");okay(oracle.attachProject(overlay),"attach independent oracle Program");okay(oracle.reanalyze(),"force full tail oracle");require(snapshot(current)==snapshot(oracle),label+" matches full analysis for tail/CFG/IR/C/refs/callers");};
+    prototypes(session,true);const auto voidSource=session.decompiledCFor(0x1000);require(voidSource.find("op_tail_transfer")==std::string::npos&&voidSource.find("tail_one")!=std::string::npos&&voidSource.find("return;")!=std::string::npos,"matching void contracts emit a call followed by terminal void return");prototypes(session);
+    const auto initial = snapshot(session);
+    auto fresh = [&](const std::string& label) { compareToFresh(session, source, project, label); };
     okay(session.editAnnotation(0x1140, "prototype", "uint32_t(uint64_t value)"),
          "change callee to an incompatible return type");
     const auto incompatible = snapshot(session);
     require(incompatible != initial && session.decompiledCFor(0x1000).find("op_tail_transfer") != std::string::npos,
             "prototype mutation invalidates typed tail return without dropping the terminal transfer");
-    fresh(session, "incompatible prototype");
+    fresh("incompatible prototype");
     okay(session.undoEdit(false), "undo incompatible prototype");
     require(snapshot(session) == initial, "prototype undo restores the typed tail return");
-    fresh(session, "prototype undo");
+    fresh("prototype undo");
     okay(session.undoEdit(true), "redo incompatible prototype");
     require(snapshot(session) == incompatible, "prototype redo restores the conservative output");
-    fresh(session, "prototype redo");
-    {
-        Session restored;
-        open(restored, source, project);
-        require(snapshot(restored) == incompatible, "cache restore keeps the current prototype outcome");
-        fresh(restored, "reopened prototype");
-    }
+    fresh("prototype redo");
+    checkReopen(source, project, incompatible, "restored", "incompatible prototype reopen");
     okay(session.undoEdit(false), "restore compatible contract before code edits");
-    okay(session.editAnnotation(input.tailOperand,"patch",hex32(static_cast<u32>(Address{0x1160}-(input.tail+5)))),"retarget verified tail exit");const auto patched=snapshot(session);require(patched!=initial&&dispatcher(session.analyzer()).callees==std::vector<Address>({0x1160}),"tail-target patch updates call graph and typed output");fresh(session,"tail target patch");okay(session.undoEdit(false),"undo tail target");require(snapshot(session)==initial,"tail-target undo restores exact derived views");fresh(session,"tail target undo");okay(session.undoEdit(true),"redo tail target");require(snapshot(session)==patched,"tail-target redo restores exact target binding");fresh(session,"tail target redo");{Session restored;open(restored,source,project);require(restored.analysisStatusText().find("mode=restored")!=std::string::npos&&snapshot(restored)==patched,"cache reproof restores verified tail exits and typed operands");fresh(restored,"reopened tail target");}
-    okay(session.editAnnotation(0x10a0,"patch","48 83 ec 08"),"invalidate tail entry stack by replacing reserved NOP");const auto invalid=snapshot(session);require(dispatcher(session.analyzer()).incomplete&&!hasSwitch(dispatcher(session.analyzer())),"frame-invalidating patch removes previously verified switch/tail proof");fresh(session,"invalid stack patch");okay(session.undoEdit(false),"undo invalid stack patch");require(snapshot(session)==patched,"stack undo re-proves valid tail exits");fresh(session,"invalid stack undo");okay(session.undoEdit(true),"redo invalid stack patch");require(snapshot(session)==invalid,"stack redo retains conservative incomplete result");fresh(session,"invalid stack redo");
+
+    const auto newTarget = hex32(static_cast<u32>(Address{0x1160} - (input.tail + 5)));
+    okay(session.editAnnotation(input.tailOperand, "patch", newTarget), "retarget verified tail exit");
+    const auto patched = snapshot(session);
+    require(patched != initial && dispatcher(session.analyzer()).callees == std::vector<Address>({0x1160}),
+            "tail-target patch updates call graph and typed output");
+    fresh("tail target patch");
+    okay(session.undoEdit(false), "undo tail target");
+    require(snapshot(session) == initial, "tail-target undo restores exact derived views");
+    fresh("tail target undo");
+    okay(session.undoEdit(true), "redo tail target");
+    require(snapshot(session) == patched, "tail-target redo restores exact target binding");
+    fresh("tail target redo");
+    checkReopen(source, project, patched, "restored", "tail target reopen");
+    okay(testing::corruptDerivedCache(project), "corrupt the proven tail cache");
+    checkReopen(source, project, patched, "full", "proven tail recovery", "checksum mismatch");
+
+    okay(session.editAnnotation(0x10a0, "patch", "48 83 ec 08"),
+         "invalidate the tail entry stack by replacing the reserved NOP");
+    const auto invalid = snapshot(session);
+    const auto& function = dispatcher(session.analyzer());
+    require(function.incomplete && !hasSwitch(function),
+            "frame-invalidating patch removes previously verified switch semantics");
+    require(std::none_of(function.tailCalls.begin(), function.tailCalls.end(),
+                         [&](const auto& tail) { return tail.branch == input.tail; }),
+            "the changed exit loses its verified tail binding");
+    fresh("invalid stack patch");
+    okay(session.undoEdit(false), "undo invalid stack patch");
+    require(snapshot(session) == patched, "stack undo re-proves valid tail exits");
+    fresh("invalid stack undo");
+    okay(session.undoEdit(true), "redo invalid stack patch");
+    require(snapshot(session) == invalid, "stack redo retains conservative incomplete result");
+    fresh("invalid stack redo");
+    // Cached case seeds still require discovery when one path has an unproved frame.
+    checkReopen(source, project, invalid, "full", "invalid tail frame reopen",
+                "cached switch cases need further discovery");
+    okay(testing::corruptDerivedCache(project), "corrupt the rejected-tail cache");
+    checkReopen(source, project, invalid, "full", "invalid tail frame recovery", "checksum mismatch");
 }
 void argumentPhiAndTampering(){
     TemporaryDirectory temporary;auto input=fixture();auto& bytes=input.bytes;

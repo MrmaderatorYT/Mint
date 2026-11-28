@@ -91,7 +91,7 @@ Status Session::analyze() {
     }
     if (analyzed_) return Status::success();
     if (cancel_.load(std::memory_order_relaxed)) {
-        return Status::error(ErrorCode::kInternalError, "analysis cancelled");
+        return Status::error(ErrorCode::kCancelled, "analysis cancelled");
     }
     progress_.store(10, std::memory_order_relaxed);
 
@@ -111,6 +111,8 @@ Status Session::analyze() {
     }
     // Existing detectors remain available for ELF, but never drive the program model.
     if (image_.format()==ImageFormat::kElf64) detectorFindings_ = runDetectors(image_);
+    if (cancel_.load(std::memory_order_relaxed))
+        return Status::error(ErrorCode::kCancelled, "analysis cancelled");
     program_.bindMemory(image_.memory());
     analyzed_ = true;
     if(!restored) saveAnalysisCache();
@@ -204,7 +206,11 @@ DecompileReport Session::decompileReportFor(Address address) {
         report.noteFailure(status, stage);
         return report;
     };
-    if (!analyzed_) return failure(Status::error(ErrorCode::kNotFound, "analysis is unavailable"), "Decompilation");
+    if (!analyzed_) {
+        if (cancel_.load(std::memory_order_relaxed))
+            return failure(Status::error(ErrorCode::kCancelled, "analysis cancelled"), "Decompilation");
+        return failure(Status::error(ErrorCode::kNotFound, "analysis is unavailable"), "Decompilation");
+    }
     notifyPluginEvent(MINT_EVENT_BEFORE_DECOMPILE,address,"requested pseudo-C");
 
     if (isDexLike()) {

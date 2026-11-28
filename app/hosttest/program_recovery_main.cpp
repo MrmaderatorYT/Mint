@@ -92,24 +92,89 @@ ssize_t failAfterPartialWrite(int fd, const void* data, size_t size) {
     return -1;
 }
 
+int failTemporarySync(int) {
+    errno = ENOSPC;
+    return -1;
+}
+
+int failPublication(const char*, const char*) {
+    errno = ENOSPC;
+    return -1;
+}
+
+enum class FailurePoint { Write, Sync, Rename };
+
 template <typename Operation>
-void outOfSpace(Session& session, const Fixture& fixture, Operation operation) {
+void outOfSpace(Session& session, const Fixture& fixture, Operation operation,
+                FailurePoint point = FailurePoint::Write) {
     const auto bytes = Fixture::read(fixture.program);
     const auto before = snapshot(session);
     const auto revision = session.program().revision();
     const auto patch = session.annotation(kEntry, "patch");
     writeAttempts = 0;
-    testing::setProgramSaveHooks({failAfterPartialWrite, nullptr});
+    testing::ProgramSaveHooks hooks;
+    const char* stage = nullptr;
+    switch (point) {
+        case FailurePoint::Write: hooks.write = failAfterPartialWrite; stage = "write temporary file"; break;
+        case FailurePoint::Sync: hooks.syncTemporary = failTemporarySync; stage = "sync temporary file"; break;
+        case FailurePoint::Rename: hooks.rename = failPublication; stage = "publish project"; break;
+    }
+    testing::setProgramSaveHooks(hooks);
     const auto status = operation();
     testing::setProgramSaveHooks({});
-    require(status.code() == ErrorCode::kIoError && writeAttempts == 2 &&
-            status.message().find("write temporary file") != std::string::npos &&
+    require(status.code() == ErrorCode::kIoError && (point != FailurePoint::Write || writeAttempts == 2) &&
+            status.message().find(stage) != std::string::npos &&
             status.message().find(std::strerror(ENOSPC)) != std::string::npos,
-            "partial write followed by ENOSPC gives an actionable failure");
+            std::string("ENOSPC gives an actionable failure at ") + stage);
     require(Fixture::read(fixture.program) == bytes && fixture.pendingTransactions() == 0,
             "ENOSPC leaves the committed file intact and removes the partial temporary file");
     require(session.program().revision() == revision && session.annotation(kEntry, "patch") == patch &&
             snapshot(session) == before, "ENOSPC leaves the live model and all derived views intact");
+}
+
+void reopenWithWriteFailure(const Fixture& fixture, Session& session) {
+    const auto committed = Fixture::read(fixture.program);
+    const auto pending = fixture.pendingTransactions();
+    writeAttempts = 0;
+    testing::setProgramSaveHooks({failAfterPartialWrite});
+    fixture.attach(session, fixture.program);
+    testing::setProgramSaveHooks({});
+    require(writeAttempts == 0 && Fixture::read(fixture.program) == committed &&
+            fixture.pendingTransactions() == pending,
+            "opening the current bound Program never attempts an authoritative write");
+}
+
+void bindingAndUpgradeStillWrite(const Fixture& fixture, const Snapshot& patched) {
+    const auto legacy = fixture.directory / "legacy.mint";
+    std::filesystem::copy_file(fixture.program, legacy);
+    std::fstream file(legacy, std::ios::binary | std::ios::in | std::ios::out);
+    file.write("MINTPR03", 8);
+    file.close();
+    require(!file.fail(), "prepare a test-owned older Program header");
+    const auto legacyBytes = Fixture::read(legacy);
+    const auto unbound = fixture.directory / "unbound.mint";
+    Fixture::write(unbound, {'M','I','N','T','P','R','0','4',0,0,0,0});
+    const auto unboundBytes = Fixture::read(unbound);
+
+    Session initial;
+    okay(initial.openRawPath(fixture.source.string(), Arch::kAArch64, kEntry, kEntry), "open binding input");
+    for (const auto& filePath : {legacy, unbound, fixture.directory / "new.mint"}) {
+        writeAttempts = 0;
+        testing::setProgramSaveHooks({failAfterPartialWrite});
+        const auto status = initial.attachProject(filePath.string());
+        testing::setProgramSaveHooks({});
+        require(status.code() == ErrorCode::kIoError && writeAttempts == 2,
+                "legacy migration and first source binding still require a durable write");
+    }
+    require(Fixture::read(legacy) == legacyBytes && Fixture::read(unbound) == unboundBytes &&
+            !std::filesystem::exists(fixture.directory / "new.mint"),
+            "failed upgrades and bindings leave all previous Program files intact");
+    fixture.attach(initial, legacy);
+    require(Fixture::read(legacy).rfind("MINTPR04", 0) == 0 && snapshot(initial) == patched,
+            "retrying a legacy upgrade preserves the effective Program and writes the current format");
+    fixture.attach(initial, unbound);
+    require(Fixture::read(unbound) != unboundBytes && !initial.program().get(0, "source").empty(),
+            "retrying an unbound Program establishes its source identity");
 }
 
 void abruptExit() {
@@ -117,18 +182,28 @@ void abruptExit() {
     _exit(3);
 }
 
-void runKilledChild(const Fixture& fixture, bool committed) {
+enum class DeathPoint { BeforeRename, AfterRename, AfterAcknowledgement };
+
+void runKilledChild(const Fixture& fixture, DeathPoint point) {
     const auto child = fork();
     require(child >= 0, "fork an owned test worker");
     if (child == 0) {
         Session session;
         fixture.attach(session, fixture.program);
-        if (committed) {
+        if (point == DeathPoint::AfterAcknowledgement) {
             okay(session.editAnnotation(kEntry, "bookmark", "acknowledged before death"), "commit child bookmark");
             abruptExit();
         }
-        testing::setProgramSaveHooks({nullptr, abruptExit});
-        session.editAnnotation(kEntry, "patch", kUncommitted);
+        testing::ProgramSaveHooks hooks;
+        if (point == DeathPoint::BeforeRename) {
+            hooks.beforeRename = abruptExit;
+            testing::setProgramSaveHooks(hooks);
+            session.editAnnotation(kEntry, "patch", kUncommitted);
+        } else {
+            hooks.afterRename = abruptExit;
+            testing::setProgramSaveHooks(hooks);
+            session.editAnnotation(kEntry, "bookmark", "published before acknowledgement");
+        }
         _exit(4);
     }
     int status = 0;
@@ -152,29 +227,42 @@ int main() {
     require(patched.ir.find("9:8") != std::string::npos, "committed patch changes effective instruction");
 
     outOfSpace(session, fixture, [&] { return session.editAnnotation(kEntry, "patch", kUncommitted); });
+    outOfSpace(session, fixture, [&] { return session.editAnnotation(kEntry, "patch", kUncommitted); }, FailurePoint::Sync);
+    outOfSpace(session, fixture, [&] { return session.editAnnotation(kEntry, "patch", kUncommitted); }, FailurePoint::Rename);
     outOfSpace(session, fixture, [&] { return session.undoEdit(false); });
     okay(session.undoEdit(false), "retry undo after ENOSPC");
     require(session.annotation(kEntry, "patch").empty(), "retry undo removes the last successful patch");
     require(Fixture::read(fixture.source) == originalSource &&
             session.irTextFor(kEntry).find("7:8") != std::string::npos,
             "undo restores the original effective bytes");
+    outOfSpace(session, fixture, [&] { return session.editAnnotation(kEntry, "patch", kUncommitted); }, FailurePoint::Rename);
     outOfSpace(session, fixture, [&] { return session.undoEdit(true); });
     okay(session.undoEdit(true), "retry redo after ENOSPC");
-    require(snapshot(session) == patched, "failed redo leaves history available for retry");
+    require(snapshot(session) == patched, "a failed divergent edit and failed redo both leave the redo available");
+    bindingAndUpgradeStillWrite(fixture, patched);
 
     const auto committedBytes = Fixture::read(fixture.program);
-    runKilledChild(fixture, false);
+    runKilledChild(fixture, DeathPoint::BeforeRename);
     require(fixture.pendingTransactions() == 1 && Fixture::read(fixture.program) == committedBytes,
             "death after syncing the temporary file leaves only an unpublished transaction");
     Session recovered;
-    fixture.attach(recovered, fixture.program);
-    require(recovered.annotation(kEntry, "patch") == kPatched && snapshot(recovered) == patched,
-            "reopen ignores the uncommitted temporary patch");
-    runKilledChild(fixture, true);
+    reopenWithWriteFailure(fixture, recovered);
+    require(recovered.analysisStatusText().find("mode=restored") != std::string::npos &&
+            recovered.annotation(kEntry, "patch") == kPatched && snapshot(recovered) == patched,
+            "warm reopen during ENOSPC ignores the uncommitted temporary patch");
+    runKilledChild(fixture, DeathPoint::AfterRename);
+    Session published;
+    reopenWithWriteFailure(fixture, published);
+    require(fixture.pendingTransactions() == 1 &&
+            published.annotation(kEntry, "bookmark") == "published before acknowledgement" &&
+            published.annotation(kEntry, "patch") == kPatched,
+            "process death just after rename leaves a complete, published transaction");
+
+    runKilledChild(fixture, DeathPoint::AfterAcknowledgement);
     Fixture::write(fixture.cache, {0, 1, 2, 3});
 
     Session afterDeath;
-    fixture.attach(afterDeath, fixture.program);
+    reopenWithWriteFailure(fixture, afterDeath);
     require(afterDeath.analysisStatusText().find("mode=full") != std::string::npos,
             "corrupted derived cache is rebuilt by full discovery");
     require(afterDeath.annotation(kEntry, "bookmark") == "acknowledged before death" &&
@@ -188,6 +276,14 @@ int main() {
     Session oracle;
     fixture.attach(oracle, oracleProgram, true);
     require(snapshot(afterDeath) == snapshot(oracle), "recovered Program equals independent full analysis");
+
+    require(std::filesystem::remove(fixture.cache) && std::filesystem::create_directory(fixture.cache),
+            "block publication at the test-owned cache path");
+    Session withoutCache;
+    reopenWithWriteFailure(fixture, withoutCache);
+    require(withoutCache.analysisStatusText().find("mode=full") != std::string::npos &&
+            withoutCache.analysisStatusText().find("derived cache could not be saved") != std::string::npos &&
+            snapshot(withoutCache) == snapshot(oracle), "failed cache publication cannot hide or alter the authoritative state");
     require(Fixture::read(fixture.source) == originalSource, "recovery never rewrites the imported binary");
-    std::cout << "Program recovery passed: ENOSPC, failed undo/redo, pre/post-commit SIGKILL, corrupt cache\n";
+    std::cout << "Program recovery passed: ENOSPC write/sync/rename, failed edit/undo/redo, SIGKILL at publication, corrupt and unwritable cache\n";
 }

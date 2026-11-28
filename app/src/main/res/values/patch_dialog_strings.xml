@@ -23,6 +23,8 @@
     <string name="patch_status_partial">partial</string>
     <string name="patch_status_unsupported">unsupported</string>
     <string name="patch_status_budget">budget exhausted</string>
+    <string name="patch_status_error">error</string>
+    <string name="patch_status_cancelled">cancelled</string>
     <string name="patch_comparison_unavailable">Comparison unavailable or capture limit reached.</string>
     <string name="patch_no_changes">No changes.</string>
     <string name="patch_diff_legend">− Before  ·  + After</string>

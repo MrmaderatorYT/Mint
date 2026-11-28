@@ -19,6 +19,7 @@ enum class ErrorCode {
     kUnsupported,      ///< Well-formed, but not something we handle (e.g. 32-bit ELF).
     kTooLarge,         ///< Refused on resource grounds rather than correctness.
     kInternalError,
+    kCancelled,        ///< The caller requested a cooperative stop.
 };
 
 const char* errorCodeName(ErrorCode code);

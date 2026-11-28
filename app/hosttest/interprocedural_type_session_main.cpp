@@ -62,6 +62,7 @@ void propagatedLayouts(bool transitive){
     const Address leafEntry=0x1000+4*leaf;
     Session session;open(session,files);
     auto text=session.decompiledCFor(0x1000);shape(text,false);memoryContract(text,transitive);
+    compareFresh(session, files, "initial inferred layout");
     require(session.editAnnotation(leafEntry,"patch","02 0c 40 f9").ok(),"move callee field access from +8 to +24");
     text=session.decompiledCFor(0x1000);shape(text,true);memoryContract(text,transitive);
     compareFresh(session, files, "callee field patch");
@@ -70,6 +71,7 @@ void propagatedLayouts(bool transitive){
     require(session.undoEdit(true).ok(),"redo callee field patch");shape(session.decompiledCFor(0x1000),true);
     compareFresh(session, files, "field patch redo");
     Session reopened;open(reopened,files);shape(reopened.decompiledCFor(0x1000),true);
+    require(testing::hasAnalysisMode(reopened, "restored"), "reopen inferred layout from the derived cache");
     compareFresh(reopened, files, "reopened patched type evidence");
 
     require(reopened.editAnnotation(leafEntry,"prototype","uint64_t(uint64_t scalar)").ok(),"declare authoritative scalar callee input");
@@ -80,6 +82,7 @@ void propagatedLayouts(bool transitive){
     require(reopened.undoEdit(true).ok(),"redo callee scalar declaration");noImportedShape(reopened.decompiledCFor(0x1000),"redo reinstates authoritative callee suppression");
     compareFresh(reopened, files, "callee prototype redo");
     Session declared;open(declared,files);noImportedShape(declared.decompiledCFor(0x1000),"callee declaration and inference suppression survive reopen");
+    require(testing::hasAnalysisMode(declared, "restored"), "reuse code discovery with the new callee declaration");
     compareFresh(declared, files, "reopened callee prototype");
 
     require(reopened.undoEdit(false).ok(),"restore inferred callee input before caller override");
@@ -87,12 +90,16 @@ void propagatedLayouts(bool transitive){
     text=reopened.decompiledCFor(0x1000);
     require(text.find("_start(uint64_t scalar, uint64_t value)")!=std::string::npos,"authoritative caller signature wins over inferred pointer kind");
     noImportedShape(text,"authoritative caller parameters suppress imported field hypotheses");
+    compareFresh(reopened, files, "caller prototype edit");
     require(reopened.undoEdit(false).ok(),"undo caller declaration");shape(reopened.decompiledCFor(0x1000),true);
+    compareFresh(reopened, files, "caller prototype undo");
     require(reopened.undoEdit(true).ok(),"redo caller declaration");noImportedShape(reopened.decompiledCFor(0x1000),"redo restores authoritative caller field suppression");
+    compareFresh(reopened, files, "caller prototype redo");
     Session callerDeclared;open(callerDeclared,files);
     text=callerDeclared.decompiledCFor(0x1000);
     require(text.find("_start(uint64_t scalar, uint64_t value)")!=std::string::npos,"caller signature survives persistent reopening");
     noImportedShape(text,"caller declaration keeps imported fields suppressed after reopen");
+    compareFresh(callerDeclared, files, "reopened caller prototype");
 
     require(callerDeclared.defineType("Packet=struct{head:u64;middle:u64;tail:u64;last:u64}").ok(),"define authoritative named layout");
     require(callerDeclared.editAnnotation(0x1000,"prototype","uint64_t(Packet* packet, uint64_t value)").ok(),"bind caller to authoritative named pointer");
@@ -100,6 +107,32 @@ void propagatedLayouts(bool transitive){
     require(text.find("Packet* packet")!=std::string::npos&&text.find("->head")!=std::string::npos,"named authoritative fields retain their existing decompiler rendering");
     noImportedShape(text,"inferred field names do not replace authoritative named layout");
     compareFresh(callerDeclared, files, "user type and caller prototype edit");
+    require(callerDeclared.undoEdit(false).ok(), "undo the named pointer binding");
+    require(callerDeclared.decompiledCFor(0x1000).find("_start(uint64_t scalar, uint64_t value)") != std::string::npos,
+            "undo of the named pointer binding restores the preceding scalar prototype");
+    compareFresh(callerDeclared, files, "named pointer prototype undo");
+    require(callerDeclared.undoEdit(true).ok(), "redo the named pointer binding");
+    require(callerDeclared.decompiledCFor(0x1000).find("->head") != std::string::npos,
+            "redo restores access through the authoritative named field");
+    compareFresh(callerDeclared, files, "named pointer prototype redo");
+
+    require(testing::corruptDerivedCache(files.project).ok(), "corrupt test-owned type derived cache");
+    Session rebuilt;
+    open(rebuilt, files);
+    require(testing::hasAnalysisMode(rebuilt, "full"), "corrupt type cache falls back to full discovery");
+    require(rebuilt.annotation(leafEntry, "patch") == "02 0c 40 f9" &&
+            rebuilt.annotation(0x1000, "prototype") == "uint64_t(Packet* packet, uint64_t value)" &&
+            !rebuilt.program().types().declarationFor("Packet").empty(),
+            "cache repair preserves the confirmed code patch, prototype, and layout definition");
+    text = rebuilt.decompiledCFor(0x1000);
+    require(text.find("Packet* packet") != std::string::npos && text.find("->head") != std::string::npos,
+            "rebuilt type evidence retains the named field");
+    noImportedShape(text, "cache repair does not reintroduce stale inferred layouts");
+    compareFresh(rebuilt, files, "corrupt type cache recovery");
+    Session repaired;
+    open(repaired, files);
+    require(testing::hasAnalysisMode(repaired, "restored"), "repaired type cache is reusable");
+    compareFresh(repaired, files, "restored derived cache after type cache repair");
 }
 }
 int main(){propagatedLayouts(false);propagatedLayouts(true);std::cout<<checks<<" interprocedural type Session checks passed\n";}

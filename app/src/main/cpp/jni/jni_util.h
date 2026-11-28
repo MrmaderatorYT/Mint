@@ -75,5 +75,6 @@ inline std::string fromJava(JNIEnv* env, jstring value) {
 void throwIllegalState(JNIEnv* env, const std::string& message);
 void throwIllegalArgument(JNIEnv* env, const std::string& message);
 void throwIoException(JNIEnv* env, const std::string& message);
+void throwCancellation(JNIEnv* env, const std::string& message);
 
 }  // namespace mint::jni

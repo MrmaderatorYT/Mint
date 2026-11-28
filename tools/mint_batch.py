@@ -19,6 +19,10 @@ from mint_batch_checkpoint import Checkpoint, digest, attempt_id
 
 READ_COMMANDS = ("json", "summary", "functions", "types", "types-c", "prototypes", "signatures", "cxx", "dwarf")
 ADDRESS_COMMANDS = ("listing", "decompile", "ir", "cfg", "refs", "provenance", "abi", "locals", "source")
+DECOMPILE_USABLE = frozenset({"complete", "partial"})
+DECOMPILE_FAILED = frozenset({"error", "unsupported", "budget-exhausted"})
+DECOMPILE_STATUSES = DECOMPILE_USABLE | DECOMPILE_FAILED | {"cancelled"}
+DECOMPILE_HEADER = re.compile(rb"/\* Decompilation status: ([a-z-]+) \*/\r?\n")
 
 
 def address(value):
@@ -54,6 +58,31 @@ def stop_process(process):
     elif process.poll() is None:
         process.kill()
     process.wait()
+
+
+def classify_decompilation(result, output):
+    """Return whether a non-usable but complete diagnostic can be published."""
+    with output.open("rb") as stream:
+        match = DECOMPILE_HEADER.fullmatch(stream.readline(96))
+        status = match[1].decode("ascii") if match and stream.read(1) else None
+    if status not in DECOMPILE_STATUSES:
+        if result["exit_code"] == 0:
+            result.update(status="failed", error="missing or invalid decompilation report")
+        return False
+
+    result["analysis_status"] = status
+    code = result["exit_code"]
+    if status in DECOMPILE_USABLE and code == 0:
+        return False
+    # Older Mint executables exit zero even when the report declares failure.
+    if status in DECOMPILE_FAILED and code in (0, 1):
+        result["status"] = "failed"
+        return True
+    if status == "cancelled" and code == 130:
+        result["status"] = "cancelled"
+        return True
+    result.update(status="failed", error=f"inconsistent decompilation status {status!r} and exit code {code}")
+    return False
 
 
 def main(argv=None):
@@ -136,18 +165,20 @@ def main(argv=None):
 
     def analyze(item):
         index, source = item
+        result = dict(input=str(source), output=None, stderr=None, status="failed", exit_code=None)
+        if args.command == "decompile":
+            result["analysis_status"] = None
         try:
             source = str(source.resolve())
             if "\0" in source:
                 raise ValueError("input path contains a NUL byte")
         except (OSError, RuntimeError, ValueError) as error:
-            return dict(input=str(source), output=None, stderr=None, status="failed",
-                        exit_code=None, elapsed_seconds=0, error=str(error))
+            result.update(elapsed_seconds=0, error=str(error))
+            return result
         identity = f"{index:06d}-" + hashlib.sha256(os.fsencode(source)).hexdigest()[:16] + "-" + attempt_id()
         output_name = identity + (".json" if args.command == "json" else ".txt")
         error_name = identity + ".stderr.txt"
-        result = dict(input=source, output=output_name, stderr=error_name,
-                      status="cancelled", exit_code=None)
+        result.update(input=source, output=output_name, stderr=error_name, status="cancelled")
         if cancelled.is_set():
             result.update(output=None, stderr=None, elapsed_seconds=0)
             return result
@@ -216,8 +247,13 @@ def main(argv=None):
                 elif exceeded.is_set():
                     result["status"] = "output_limit"
                 result["exit_code"] = process.returncode
-            if result["status"] == "ok":
-                temporary.replace(args.output / output_name)
+            diagnostic = (args.command == "decompile" and not stream_errors
+                          and result["status"] in ("ok", "failed")
+                          and result["exit_code"] >= 0 and classify_decompilation(result, temporary))
+            if diagnostic:
+                result["output"] = identity + ".diagnostic.txt"
+            if result["status"] == "ok" or diagnostic:
+                temporary.replace(args.output / result["output"])
             else:
                 # Failed/truncated output must never look like a complete JSON.
                 result["output"] = temporary.name
